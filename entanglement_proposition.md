@@ -107,7 +107,7 @@ Let:
 The total loss can be written as:
 
 $$
-L = L_{rgb} * \lambda_{\alpha-bin} L_{\alpha-bin} * \lambda_{opaque} L_{opaque} * \lambda_{\tau} L_{\tau} * \lambda_{tv} L_{med-TV} * \lambda_{cap} L_{med-cap} * \lambda_{hp} L_{med-HP} * \lambda_{rep} L_{site-repulsion} * \lambda_{scale} L_{gauss-scale}
+L = L_{rgb} + \lambda_{\alpha-bin} L_{\alpha-bin} + \lambda_{opaque} L_{opaque} + \lambda_{\tau} L_{\tau} + \lambda_{tv} L_{med-TV} + \lambda_{cap} L_{med-cap} + \lambda_{hp} L_{med-HP} + \lambda_{rep} L_{site-repulsion} + \lambda_{scale} L_{gauss-scale}
 $$
 
 Not every term needs to be enabled from the beginning. Some terms should be activated only after warm-up.
@@ -127,7 +127,7 @@ $$
 Optionally, this can be combined with DSSIM or perceptual losses:
 
 $$
-L_{rgb} = (1 - \lambda_{ssim}) L_1 * \lambda_{ssim} L_{DSSIM}
+L_{rgb} = (1 - \lambda_{ssim}) L_1 + \lambda_{ssim} L_{DSSIM}
 $$
 
 ### Purpose
@@ -581,13 +581,13 @@ It should not necessarily be required for real data, but it is very useful for d
 A practical initial version could be:
 
 $$
-L = L_{rgb} * \lambda_{\alpha-bin} L_{\alpha-bin} * \lambda_{opaque} L_{opaque} * \lambda_{\tau} L_{\tau} * \lambda_{tv} L_{med-TV} * \lambda_{cap} L_{med-cap} * \lambda_{hp} L_{med-HP} * \lambda_{rep} L_{site-repulsion} * \lambda_{scale} L_{gauss-scale}
+L = L_{rgb} + \lambda_{\alpha-bin} L_{\alpha-bin} + \lambda_{opaque} L_{opaque} + \lambda_{\tau} L_{\tau} + \lambda_{tv} L_{med-TV} + \lambda_{cap} L_{med-cap} + \lambda_{hp} L_{med-HP} + \lambda_{rep} L_{site-repulsion} + \lambda_{scale} L_{gauss-scale}
 $$
 
 Optional synthetic terms:
 
 $$
-+ \lambda_{surf-clean} L_{surf-clean} + \lambda_T L_T + \lambda_{med} L_{med}
+\lambda_{surf-clean} L_{surf-clean} + \lambda_T L_T + \lambda_{med} L_{med}
 $$
 
 The exact weights should be scheduled during training.
