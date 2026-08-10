@@ -1,0 +1,32 @@
+.vscode
+/build*/
+/dist/
+/data
+/radfoam/
+/*output*
+
+*.egg-info
+__pycache__
+/*nsight
+*.mp4b
+*ipynb
+
+# Python caches
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Native build products
+*.so
+*.o
+*.a
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# Local environments
+.venv/
+venv/
+.env
