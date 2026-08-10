@@ -34,8 +34,24 @@ class RadFoamScene(torch.nn.Module):
         self.num_final_points = args.final_points
         self.activation_scale = args.activation_scale
 
-        if points is not None:
+        init_method = getattr(args, "init_method", "auto")
+        valid_init_methods = {"auto", "pcd", "random", "synthetic_bbox"}
+        if init_method not in valid_init_methods:
+            raise ValueError(
+                f"Unknown init_method={init_method!r}; expected one of "
+                f"{sorted(valid_init_methods)}"
+            )
+
+        if init_method == "synthetic_bbox":
+            self.initialize_synthetic_bbox(args)
+        elif init_method == "random":
+            self.random_initialize()
+        elif points is not None:
             self.initialize_from_pcd(points, points_colors)
+        elif init_method == "pcd":
+            raise ValueError(
+                "init_method='pcd' requires a dataset with a point cloud"
+            )
         else:
             self.random_initialize()
 
@@ -84,6 +100,72 @@ class RadFoamScene(torch.nn.Module):
             self.num_init_points, 1, device=self.device, dtype=self.attr_dtype
         )
         self.density = nn.Parameter(density[perm])
+
+    def initialize_synthetic_bbox(self, args):
+        """Initialize a bounded synthetic scene plus low-density outer cells."""
+        bbox_min = torch.tensor(
+            args.synthetic_bbox_min, dtype=torch.float32, device=self.device
+        )
+        bbox_max = torch.tensor(
+            args.synthetic_bbox_max, dtype=torch.float32, device=self.device
+        )
+        if bbox_min.shape != (3,) or bbox_max.shape != (3,):
+            raise ValueError(
+                "synthetic_bbox_min/max must each contain exactly 3 values"
+            )
+        if not torch.all(bbox_max > bbox_min):
+            raise ValueError(
+                "Every synthetic_bbox_max value must exceed bbox_min"
+            )
+
+        num_outer = int(args.synthetic_outer_points)
+        if not 0 <= num_outer < self.num_init_points:
+            raise ValueError(
+                "synthetic_outer_points must be in [0, init_points)"
+            )
+        num_inner = self.num_init_points - num_outer
+
+        inner_points = torch.rand(
+            num_inner, 3, dtype=torch.float32, device=self.device
+        )
+        inner_points = bbox_min + inner_points * (bbox_max - bbox_min)
+        outer_points = torch.randn(
+            num_outer, 3, dtype=torch.float32, device=self.device
+        ) * float(args.synthetic_outer_scale)
+        primal_points = torch.cat((inner_points, outer_points), dim=0)
+
+        primal_density = torch.cat(
+            (
+                torch.full(
+                    (num_inner, 1),
+                    float(args.synthetic_inner_density),
+                    dtype=self.attr_dtype,
+                    device=self.device,
+                ),
+                torch.full(
+                    (num_outer, 1),
+                    float(args.synthetic_outer_density),
+                    dtype=self.attr_dtype,
+                    device=self.device,
+                ),
+            ),
+            dim=0,
+        )
+
+        print(
+            "Synthetic bbox initialization: "
+            f"{num_inner} inner points in "
+            f"[{bbox_min.tolist()}, {bbox_max.tolist()}], "
+            f"{num_outer} outer points with scale "
+            f"{float(args.synthetic_outer_scale):g}"
+        )
+
+        self.triangulation = radfoam.Triangulation(primal_points)
+        perm = self.triangulation.permutation().to(torch.long)
+        self.primal_points = nn.Parameter(primal_points[perm])
+        self.density = nn.Parameter(primal_density[perm])
+        self.faces = None
+        self.update_triangulation(rebuild=False)
 
     def initialize_from_pcd(self, points, points_colors):
         points = points.to(self.device)

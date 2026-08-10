@@ -60,6 +60,13 @@ class ModelParams(ParamGroup):
         self.init_points = 131_072
         self.final_points = 2_097_152
         self.activation_scale = 1.0
+        self.init_method = "auto"
+        self.synthetic_bbox_min = [-1.5, -1.5, -1.5]
+        self.synthetic_bbox_max = [1.5, 1.5, 1.5]
+        self.synthetic_outer_points = 5_000
+        self.synthetic_outer_scale = 10.0
+        self.synthetic_inner_density = 0.0
+        self.synthetic_outer_density = -0.5
         self.device = "cuda"
         super().__init__(parser, "Setting Model parameters")
 

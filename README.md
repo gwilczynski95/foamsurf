@@ -75,6 +75,18 @@ Training can then be launched with:
 Where `<config_file>` is either one of the supplied files in the `configs` directory or your own.
 You can optionally include the `--viewer` flag to train interactively, or use the `viewer.py` script to view saved checkpoints.
 
+For datasets without a COLMAP point cloud, such as NeRF Synthetic, use the
+bounded synthetic initializer. A ready-to-run Lego configuration is included:
+
+    python train.py -c configs/nerf_synthetic_lego.yaml
+
+The `init_method` option accepts `auto`, `pcd`, `random`, and
+`synthetic_bbox`. `auto` preserves the original behavior: it uses the dataset
+point cloud when one is available and otherwise falls back to random points.
+The synthetic initializer places most points uniformly inside the configured
+bounding box and adds a smaller, low-density outer population to bound the
+Voronoi/Delaunay structure.
+
 ### Evaluation
 
 The standard test metrics can be computed with:
