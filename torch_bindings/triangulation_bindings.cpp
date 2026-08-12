@@ -6,7 +6,7 @@
 #include "delaunay/delaunay.h"
 #include "delaunay/triangulation_ops.h"
 
-namespace radfoam_bindings {
+namespace foamsurf_topology_bindings {
 
 std::unique_ptr<Triangulation> create_triangulation(torch::Tensor points) {
     if (points.size(-1) != 3) {
@@ -248,4 +248,4 @@ void init_triangulation_bindings(py::module &module) {
                py::arg("point_adjacency_offsets"));
 }
 
-} // namespace radfoam_bindings
+} // namespace foamsurf_topology_bindings

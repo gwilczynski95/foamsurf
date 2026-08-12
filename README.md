@@ -1,111 +1,166 @@
 # FoamSurf
 
-FoamSurf is a research project for developing a surface-oriented neural scene
-representation on top of Radiant Foam. The project is currently under active
-development; at this stage, the repository preserves the Radiant Foam baseline
-and will be extended with the FoamSurf method.
+FoamSurf is a research codebase for jointly learning two scene representations:
 
-## Based on Radiant Foam
+- **surface:** oriented 2D Gaussian splats derived from the FlaRe/FALCON base
+  representation;
+- **medium:** a piecewise-constant emission/absorption field carried by 3D
+  Voronoi cells derived from Radiant Foam.
 
-This codebase is based on the official implementation of
-[Radiant Foam: Real-Time Differentiable Ray Tracing](https://radfoam.github.io)
-by Shrisudhan Govindarajan, Daniel Rebain, Kwang Moo Yi, and Andrea
-Tagliasacchi:
+The current milestone is **B0**, an intentionally unregularized baseline. One
+hybrid render is supervised with RGB MSE and a single backward pass updates
+both representations. B0 reveals the natural behaviour and failure modes of
+the coupled model before adding disentanglement losses or adaptive topology.
 
-- Paper: [arXiv:2502.01157](https://arxiv.org/abs/2502.01157)
-- Upstream repository: [theialab/radfoam](https://github.com/theialab/radfoam)
-- Upstream commit used as the initial FoamSurf baseline:
-  `3e7b52cf74e37ab2ab5e695f53570f515f537e3d`
+## What B0 does—and does not do
 
-The original license and attribution are retained in this repository. Until
-FoamSurf-specific components are introduced, the training, evaluation, and
-viewer code below follows the upstream Radiant Foam implementation.
+At every step B0 samples rays from one camera, evaluates directional Gaussian
+appearance, renders both representations in one depth-ordered pass, computes
 
-## Known issues
- - GPU memory usage can be high for scenes with many points. You may need to reduce the `final_points` setting to train outdoor scenes on a 24GB GPU. This will hopefully be improved the future.
- - Best PSNR is acheived with the default softplus density activation, but also it causes an increase in volumetric artifacts. Using exponential activation may result in qualitatively better renders. We are planning to add configuration options for this.
- - The Delaunay triangulation is not perfectly robust, and relies on random perturbation of points and iterative retries to attempt to recover from failures. Training may stall for long periods when this occurs.
+```text
+L_B0 = mean((RGB_hybrid - RGB_target)^2),
+```
 
-## Getting started
+then steps separate Gaussian and medium Adam optimizers from the same backward.
 
-After cloning this repository, initialize its submodules:
+B0 deliberately has no depth-quantile, opacity, density, sparsity, separation,
+or other regularizer. It also has no Gaussian or Voronoi densification/pruning
+yet. The sparse, volume-distributed Voronoi point count stays fixed, although
+Delaunay connectivity is rebuilt periodically as sites move. Adaptive Voronoi
+topology is a required future stage; see
+[the implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
 
-    git submodule update --init --recursive
+## Repository map
 
-You will need a Linux environment with Python 3.10 or newer, as well as version 12.x of the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) and a CUDA-compatible GPU of Compute Capability 7.0 or higher. Please ensure that your installation method for CUDA places `nvcc` in your `PATH`. The following instructions were tested with Ubuntu 24.04.
+```text
+train_b0.py                 B0 command-line entry point
+configs/b0_lego.yaml        full Lego experiment configuration
+foamsurf_data/              Blender and COLMAP cameras, images and rays
+foamsurf_model/             Gaussian model, Voronoi medium and topology owner
+training/                   trainer, loss, optimizers, logging and checkpoints
+evaluation/                 three-mode validation, metrics and images
+renderer/                   standalone `foamsurf` Python/CUDA/OptiX renderer
+tests/b0/                   B0 contract tests
+scripts/smoke_test_b0.py    tiny end-to-end train/resume smoke test
+docs/                       developer walkthrough and implementation roadmap
+```
 
-After installing the CUDA Toolkit and initializing your python virtual environment, install PyTorch 2.3 or newer. For example, with CUDA 12.1:
+The active codebase is FoamSurf. The CUDA Delaunay/AABB topology component is
+adapted from Radiant Foam and exposed only as `foamsurf_topology`; provenance
+is documented in [src/TOPOLOGY_PROVENANCE.md](src/TOPOLOGY_PROVENANCE.md).
 
-    pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --index-url https://download.pytorch.org/whl/cu121
+Read [the repository walkthrough](docs/REPOSITORY_WALKTHROUGH.md) before
+developing the model, and [the renderer documentation](renderer/README.md)
+before changing the CUDA/OptiX path.
 
-From here, there are two options:
+## Build
 
-### Option 1: build with `pip install`
+Requirements are Linux, Python 3.10+, CUDA-enabled PyTorch, a matching CUDA
+toolkit, NVIDIA OptiX headers and a compatible driver. Initialize the retained
+Eigen submodule after cloning with `git submodule update --init --recursive`. In the `foamsurf` conda
+environment run:
 
-Choose this option if you want to run the code as-is, and do not need to make modifications to the CUDA/C++ code.
+```bash
+cd /shared/results/gmwilczn/foamsurf/foamsurf
+CUDA_VISIBLE_DEVICES=1 ./build.sh
+```
 
-Simply run `pip install .` in the repository root. This will build the CUDA kernels and install them along with the python bindings into your python environment. This may take some time to complete, but once finished, you should be able to run the code without further setup.
+`build.sh` installs requirements, builds the local Delaunay binding, builds the
+standalone renderer and verifies the imports. The renderer vendors every
+required source file; it does not search for a neighbouring RadFoam, FALCON or
+`flare_new` checkout at runtime.
 
-Optionally if you want to install with the frozen version of required packages, you can do so by running `pip install -r requirements.txt` before running `pip install .`
+## Train B0 on NeRF Synthetic Lego
 
-### Option 2: build with CMake
+The supplied configuration enables W&B online logging:
 
-Choose this option if you intend to modify the CUDA/C++ code. Using CMake directly will allow you to quickly recompile the kernels as needed.
+```bash
+CUDA_VISIBLE_DEVICES=1 python train_b0.py \
+  --config configs/b0_lego.yaml
+```
 
-First install the Python dependencies:
+Useful one-off overrides are:
 
-    pip install -r requirements.txt
+```bash
+CUDA_VISIBLE_DEVICES=1 python train_b0.py \
+  --config configs/b0_lego.yaml \
+  --source-path /home/gmwilczn/nerf_synth_mipnerf/lego \
+  --output-dir outputs/my-b0-lego \
+  --wandb-mode offline
+```
 
+Use `--wandb-mode disabled` for no W&B process. An offline run can later be
+uploaded with `wandb sync`.
 
-Then, create a `build` directory in the repository root and run the following commands from it to initialize CMake and build the bindings library:
+Resume while preserving both model branches, both Adam optimizers, RNG state,
+elapsed training time and topology revision:
 
-    cmake ..
-    make install
+```bash
+CUDA_VISIBLE_DEVICES=1 python train_b0.py \
+  --config outputs/b0-lego/config.yaml \
+  --resume outputs/b0-lego/checkpoints/last.pt \
+  --iterations 35000
+```
 
-This will install to a local `radfoam` directory in the repository root. Recompilation can be performed by re-running `make install` in the build directory.
+`optimization.iterations` is the final iteration number, not the number of
+additional steps after resume.
 
-### Training
+## Outputs
 
-Place the [Mip-NeRF 360](https://jonbarron.info/mipnerf360) and [Deep Blending](https://github.com/Phog/DeepBlending) datasets in `data/mipnerf360` and `data/db`.
+```text
+outputs/b0-lego/
+  config.yaml
+  summary.json
+  checkpoints/
+    last.pt                  newest periodic/evaluated state
+    best.pt                  highest validation hybrid PSNR
+  metrics/
+    train.csv                loss, PSNR, gradients and parameter diagnostics
+    eval.csv                 metrics/FPS for all three render modes
+  evaluation/
+    iteration_XXXXXX/
+      per_view.csv
+      *_panel.png            target | hybrid | error | Gaussian | Voronoi | T
+      *_hybrid.png
+      *_gaussian_only.png
+      *_voronoi_only.png
+      *_transmittance.png
+  wandb/                     online/offline W&B run data
+```
 
-Training can then be launched with:
+Validation always renders **hybrid**, **Gaussian-only** and **Voronoi-only**
+from identical rays. W&B receives the CSV scalars, comparison panels and
+histograms of Gaussian opacity/scale and medium density/color.
 
-    python train.py -c configs/<config_file>.yaml
+## Tests
 
-Where `<config_file>` is either one of the supplied files in the `configs` directory or your own.
-You can optionally include the `--viewer` flag to train interactively, or use the `viewer.py` script to view saved checkpoints.
+```bash
+# Fast B0 contracts.
+python -m pytest -q tests/b0
 
-For datasets without a COLMAP point cloud, such as NeRF Synthetic, use the
-bounded synthetic initializer. A ready-to-run Lego configuration is included:
+# Native train, validation, checkpoint and resume.
+CUDA_VISIBLE_DEVICES=1 python scripts/smoke_test_b0.py
 
-    python train.py -c configs/nerf_synthetic_lego.yaml
+# Complete standalone renderer suite.
+cd renderer
+CUDA_VISIBLE_DEVICES=1 python -m pytest -q
+```
 
-The `init_method` option accepts `auto`, `pcd`, `random`, and
-`synthetic_bbox`. `auto` preserves the original behavior: it uses the dataset
-point cloud when one is available and otherwise falls back to random points.
-The synthetic initializer places most points uniformly inside the configured
-bounding box and adds a smaller, low-density outer population to bound the
-Voronoi/Delaunay structure.
+## Data
 
-### Evaluation
+`foamsurf_data` accepts:
 
-The standard test metrics can be computed with:
+- Blender/NeRF Synthetic datasets with `transforms_train.json` and
+  `transforms_test.json`;
+- COLMAP datasets in the common 3DGS/Mip-NeRF 360 layout, including large
+  scenes and LLFF-style holdout selection.
 
-    python test.py -c outputs/<checkpoint_directory>/config.yaml
+## Provenance
 
-Rendering speed can be computed with:
-
-    python benchmark.py -c outputs/<checkpoint_directory>/config.yaml
-
-### Checkpoints
-
-You can find trained checkpoints, as well as COLMAP output for some scenes [here](https://drive.google.com/drive/folders/1o8ulZORogwjrfsz3E-QY3f-oPjVFrEVI?usp=drive_link).
-
-## BibTeX
-
-    @article{govindarajan2025radfoam,
-        author = {Govindarajan, Shrisudhan and Rebain, Daniel and Yi, Kwang Moo and Tagliasacchi, Andrea},
-        title = {Radiant Foam: Real-Time Differentiable Ray Tracing},
-        journal = {arXiv:2502.01157},
-        year = {2025},
-    }
+FoamSurf adapts its CUDA Delaunay/AABB topology component from the official
+[Radiant Foam](https://github.com/theialab/radfoam) implementation (upstream
+commit `3e7b52cf74e37ab2ab5e695f53570f515f537e3d`). The standalone renderer also
+contains FlaRe/FALCON base OptiX hit-generation sources at the provenance
+recorded in `renderer/third_party/flare_renderer/README.md`. Original license
+and attribution files are retained. Cite the relevant upstream methods when
+publishing FoamSurf results.

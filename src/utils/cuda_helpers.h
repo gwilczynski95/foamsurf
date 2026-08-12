@@ -3,7 +3,6 @@
 #include <functional>
 #include <stdexcept>
 
-#include <GL/gl3w.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -28,17 +27,6 @@ inline void cuda_check_fn(CUresult err, int line, const char *file) {
 }
 
 #define cuda_check(call) radfoam::cuda_check_fn(call, __LINE__, __FILE__)
-
-inline void gl_check_fn(GLenum err, int line, const char *file) {
-    if (err != GL_NO_ERROR) {
-        throw std::runtime_error("OpenGL call at " + std::string(file) + ":" +
-                                 std::to_string(line) + " failed");
-    }
-}
-
-#define gl_check(call)                                                         \
-    call;                                                                      \
-    radfoam::gl_check_fn(glGetError(), __LINE__, __FILE__)
 
 inline void global_cuda_init() {
     cuda_check(cuInit(0));

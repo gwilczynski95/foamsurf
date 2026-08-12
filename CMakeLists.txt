@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.27)
-project(RadFoam VERSION 1.0.0)
+project(FoamSurfTopology VERSION 0.1.0)
 
 cmake_policy(SET CMP0060 NEW)
 
@@ -40,16 +40,13 @@ find_package(Torch REQUIRED)
 find_library(TORCH_PYTHON_LIBRARY torch_python PATH
              "${TORCH_INSTALL_PREFIX}/lib")
 
-add_subdirectory(external)
-include_directories(${RADFOAM_EXTERNAL_INCLUDES})
-
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   set(CMAKE_INSTALL_PREFIX
-      "${CMAKE_SOURCE_DIR}/radfoam"
+      "${CMAKE_SOURCE_DIR}/foamsurf_topology"
       CACHE PATH "..." FORCE)
 endif()
 
-set(RADFOAM_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})
+set(FOAMSURF_TOPOLOGY_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})
 
 add_subdirectory(src)
 add_subdirectory(torch_bindings)

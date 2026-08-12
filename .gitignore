@@ -2,7 +2,6 @@
 /build*/
 /dist/
 /data
-/radfoam/
 /*output*
 
 *.egg-info
@@ -26,7 +25,19 @@ CMakeCache.txt
 CMakeFiles/
 compile_commands.json
 
+# Local native build products (recreated by build scripts)
+/src/foamsurf_topology/
+/renderer/build/
+/renderer/foamsurf/_optix/
+
 # Local environments
 .venv/
 venv/
 .env
+
+# Experiment tracking artifacts
+/wandb/
+
+# Slurm runtime logs; keep the directory so #SBATCH paths always exist
+/slurm_logs/*
+!/slurm_logs/.gitkeep

@@ -11,7 +11,7 @@
 
 #include "utils/geometry.h"
 
-namespace radfoam_bindings {
+namespace foamsurf_topology_bindings {
 
 namespace py = pybind11;
 using namespace radfoam;
@@ -87,4 +87,4 @@ inline std::array<uint32_t, 3> get_3d_shape(const torch::Tensor &tensor,
     return shape;
 }
 
-} // namespace radfoam_bindings
+} // namespace foamsurf_topology_bindings

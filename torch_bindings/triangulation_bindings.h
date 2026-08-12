@@ -2,7 +2,7 @@
 
 #include "bindings.h"
 
-namespace radfoam_bindings {
+namespace foamsurf_topology_bindings {
 
 void init_triangulation_bindings(py::module &module);
 
