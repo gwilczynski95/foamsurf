@@ -105,3 +105,17 @@ def test_csv_table_preserves_stable_schema(tmp_path) -> None:
     ]
     with pytest.raises(ValueError, match="schema mismatch"):
         table.append({"iteration": 3, "psnr": 10.0})
+
+
+def test_b0_and_b01_configs_keep_diagnostics_explicit() -> None:
+    from pathlib import Path
+
+    from training.config import ExperimentConfig
+
+    root = Path(__file__).resolve().parents[2]
+    b0 = ExperimentConfig.load(root / "configs" / "b0_lego.yaml")
+    b01 = ExperimentConfig.load(root / "configs" / "b01_lego.yaml")
+    assert b0.diagnostics.enabled is False
+    assert b01.diagnostics.enabled is True
+    assert b0.optimization == b01.optimization
+    assert b0.model == b01.model

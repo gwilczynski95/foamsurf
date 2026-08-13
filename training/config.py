@@ -82,6 +82,13 @@ class ValidationConfig:
 
 
 @dataclass
+class DiagnosticsConfig:
+    enabled: bool = False
+    save_per_primitive: bool = True
+    contribution_epsilon: float = 1.0e-6
+
+
+@dataclass
 class WandbConfig:
     mode: str = "offline"
     project: str = "foamsurf"
@@ -106,6 +113,7 @@ class ExperimentConfig:
         default_factory=OptimizationConfig
     )
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+    diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     @classmethod
@@ -123,6 +131,7 @@ class ExperimentConfig:
             "renderer",
             "optimization",
             "validation",
+            "diagnostics",
             "wandb",
         }
         unknown = set(raw) - valid
@@ -144,6 +153,9 @@ class ExperimentConfig:
             ),
             validation=_construct(
                 ValidationConfig, raw.get("validation")
+            ),
+            diagnostics=_construct(
+                DiagnosticsConfig, raw.get("diagnostics")
             ),
             wandb=_construct(WandbConfig, raw.get("wandb")),
         )
@@ -206,6 +218,10 @@ class ExperimentConfig:
         ):
             if getattr(self.validation, name) < 1:
                 raise ValueError(f"validation.{name} must be positive")
+        if self.diagnostics.contribution_epsilon < 0:
+            raise ValueError(
+                "diagnostics.contribution_epsilon must be non-negative"
+            )
         if len(self.background) != 3:
             raise ValueError("background must contain RGB")
         if self.wandb.mode not in {"online", "offline", "disabled"}:

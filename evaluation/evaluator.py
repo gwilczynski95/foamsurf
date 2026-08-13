@@ -32,8 +32,56 @@ def _rays(camera) -> torch.Tensor:
     ).contiguous()
 
 
+def _heatmap(value: torch.Tensor) -> torch.Tensor:
+    value = value.squeeze(-1).clamp(0.0, 1.0)
+    return torch.stack(
+        (
+            value,
+            1.0 - (2.0 * value - 1.0).abs(),
+            1.0 - value,
+        ),
+        dim=-1,
+    )
+
+
+def _gradient_magnitude(module) -> torch.Tensor:
+    squared = None
+    for parameter in module.parameters():
+        if parameter.grad is None or parameter.ndim == 0:
+            continue
+        per_primitive = parameter.grad.detach().reshape(
+            parameter.shape[0], -1
+        ).square().sum(dim=1)
+        squared = (
+            per_primitive
+            if squared is None
+            else squared + per_primitive
+        )
+    if squared is None:
+        reference = next(module.parameters())
+        return reference.new_zeros((reference.shape[0],))
+    return squared.sqrt()
+
+
+def _quantile(values: list[float], q: float) -> float:
+    return float(np.quantile(np.asarray(values, dtype=np.float64), q))
+
+
+def _write_primitive_csv(
+    path: Path,
+    statistics: torch.Tensor,
+    names: tuple[str, ...],
+) -> None:
+    values = statistics.detach().cpu().numpy()
+    with path.open("w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(("primitive_index", *names))
+        for index, row in enumerate(values):
+            writer.writerow((index, *(float(value) for value in row)))
+
+
 class Evaluator:
-    """Validate hybrid and both isolated branches on identical camera rays."""
+    """B0.1 validation with isolated branches and responsibility diagnostics."""
 
     def __init__(
         self,
@@ -87,7 +135,16 @@ class Evaluator:
         if self.config.validation.max_eval_views > 0:
             views = views[: self.config.validation.max_eval_views]
 
-        rows = []
+        diagnostics_enabled = self.config.diagnostics.enabled
+        gaussian_statistics = torch.zeros(
+            (self.model.gaussians.point_count, 4),
+            device=self.model.gaussians.means.device,
+        )
+        medium_statistics = torch.zeros(
+            (self.model.medium.point_count, 5),
+            device=self.model.medium.sites.device,
+        )
+        rows: list[dict[str, float | int | str]] = []
         wandb_images: dict[str, np.ndarray] = {}
         try:
             for index, camera in enumerate(views):
@@ -108,6 +165,20 @@ class Evaluator:
                         background=tuple(self.config.background),
                     )
                 )
+                diagnostic_result = hybrid
+                diagnostic_seconds = 0.0
+                if diagnostics_enabled:
+                    diagnostic_result, diagnostic_seconds = self._timed(
+                        lambda: self.renderer.render(
+                            rays,
+                            gaussians=gaussian_scene,
+                            voronoi=medium_scene,
+                            background=tuple(self.config.background),
+                            collect_diagnostics=True,
+                            diagnostic_target=target,
+                        )
+                    )
+
                 gaussian, gaussian_seconds = self._timed(
                     lambda: self.renderer.render_gaussians(
                         rays,
@@ -127,30 +198,44 @@ class Evaluator:
                 gaussian_image = gaussian.image.clamp(0.0, 1.0)
                 medium_image = medium.image.clamp(0.0, 1.0)
                 error = (hybrid_image - target).abs()
+                ray_error = error.mean(dim=-1, keepdim=True)
                 transmittance = hybrid.transmittance.expand_as(
                     hybrid_image
                 )
-                row = {
+                hybrid_psnr = float(psnr(hybrid_image, target).item())
+                gaussian_psnr = float(
+                    psnr(gaussian_image, target).item()
+                )
+                medium_psnr = float(
+                    psnr(medium_image, target).item()
+                )
+                row: dict[str, float | int | str] = {
                     "iteration": iteration,
                     "view_index": index,
                     "view_name": camera.name,
-                    "hybrid_psnr": float(
-                        psnr(hybrid_image, target).item()
-                    ),
+                    "hybrid_psnr": hybrid_psnr,
                     "hybrid_ssim": float(
                         ssim(hybrid_image, target).item()
                     ),
-                    "gaussian_only_psnr": float(
-                        psnr(gaussian_image, target).item()
-                    ),
+                    "gaussian_only_psnr": gaussian_psnr,
                     "gaussian_only_ssim": float(
                         ssim(gaussian_image, target).item()
                     ),
-                    "voronoi_only_psnr": float(
-                        psnr(medium_image, target).item()
-                    ),
+                    "voronoi_only_psnr": medium_psnr,
                     "voronoi_only_ssim": float(
                         ssim(medium_image, target).item()
+                    ),
+                    "hybrid_minus_gaussian_psnr": (
+                        hybrid_psnr - gaussian_psnr
+                    ),
+                    "hybrid_minus_voronoi_psnr": (
+                        hybrid_psnr - medium_psnr
+                    ),
+                    "hybrid_worse_than_gaussian": int(
+                        hybrid_psnr < gaussian_psnr
+                    ),
+                    "hybrid_worse_than_voronoi": int(
+                        hybrid_psnr < medium_psnr
                     ),
                     "hybrid_alpha_mean": float(
                         hybrid.alpha.mean().item()
@@ -161,10 +246,102 @@ class Evaluator:
                     "voronoi_alpha_mean": float(
                         medium.alpha.mean().item()
                     ),
+                    "ray_error_mean": float(ray_error.mean().item()),
+                    "ray_error_p95": float(
+                        torch.quantile(ray_error, 0.95).item()
+                    ),
+                    "ray_error_max": float(ray_error.max().item()),
                     "hybrid_render_seconds": hybrid_seconds,
+                    "diagnostics_render_seconds": diagnostic_seconds,
                     "gaussian_render_seconds": gaussian_seconds,
                     "voronoi_render_seconds": medium_seconds,
                 }
+
+                contribution_panel = None
+                if diagnostics_enabled:
+                    diagnostics = diagnostic_result.diagnostics
+                    if diagnostics is None:
+                        raise RuntimeError(
+                            "renderer did not return requested diagnostics"
+                        )
+                    gaussian_statistics[:, :3] += (
+                        diagnostics.gaussian[:, :3]
+                    )
+                    gaussian_statistics[:, 3] = torch.maximum(
+                        gaussian_statistics[:, 3],
+                        diagnostics.gaussian[:, 3],
+                    )
+                    medium_statistics[:, :4] += diagnostics.medium[:, :4]
+                    medium_statistics[:, 4] = torch.maximum(
+                        medium_statistics[:, 4],
+                        diagnostics.medium[:, 4],
+                    )
+                    gaussian_weight = diagnostics.gaussian_weight
+                    medium_weight = diagnostics.medium_weight
+                    total_weight = gaussian_weight + medium_weight
+                    medium_fraction = medium_weight / total_weight.clamp_min(
+                        self.config.diagnostics.contribution_epsilon
+                    )
+                    active_gaussian = (
+                        gaussian_weight
+                        > self.config.diagnostics.contribution_epsilon
+                    )
+                    active_medium = (
+                        medium_weight
+                        > self.config.diagnostics.contribution_epsilon
+                    )
+                    conservation_error = (
+                        total_weight
+                        + diagnostics.final_transmittance
+                        - 1.0
+                    ).abs()
+                    row.update(
+                        {
+                            "responsibility/gaussian_weight_mean": float(
+                                gaussian_weight.mean().item()
+                            ),
+                            "responsibility/medium_weight_mean": float(
+                                medium_weight.mean().item()
+                            ),
+                            "responsibility/medium_fraction_mean": float(
+                                medium_fraction.mean().item()
+                            ),
+                            "responsibility/overlap_fraction": float(
+                                (active_gaussian & active_medium)
+                                .float()
+                                .mean()
+                                .item()
+                            ),
+                            "responsibility/gaussian_event_mean": float(
+                                diagnostics.gaussian_event_count.mean().item()
+                            ),
+                            "responsibility/medium_segment_mean": float(
+                                diagnostics.medium_segment_count.mean().item()
+                            ),
+                            "responsibility/medium_path_mean": float(
+                                diagnostics.medium_path_length.mean().item()
+                            ),
+                            "responsibility/weighted_medium_path_mean": float(
+                                diagnostics.weighted_medium_path_length
+                                .mean()
+                                .item()
+                            ),
+                            "responsibility/conservation_error_max": float(
+                                conservation_error.max().item()
+                            ),
+                            "responsibility/truncated_ray_fraction": float(
+                                diagnostics.traversal_truncated.mean().item()
+                            ),
+                        }
+                    )
+                    contribution_panel = torch.cat(
+                        (
+                            _heatmap(gaussian_weight),
+                            _heatmap(medium_weight),
+                            _heatmap(medium_fraction),
+                        ),
+                        dim=1,
+                    )
                 rows.append(row)
 
                 if index < self.config.validation.image_views:
@@ -197,7 +374,22 @@ class Evaluator:
                         directory / f"{prefix}_transmittance.png",
                         transmittance,
                     )
-                    wandb_images[f"view_{index:02d}"] = _uint8(panel)
+                    _save(
+                        directory / f"{prefix}_error.png",
+                        error,
+                    )
+                    wandb_images[f"comparison/view_{index:02d}"] = (
+                        _uint8(panel)
+                    )
+                    if contribution_panel is not None:
+                        _save(
+                            directory
+                            / f"{prefix}_responsibility.png",
+                            contribution_panel,
+                        )
+                        wandb_images[
+                            f"responsibility/view_{index:02d}"
+                        ] = _uint8(contribution_panel)
         finally:
             self.renderer.transmittance_threshold = original_threshold
 
@@ -209,31 +401,37 @@ class Evaluator:
             writer.writeheader()
             writer.writerows(rows)
 
-        mean_keys = [
-            "hybrid_psnr",
-            "hybrid_ssim",
-            "gaussian_only_psnr",
-            "gaussian_only_ssim",
-            "voronoi_only_psnr",
-            "voronoi_only_ssim",
-            "hybrid_alpha_mean",
-            "gaussian_alpha_mean",
-            "voronoi_alpha_mean",
-            "hybrid_render_seconds",
-            "gaussian_render_seconds",
-            "voronoi_render_seconds",
+        numeric_keys = [
+            key
+            for key, value in rows[0].items()
+            if key not in {"iteration", "view_index", "view_name"}
+            and isinstance(value, (float, int))
         ]
         summary = {
             f"eval/{key}": float(
                 np.mean([float(row[key]) for row in rows])
             )
-            for key in mean_keys
+            for key in numeric_keys
         }
+        hybrid_psnrs = [float(row["hybrid_psnr"]) for row in rows]
         summary.update(
             {
                 "iteration": iteration,
+                "eval/hybrid_psnr_min": min(hybrid_psnrs),
+                "eval/hybrid_psnr_p05": _quantile(
+                    hybrid_psnrs, 0.05
+                ),
+                "eval/hybrid_psnr_median": _quantile(
+                    hybrid_psnrs, 0.5
+                ),
+                "eval/hybrid_psnr_max": max(hybrid_psnrs),
                 "eval/hybrid_fps": 1.0
                 / summary["eval/hybrid_render_seconds"],
+                "eval/diagnostics_fps": (
+                    1.0 / summary["eval/diagnostics_render_seconds"]
+                    if diagnostics_enabled
+                    else 0.0
+                ),
                 "eval/gaussian_fps": 1.0
                 / summary["eval/gaussian_render_seconds"],
                 "eval/voronoi_fps": 1.0
@@ -242,10 +440,91 @@ class Evaluator:
                 "model/voronoi_count": self.model.medium.point_count,
             }
         )
+
+        gaussian_grad = _gradient_magnitude(self.model.gaussians)
+        medium_grad = _gradient_magnitude(self.model.medium)
         histograms = {
             "gaussian_opacity": self.model.gaussians.opacities,
             "gaussian_scale": self.model.gaussians.scales,
             "medium_density": self.model.medium.densities,
             "medium_color": self.model.medium.colors,
+            "gaussian_gradient_magnitude": gaussian_grad,
+            "medium_gradient_magnitude": medium_grad,
         }
+        if diagnostics_enabled:
+            epsilon = self.config.diagnostics.contribution_epsilon
+            gaussian_active = gaussian_statistics[:, 0] > epsilon
+            medium_active = medium_statistics[:, 0] > epsilon
+            summary.update(
+                {
+                    "responsibility/gaussian_active_fraction": float(
+                        gaussian_active.float().mean().item()
+                    ),
+                    "responsibility/medium_active_fraction": float(
+                        medium_active.float().mean().item()
+                    ),
+                    "responsibility/gaussian_max_ray_error": float(
+                        gaussian_statistics[:, 3].max().item()
+                    ),
+                    "responsibility/medium_max_ray_error": float(
+                        medium_statistics[:, 4].max().item()
+                    ),
+                    "responsibility/gaussian_contribution_total": float(
+                        gaussian_statistics[:, 0].sum().item()
+                    ),
+                    "responsibility/medium_contribution_total": float(
+                        medium_statistics[:, 0].sum().item()
+                    ),
+                }
+            )
+            gaussian_total = gaussian_statistics[:, 0].sum().clamp_min(
+                epsilon
+            )
+            medium_total = medium_statistics[:, 0].sum().clamp_min(
+                epsilon
+            )
+            summary[
+                "responsibility/gaussian_top1_contribution_share"
+            ] = float(
+                gaussian_statistics[:, 0].max().div(gaussian_total).item()
+            )
+            summary[
+                "responsibility/medium_top1_contribution_share"
+            ] = float(
+                medium_statistics[:, 0].max().div(medium_total).item()
+            )
+            histograms.update(
+                {
+                    "gaussian_contribution": gaussian_statistics[:, 0],
+                    "gaussian_visibility": gaussian_statistics[:, 1],
+                    "gaussian_max_ray_error": gaussian_statistics[:, 3],
+                    "medium_contribution": medium_statistics[:, 0],
+                    "medium_visibility": medium_statistics[:, 1],
+                    "medium_path_length": medium_statistics[:, 2],
+                    "medium_weighted_path_length": medium_statistics[:, 3],
+                    "medium_max_ray_error": medium_statistics[:, 4],
+                }
+            )
+            if self.config.diagnostics.save_per_primitive:
+                _write_primitive_csv(
+                    directory / "gaussian_primitives.csv",
+                    gaussian_statistics,
+                    (
+                        "contribution",
+                        "visibility",
+                        "alpha_sum",
+                        "max_ray_error",
+                    ),
+                )
+                _write_primitive_csv(
+                    directory / "medium_primitives.csv",
+                    medium_statistics,
+                    (
+                        "contribution",
+                        "visibility",
+                        "path_length",
+                        "weighted_path_length",
+                        "max_ray_error",
+                    ),
+                )
         return summary, wandb_images, histograms

@@ -37,6 +37,27 @@ void hybrid_forward_cuda(
     uint32_t *output_num_intersections,
     const void *stream);
 
+void hybrid_diagnostics_cuda(
+    const HybridLaunchSettings &settings,
+    const float *points,
+    const float *densities,
+    const uint32_t *point_adjacency,
+    const uint32_t *point_adjacency_offsets,
+    const float *rays,
+    const uint32_t *start_points,
+    const float *hit_depths,
+    const int32_t *hit_indices,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    const float *ray_errors,
+    float *ray_statistics,
+    float *gaussian_statistics,
+    float *medium_statistics,
+    const void *stream);
+
 void hybrid_backward_cuda(
     const HybridLaunchSettings &settings,
     const float *points,

@@ -266,6 +266,48 @@ py::tuple hybrid_backward(TensorList values,
     return result;
 }
 
+py::tuple hybrid_diagnostics(TensorList values,
+                             float near_plane,
+                             float far_plane,
+                             float threshold,
+                             uint32_t max_intersections) {
+    TORCH_CHECK(values.size() == 17, "hybrid_diagnostics expects 17 tensors");
+    for (auto &value : values) {
+        value = value.contiguous();
+    }
+    validate_inputs(values[0], values[1], values[2], values[3], values[4],
+                    values[5], values[6], values[7], values[8], values[9],
+                    values[10], values[11], values[12], values[13], values[14],
+                    values[15]);
+    require_float_cuda(values[16], "ray_errors");
+    TORCH_CHECK(values[16].numel() == values[5].size(0),
+                "ray_errors must contain one value per ray");
+    auto settings = settings_for(values[0], values[9], values[5], values[7],
+                                 near_plane, far_plane, threshold,
+                                 max_intersections);
+    auto ray_statistics =
+        torch::zeros({values[5].size(0), 8}, values[5].options());
+    auto gaussian_statistics =
+        torch::zeros({values[9].size(0), 4}, values[5].options());
+    auto medium_statistics =
+        torch::zeros({values[0].size(0), 5}, values[5].options());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    foamsurf::hybrid_diagnostics_cuda(
+        settings, values[0].data_ptr<float>(), values[1].data_ptr<float>(),
+        values[3].data_ptr<uint32_t>(), values[4].data_ptr<uint32_t>(),
+        values[5].data_ptr<float>(), values[6].data_ptr<uint32_t>(),
+        values[7].data_ptr<float>(), values[8].data_ptr<int32_t>(),
+        values[9].data_ptr<float>(), values[10].data_ptr<float>(),
+        values[11].data_ptr<float>(), values[13].data_ptr<float>(),
+        values[14].data_ptr<float>(), values[16].data_ptr<float>(),
+        ray_statistics.data_ptr<float>(),
+        gaussian_statistics.data_ptr<float>(),
+        medium_statistics.data_ptr<float>(),
+        &stream);
+    return py::make_tuple(
+        ray_statistics, gaussian_statistics, medium_statistics);
+}
+
 } // namespace
 
 void init_hybrid_bindings(py::module &module) {
@@ -281,6 +323,13 @@ void init_hybrid_bindings(py::module &module) {
                py::arg("tensors"),
                py::arg("output"),
                py::arg("output_grad"),
+               py::arg("near_plane"),
+               py::arg("far_plane"),
+               py::arg("threshold") = 0.001f,
+               py::arg("max_intersections") = 1024);
+    module.def("hybrid_diagnostics",
+               hybrid_diagnostics,
+               py::arg("tensors"),
                py::arg("near_plane"),
                py::arg("far_plane"),
                py::arg("threshold") = 0.001f,

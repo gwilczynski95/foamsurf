@@ -535,6 +535,162 @@ __global__ void hybrid_forward_kernel(
     num_intersections[ray_index] = steps;
 }
 
+// Optional B0.1 instrumentation. It repeats scalar traversal in a separate
+// forward-only launch, so regular rendering and autograd remain unchanged.
+// Outputs are reduced to [R,8], [G,4], [V,5], never rays x primitives.
+__global__ void hybrid_diagnostics_kernel(
+    HybridLaunchSettings settings,
+    const float *points,
+    const float *densities,
+    const uint32_t *adjacency,
+    const uint32_t *offsets,
+    const float *rays,
+    const uint32_t *start_points,
+    const float *hit_depths,
+    const int32_t *hit_indices,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    const float *ray_errors,
+    float *ray_statistics,
+    float *gaussian_statistics,
+    float *medium_statistics) {
+    uint32_t ray_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ray_index >= settings.num_rays) {
+        return;
+    }
+    Vec3 origin = make_vec3(rays + 6 * ray_index);
+    Vec3 direction = normalized(make_vec3(rays + 6 * ray_index + 3));
+    float transmittance = 1.0f;
+    float cursor_depth = settings.near_plane;
+    HitCursor hit_cursor{0};
+    uint32_t steps = 0;
+    uint32_t gaussian_events = 0;
+    uint32_t medium_segments = 0;
+    float gaussian_weight = 0.0f;
+    float medium_weight = 0.0f;
+    float medium_path = 0.0f;
+    float weighted_medium_path = 0.0f;
+
+    uint32_t current = settings.num_points ? start_points[ray_index] : 0;
+    bool finished = false;
+    while (!finished && cursor_depth < settings.far_plane &&
+           transmittance > settings.transmittance_threshold &&
+           steps < settings.max_intersections) {
+        ++steps;
+        float boundary_depth = settings.far_plane;
+        uint32_t next = UINT32_MAX;
+        bool has_boundary = false;
+        if (settings.num_points) {
+            has_boundary = next_boundary(current, origin, direction, points,
+                                         adjacency, offsets, boundary_depth, next);
+            if (!has_boundary || boundary_depth >= settings.far_plane) {
+                boundary_depth = settings.far_plane;
+                finished = true;
+            } else if (boundary_depth <= cursor_depth) {
+                current = next;
+                continue;
+            }
+        } else {
+            finished = true;
+        }
+
+        float hit_depth;
+        int gaussian_index;
+        while (next_hit(settings, ray_index, hit_cursor, hit_depths, hit_indices,
+                        cursor_depth, boundary_depth, hit_depth,
+                        gaussian_index)) {
+            if (settings.num_points) {
+                float length = fmaxf(hit_depth - cursor_depth, 0.0f);
+                if (length > 0.0f) {
+                    float transmittance_before = transmittance;
+                    float density = fmaxf(densities[current], 0.0f);
+                    float alpha = 1.0f - expf(-density * length);
+                    float weight = transmittance_before * alpha;
+                    medium_weight += weight;
+                    medium_path += length;
+                    weighted_medium_path += transmittance_before * length;
+                    ++medium_segments;
+                    atomicAdd(medium_statistics + 5 * current, weight);
+                    atomicAdd(medium_statistics + 5 * current + 1, 1.0f);
+                    atomicAdd(medium_statistics + 5 * current + 2, length);
+                    atomicAdd(medium_statistics + 5 * current + 3,
+                              transmittance_before * length);
+                    atomicMax(
+                        reinterpret_cast<int *>(
+                            medium_statistics + 5 * current + 4),
+                        __float_as_int(ray_errors[ray_index]));
+                    transmittance *= 1.0f - alpha;
+                }
+            }
+            auto evaluation = evaluate_gaussian_scalar(
+                gaussian_index, hit_depth, origin, direction, means, log_scales,
+                quaternions, opacity_logits, raw_kappa);
+            float alpha = fminf(fmaxf(evaluation.alpha, 0.0f), 1.0f);
+            float weight = transmittance * alpha;
+            gaussian_weight += weight;
+            ++gaussian_events;
+            atomicAdd(gaussian_statistics + 4 * gaussian_index, weight);
+            atomicAdd(gaussian_statistics + 4 * gaussian_index + 1, 1.0f);
+            atomicAdd(gaussian_statistics + 4 * gaussian_index + 2, alpha);
+            atomicMax(
+                reinterpret_cast<int *>(
+                    gaussian_statistics + 4 * gaussian_index + 3),
+                __float_as_int(ray_errors[ray_index]));
+            transmittance *= 1.0f - alpha;
+            cursor_depth = fmaxf(cursor_depth, hit_depth);
+            ++hit_cursor.slot;
+            if (transmittance <= settings.transmittance_threshold) {
+                break;
+            }
+        }
+        if (transmittance <= settings.transmittance_threshold) {
+            break;
+        }
+        if (settings.num_points) {
+            float length = fmaxf(boundary_depth - cursor_depth, 0.0f);
+            if (length > 0.0f) {
+                float transmittance_before = transmittance;
+                float density = fmaxf(densities[current], 0.0f);
+                float alpha = 1.0f - expf(-density * length);
+                float weight = transmittance_before * alpha;
+                medium_weight += weight;
+                medium_path += length;
+                weighted_medium_path += transmittance_before * length;
+                ++medium_segments;
+                atomicAdd(medium_statistics + 5 * current, weight);
+                atomicAdd(medium_statistics + 5 * current + 1, 1.0f);
+                atomicAdd(medium_statistics + 5 * current + 2, length);
+                atomicAdd(medium_statistics + 5 * current + 3,
+                          transmittance_before * length);
+                atomicMax(
+                    reinterpret_cast<int *>(
+                        medium_statistics + 5 * current + 4),
+                        __float_as_int(ray_errors[ray_index]));
+                transmittance *= 1.0f - alpha;
+            }
+        }
+        cursor_depth = boundary_depth;
+        if (!finished && has_boundary) {
+            current = next;
+        }
+    }
+
+    float *stats = ray_statistics + 8 * ray_index;
+    stats[0] = gaussian_weight;
+    stats[1] = medium_weight;
+    stats[2] = medium_path;
+    stats[3] = weighted_medium_path;
+    stats[4] = static_cast<float>(gaussian_events);
+    stats[5] = static_cast<float>(medium_segments);
+    stats[6] = transmittance;
+    stats[7] = (!finished && cursor_depth < settings.far_plane &&
+                transmittance > settings.transmittance_threshold &&
+                steps >= settings.max_intersections) ? 1.0f : 0.0f;
+}
+
 enum class OwnerType : int { None = 0, Gaussian = 1, Boundary = 2 };
 
 struct EndpointOwner {
@@ -1024,6 +1180,37 @@ void hybrid_forward_cuda(
         background,
         output_rgba,
         output_num_intersections);
+}
+
+void hybrid_diagnostics_cuda(
+    const HybridLaunchSettings &settings,
+    const float *points,
+    const float *densities,
+    const uint32_t *point_adjacency,
+    const uint32_t *point_adjacency_offsets,
+    const float *rays,
+    const uint32_t *start_points,
+    const float *hit_depths,
+    const int32_t *hit_indices,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    const float *ray_errors,
+    float *ray_statistics,
+    float *gaussian_statistics,
+    float *medium_statistics,
+    const void *stream) {
+    constexpr uint32_t block_size = 128;
+    uint32_t grid_size = (settings.num_rays + block_size - 1) / block_size;
+    cudaStream_t cuda_stream =
+        *reinterpret_cast<const cudaStream_t *>(stream);
+    hybrid_diagnostics_kernel<<<grid_size, block_size, 0, cuda_stream>>>(
+        settings, points, densities, point_adjacency, point_adjacency_offsets,
+        rays, start_points, hit_depths, hit_indices, means, log_scales,
+        quaternions, opacity_logits, raw_kappa, ray_errors, ray_statistics,
+        gaussian_statistics, medium_statistics);
 }
 
 void hybrid_backward_cuda(

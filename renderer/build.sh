@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 RENDERER_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-${CONDA_PREFIX:-/shared/results/gmwilczn/conda/envs/foamsurf}}"
-PYTHON="${PYTHON:-$CONDA_ENV_PATH/bin/python}"
+PYTHON="${FOAMSURF_PYTHON:-$CONDA_ENV_PATH/bin/python}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "Python not found: $PYTHON" >&2

@@ -28,6 +28,20 @@ from .optimizer import build_optimizers, gradient_norm
 from .sampler import RandomCameraRaySampler
 
 
+def _primitive_gradient_magnitude(module) -> torch.Tensor:
+    squared = None
+    for parameter in module.parameters():
+        if parameter.grad is None or parameter.ndim == 0:
+            continue
+        value = parameter.grad.detach().reshape(parameter.shape[0], -1)
+        value = value.square().sum(dim=1)
+        squared = value if squared is None else squared + value
+    if squared is None:
+        reference = next(module.parameters())
+        return reference.new_zeros((reference.shape[0],))
+    return squared.sqrt()
+
+
 class Trainer:
     """End-to-end B0 trainer: joint optimization with RGB MSE only."""
 
@@ -177,7 +191,7 @@ class Trainer:
         medium_gradient_norm: float,
         step_seconds: float,
     ) -> dict[str, float | int]:
-        return {
+        row = {
             "iteration": iteration,
             "training_seconds": self.training_seconds,
             "step_seconds": step_seconds,
@@ -214,6 +228,34 @@ class Trainer:
             "model/voronoi_count": self.model.medium.point_count,
             "topology/revision": self.topology.revision,
         }
+        gaussian_opacity = self.model.gaussians.opacities.detach().flatten()
+        gaussian_scale = self.model.gaussians.scales.detach().flatten()
+        medium_density = self.model.medium.densities.detach().flatten()
+        gaussian_grad = _primitive_gradient_magnitude(self.model.gaussians)
+        medium_grad = _primitive_gradient_magnitude(self.model.medium)
+        row.update(
+            {
+                "gaussian/opacity_p50": float(torch.quantile(gaussian_opacity, 0.5).item()),
+                "gaussian/opacity_p95": float(torch.quantile(gaussian_opacity, 0.95).item()),
+                "gaussian/opacity_gt_0_1_fraction": float((gaussian_opacity > 0.1).float().mean().item()),
+                "gaussian/scale_p50": float(torch.quantile(gaussian_scale, 0.5).item()),
+                "gaussian/scale_p95": float(torch.quantile(gaussian_scale, 0.95).item()),
+                "gaussian/scale_max": float(gaussian_scale.max().item()),
+                "medium/density_p50": float(torch.quantile(medium_density, 0.5).item()),
+                "medium/density_p95": float(torch.quantile(medium_density, 0.95).item()),
+                "medium/density_p99": float(torch.quantile(medium_density, 0.99).item()),
+                "medium/density_gt_1_fraction": float((medium_density > 1.0).float().mean().item()),
+                "gradient/gaussian_primitive_p50": float(torch.quantile(gaussian_grad, 0.5).item()),
+                "gradient/gaussian_primitive_p95": float(torch.quantile(gaussian_grad, 0.95).item()),
+                "gradient/gaussian_primitive_max": float(gaussian_grad.max().item()),
+                "gradient/gaussian_active_fraction": float((gaussian_grad > 0).float().mean().item()),
+                "gradient/medium_primitive_p50": float(torch.quantile(medium_grad, 0.5).item()),
+                "gradient/medium_primitive_p95": float(torch.quantile(medium_grad, 0.95).item()),
+                "gradient/medium_primitive_max": float(medium_grad.max().item()),
+                "gradient/medium_active_fraction": float((medium_grad > 0).float().mean().item()),
+            }
+        )
+        return row
 
     def _train_step(self, iteration: int):
         torch.cuda.synchronize()

@@ -14,6 +14,7 @@ from PIL import Image
 
 from training.config import (
     DatasetConfig,
+    DiagnosticsConfig,
     ExperimentConfig,
     ModelConfig,
     OptimizationConfig,
@@ -116,6 +117,7 @@ def main() -> int:
             max_eval_views=1,
             image_views=1,
         ),
+        diagnostics=DiagnosticsConfig(enabled=True),
         wandb=WandbConfig(mode="disabled"),
     )
     config.validate()
@@ -135,6 +137,18 @@ def main() -> int:
         / "evaluation"
         / "iteration_000003"
         / "0000_test_0_panel.png",
+        output
+        / "evaluation"
+        / "iteration_000003"
+        / "0000_test_0_responsibility.png",
+        output
+        / "evaluation"
+        / "iteration_000003"
+        / "gaussian_primitives.csv",
+        output
+        / "evaluation"
+        / "iteration_000003"
+        / "medium_primitives.csv",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:

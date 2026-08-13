@@ -31,7 +31,11 @@ Pierwszy pełny run B0 powinien odpowiedzieć:
 Nie zmieniamy modelu przed obejrzeniem obrazów Gaussian-only, Voronoi-only,
 transmittance oraz wykresów parametrów z kilku scen i seedów.
 
-## Etap B0.1: wiarygodna diagnostyka odpowiedzialności
+## Etap B0.1: wiarygodna diagnostyka odpowiedzialności — zaimplementowany
+
+Stan: wdrożony jako opcjonalny, domyślnie wyłączony tryb. Szczegóły i
+artefakty opisuje [B01_DIAGNOSTICS.md](B01_DIAGNOSTICS.md). B0.1 nie zmienia
+lossu ani trajektorii treningu; instrumentacja działa w walidacji.
 
 Przed regularyzacją renderer powinien opcjonalnie zwracać per-ray/per-primitive
 statystyki bez zmiany obrazu:

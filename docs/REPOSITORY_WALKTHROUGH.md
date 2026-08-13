@@ -235,3 +235,26 @@ i sprawdza ciągłość iteracji.
 
 Nową logikę modelu dodawaj do modułów FoamSurf opisanych powyżej; kod
 `src/` jest izolowanym backendem topologii, a nie miejscem na logikę treningu.
+
+## B0.1: gdzie znajduje się diagnostyka
+
+B0.1 nie ma osobnej pętli treningowej. configs/b01_lego.yaml włącza sekcję
+diagnostics, a ten sam Trainer i ten sam B0 loss pozostają aktywne.
+
+Przepływ diagnostyczny:
+
+1. Evaluator wykonuje i mierzy zwykły hybrid render.
+2. Przy diagnostics.enabled wykonuje osobny instrumented render z tym samym
+   targetem i rayami; zwykły FPS nie obejmuje kosztu diagnostyki.
+3. renderer/foamsurf/cuda.py woła hybrid_diagnostics tylko na żądanie.
+4. renderer/native/hybrid_cuda.cu redukuje odpowiedzialność bez macierzy
+   rays x primitives.
+5. Evaluator agreguje statystyki po widokach, zapisuje per_view i dwa
+   per-primitive CSV, buduje responsibility maps i histogramy W&B.
+6. Gradient magnitude per prymityw jest redukowany z istniejących .grad; nie
+   wykonuje się drugiego backwardu.
+
+Opis kolumn, artefaktów i interpretacji znajduje się w
+[B01_DIAGNOSTICS.md](B01_DIAGNOSTICS.md). Kontrakt niskopoziomowy znajduje się
+w renderer/README.md. Testy wymagane przed zmianą instrumentacji są w
+renderer/tests/test_b01_diagnostics.py.

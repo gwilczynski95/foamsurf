@@ -7,7 +7,7 @@ FoamSurf is a research codebase for jointly learning two scene representations:
 - **medium:** a piecewise-constant emission/absorption field carried by 3D
   Voronoi cells derived from Radiant Foam.
 
-The current milestone is **B0**, an intentionally unregularized baseline. One
+The current milestone is **B0.1**: the same intentionally unregularized B0 baseline with optional responsibility diagnostics. One
 hybrid render is supervised with RGB MSE and a single backward pass updates
 both representations. B0 reveals the natural behaviour and failure modes of
 the coupled model before adding disentanglement losses or adaptive topology.
@@ -34,13 +34,15 @@ topology is a required future stage; see
 
 ```text
 train_b0.py                 B0 command-line entry point
-configs/b0_lego.yaml        full Lego experiment configuration
+configs/b0_lego.yaml        canonical B0 configuration
+configs/b01_lego.yaml       B0.1 Lego diagnostics configuration
 foamsurf_data/              Blender and COLMAP cameras, images and rays
 foamsurf_model/             Gaussian model, Voronoi medium and topology owner
 training/                   trainer, loss, optimizers, logging and checkpoints
 evaluation/                 three-mode validation, metrics and images
 renderer/                   standalone `foamsurf` Python/CUDA/OptiX renderer
 tests/b0/                   B0 contract tests
+scripts/train_b01_lego.sbatch Slurm entry point for B0.1 Lego
 scripts/smoke_test_b0.py    tiny end-to-end train/resume smoke test
 docs/                       developer walkthrough and implementation roadmap
 ```
@@ -69,6 +71,19 @@ CUDA_VISIBLE_DEVICES=1 ./build.sh
 standalone renderer and verifies the imports. The renderer vendors every
 required source file; it does not search for a neighbouring RadFoam, FALCON or
 `flare_new` checkout at runtime.
+
+## Train B0.1 diagnostics on NeRF Synthetic Lego
+
+The B0.1 run keeps the exact B0 loss/model and enables reduced per-ray and
+per-primitive diagnostics:
+
+~~~bash
+sbatch scripts/train_b01_lego.sbatch
+~~~
+
+For an interactive run use config configs/b01_lego.yaml. See
+[the B0.1 diagnostics guide](docs/B01_DIAGNOSTICS.md) for all metrics, images,
+CSV schemas and interpretation.
 
 ## Train B0 on NeRF Synthetic Lego
 
@@ -125,12 +140,16 @@ outputs/b0-lego/
       *_gaussian_only.png
       *_voronoi_only.png
       *_transmittance.png
+      *_error.png
+      *_responsibility.png   Gaussian | medium | medium fraction
+      gaussian_primitives.csv
+      medium_primitives.csv
   wandb/                     online/offline W&B run data
 ```
 
 Validation always renders **hybrid**, **Gaussian-only** and **Voronoi-only**
 from identical rays. W&B receives the CSV scalars, comparison panels and
-histograms of Gaussian opacity/scale and medium density/color.
+histograms of Gaussian opacity/scale and medium density/color. B0.1 additionally logs contribution, visibility, path length, max ray error and per-primitive gradient magnitude.
 
 ## Tests
 

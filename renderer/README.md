@@ -276,3 +276,29 @@ CUDA_VISIBLE_DEVICES=1 python -m foamsurf.benchmark --resolution 800
 
 The external-equivalence test may import original implementations as test
 oracles. Those imports are test-only and are not package dependencies.
+
+## Optional B0.1 responsibility diagnostics
+
+Calling render with collect_diagnostics=True and an optional diagnostic_target
+adds a separate forward-only CUDA instrumentation launch after the ordinary
+hybrid forward. It does not participate in autograd, alter RGBA, or allocate
+R x G / R x V storage. With the default collect_diagnostics=False, the binding
+is not called at all.
+
+NativeHybridRender.diagnostics then contains:
+
+| tensor | shape | columns |
+|---|---:|---|
+| ray | [...,8] | Gaussian weight, medium weight, medium path, transmittance-weighted path, Gaussian event count, medium segment count, final T, traversal-truncated flag |
+| gaussian | [G,4] | contribution, visibility, alpha sum, max touching-ray RGB error |
+| medium | [V,5] | contribution, visibility, path, transmittance-weighted path, max traversing-ray RGB error |
+
+Contribution is accumulated T_before * alpha. Positive maximum errors use
+atomic max; other primitive columns use atomic add. With no diagnostic target,
+max-error values remain zero. The normal render remains the source of RGB and
+gradients. B0.1 times it separately from the instrumented pass so hybrid FPS
+is not contaminated by diagnostics overhead.
+
+Any CUDA rewrite must pass tests/test_b01_diagnostics.py: statistics on/off
+must produce equal RGB, alpha and gradients for every trainable Gaussian and
+Voronoi tensor.

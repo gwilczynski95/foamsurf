@@ -18,6 +18,47 @@ class VoronoiTopology:
 
 
 @dataclass(frozen=True)
+class NativeDiagnostics:
+    """Reduced B0.1 statistics; no rays-by-primitives allocation."""
+
+    ray: torch.Tensor
+    gaussian: torch.Tensor
+    medium: torch.Tensor
+
+    @property
+    def gaussian_weight(self) -> torch.Tensor:
+        return self.ray[..., 0:1]
+
+    @property
+    def medium_weight(self) -> torch.Tensor:
+        return self.ray[..., 1:2]
+
+    @property
+    def medium_path_length(self) -> torch.Tensor:
+        return self.ray[..., 2:3]
+
+    @property
+    def weighted_medium_path_length(self) -> torch.Tensor:
+        return self.ray[..., 3:4]
+
+    @property
+    def gaussian_event_count(self) -> torch.Tensor:
+        return self.ray[..., 4:5]
+
+    @property
+    def medium_segment_count(self) -> torch.Tensor:
+        return self.ray[..., 5:6]
+
+    @property
+    def final_transmittance(self) -> torch.Tensor:
+        return self.ray[..., 6:7]
+
+    @property
+    def traversal_truncated(self) -> torch.Tensor:
+        return self.ray[..., 7:8]
+
+
+@dataclass(frozen=True)
 class NativeHybridRender:
     image: torch.Tensor
     alpha: torch.Tensor
@@ -27,6 +68,7 @@ class NativeHybridRender:
     hit_depths: torch.Tensor
     hit_indices: torch.Tensor
     num_intersections: torch.Tensor
+    diagnostics: NativeDiagnostics | None = None
 
     def as_common(self) -> HybridRender:
         return HybridRender(
@@ -306,6 +348,8 @@ class NativeHybridRenderer:
         voronoi: VoronoiScene | None = None,
         background: torch.Tensor | tuple[float, float, float] = (0.0, 0.0, 0.0),
         start_points: torch.Tensor | None = None,
+        collect_diagnostics: bool = False,
+        diagnostic_target: torch.Tensor | None = None,
     ) -> NativeHybridRender:
         if gaussians is None and voronoi is None:
             raise ValueError("at least one representation must be provided")
@@ -431,6 +475,44 @@ class NativeHybridRenderer:
             self.transmittance_threshold,
             self.max_intersections,
         )
+        diagnostics = None
+        if collect_diagnostics:
+            if diagnostic_target is None:
+                ray_errors = rays.new_zeros((ray_count,))
+            else:
+                expected_shape = (*leading_shape, 3)
+                if diagnostic_target.shape != expected_shape:
+                    raise ValueError(
+                        f"diagnostic_target must have shape {expected_shape}"
+                    )
+                self._require_cuda_float32(
+                    diagnostic_target, "diagnostic_target"
+                )
+                ray_errors = (
+                    rgba[:, :3] - diagnostic_target.reshape(-1, 3)
+                ).abs().mean(dim=-1).detach().contiguous()
+            with torch.no_grad():
+                ray_stats, gaussian_stats, medium_stats = (
+                    self._bindings.hybrid_diagnostics(
+                        [
+                            points, densities, medium_colors, adjacency, offsets,
+                            rays, start_points, hit_depths, hit_indices, means,
+                            log_scales, quaternions, colors, opacity, kappa,
+                            background_tensor,
+                            ray_errors,
+                        ],
+                        self.near,
+                        self.far,
+                        self.transmittance_threshold,
+                        self.max_intersections,
+                    )
+                )
+            diagnostics = NativeDiagnostics(
+                ray=ray_stats.reshape(*leading_shape, 8),
+                gaussian=gaussian_stats.reshape(-1, 4),
+                medium=medium_stats.reshape(-1, 5),
+            )
+
         if hit_depths.size(0):
             valid_hits = (
                 (hit_indices >= 0)
@@ -465,6 +547,7 @@ class NativeHybridRenderer:
             hit_depths=hit_depths,
             hit_indices=hit_indices,
             num_intersections=num_intersections.reshape(*leading_shape, 1),
+            diagnostics=diagnostics,
         )
 
     def render_gaussians(
@@ -472,8 +555,14 @@ class NativeHybridRenderer:
         rays: torch.Tensor,
         scene: GaussianScene,
         background: torch.Tensor | tuple[float, float, float] = (0.0, 0.0, 0.0),
+        collect_diagnostics: bool = False,
     ) -> NativeHybridRender:
-        return self.render(rays, gaussians=scene, background=background)
+        return self.render(
+            rays,
+            gaussians=scene,
+            background=background,
+            collect_diagnostics=collect_diagnostics,
+        )
 
     def render_voronoi(
         self,
