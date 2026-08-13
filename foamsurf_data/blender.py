@@ -59,17 +59,24 @@ class BlenderDataset:
         root: str | Path,
         resolution: int = 1,
         device: str | torch.device = "cuda",
+        splits: tuple[str, ...] = ("train", "test"),
     ) -> None:
         self.root = Path(root)
         self.resolution = int(resolution)
         self.device = torch.device(device)
         self.sampling_mode = "mixed"
-        self.train = self._load_split("train")
-        self.test = self._load_split("test")
-        if not self.train:
+        unknown_splits = set(splits) - {"train", "test"}
+        if unknown_splits:
+            raise ValueError(f"unknown Blender splits: {unknown_splits}")
+        self.train = self._load_split("train") if "train" in splits else []
+        self.test = self._load_split("test") if "test" in splits else []
+        if "train" in splits and not self.train:
             raise ValueError("training split is empty")
-        self.width = self.train[0].width
-        self.height = self.train[0].height
+        cameras = self.train or self.test
+        if not cameras:
+            raise ValueError("at least one Blender split must be loaded")
+        self.width = cameras[0].width
+        self.height = cameras[0].height
         self._validate_camera_shapes()
 
     def _load_split(self, split: str) -> list[Camera]:

@@ -74,6 +74,40 @@ maksimum i aktywną frakcję gradient magnitude per prymityw.
 W&B dostaje te same skalary, comparison/responsibility panels oraz histogramy
 contribution, visibility, path length, max ray error i gradient magnitude.
 
+## Ground truth dekompozycji: FoamSurf Lego
+
+Konfiguracja `configs/b01_lego_layers.yaml` używa:
+
+- `lego_both` jako jedynego źródła obrazu dla samplera i lossu treningowego;
+- `lego_lego` jako testowego ground truth gałęzi Gaussian;
+- `lego_clouds` jako testowego ground truth gałęzi Voronoi medium.
+
+Uruchomienie:
+
+~~~bash
+sbatch scripts/train_b01_lego_layers.sbatch
+~~~
+
+Loader wymaga identycznej liczby, kolejności, nazw, rozdzielczości,
+intrinsics i pozy kamer. Przy rozbieżności przerywa przed inicjalizacją modelu.
+Ładuje wyłącznie pomocniczy split testowy na CPU; trening nigdy nie dostaje
+izolowanych warstw.
+
+W&B ma osobne sekcje `lego_lego/` i `lego_clouds/` z PSNR, SSIM, RGB MAE,
+alpha MAE, foreground PSNR oraz panelami:
+
+`target | branch render | RGB error | target alpha | predicted alpha | alpha error`.
+
+Sekcja `entanglement/` pokazuje błędną alfę oraz rzeczywiste compositing weight
+medium na pikselach lego-only, Gaussianów na cloud-only i obu gałęzi na tle.
+Zawiera również mapy czterech regionów w kolejności:
+
+`lego-only | cloud-only | overlap | background`.
+
+Próg obecności warstwy kontroluje
+`diagnostics.layer_alpha_threshold` (domyślnie `0.01`). Surowe wartości per
+widok są w `per_view.csv`, a średnie w `metrics/eval.csv`.
+
 ## Interpretacja na zwykłym Lego
 
 Ten dataset nie ma ground-truth podziału surface/medium. B0.1 może precyzyjnie
@@ -81,9 +115,8 @@ pokazać, że obie gałęzie odpowiadają za ten sam obszar, ale nie rozstrzyga,
 która gałąź semantycznie ma rację. Obecne Lego służy do regresji względem B0 i
 znalezienia failure views.
 
-Dataset z osobnymi, współrejestrowanymi warstwami hybrid/surface/medium
-umożliwi później decomposition metrics. Warstwy pomocnicze pozostaną tylko
-walidacją; bazowy trening nadal nie będzie ich używał.
+Zwykły dataset nadal służy do regresji B0/B0.1. Nowy wariant warstwowy daje
+jednoznaczny pomiar leakage w regionach lego-only i cloud-only.
 
 ## Kryteria regresji
 

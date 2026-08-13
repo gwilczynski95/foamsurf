@@ -11,6 +11,7 @@ import torch
 from foamsurf_model.scene import HybridSceneModel
 from foamsurf_model.topology import VoronoiTopologyController
 from training.config import ExperimentConfig
+from .layer_metrics import decomposition_metrics
 from .metrics import psnr, ssim
 
 
@@ -67,6 +68,18 @@ def _quantile(values: list[float], q: float) -> float:
     return float(np.quantile(np.asarray(values, dtype=np.float64), q))
 
 
+def _masked_scalar(value: torch.Tensor, mask: torch.Tensor) -> float:
+    expanded = mask.expand_as(value)
+    if not bool(expanded.any()):
+        return float("nan")
+    return float(value[expanded].mean().item())
+
+
+def _summary_name(name: str) -> str:
+    direct = ("lego_lego/", "lego_clouds/", "entanglement/", "regions/")
+    return name if name.startswith(direct) else f"eval/{name}"
+
+
 def _write_primitive_csv(
     path: Path,
     statistics: torch.Tensor,
@@ -91,12 +104,14 @@ class Evaluator:
         dataset,
         config: ExperimentConfig,
         output_dir: Path,
+        layer_ground_truth=None,
     ) -> None:
         self.renderer = renderer
         self.model = model
         self.topology = topology
         self.dataset = dataset
         self.config = config
+        self.layer_ground_truth = layer_ground_truth
         self.output_dir = output_dir
 
     @torch.no_grad()
@@ -257,6 +272,33 @@ class Evaluator:
                     "voronoi_render_seconds": medium_seconds,
                 }
 
+                layer_masks = None
+                lego_target = None
+                cloud_target = None
+                if self.layer_ground_truth is not None:
+                    lego_camera = self.layer_ground_truth.lego_lego[index]
+                    cloud_camera = self.layer_ground_truth.lego_clouds[index]
+                    lego_target = lego_camera.ground_truth(
+                        tuple(self.config.background)
+                    ).to(target.device)
+                    cloud_target = cloud_camera.ground_truth(
+                        tuple(self.config.background)
+                    ).to(target.device)
+                    lego_alpha = lego_camera.alpha.to(target.device)
+                    cloud_alpha = cloud_camera.alpha.to(target.device)
+                    layer_values, layer_masks = decomposition_metrics(
+                        gaussian_image,
+                        gaussian.alpha,
+                        medium_image,
+                        medium.alpha,
+                        lego_target,
+                        lego_alpha,
+                        cloud_target,
+                        cloud_alpha,
+                        self.config.diagnostics.layer_alpha_threshold,
+                    )
+                    row.update(layer_values)
+
                 contribution_panel = None
                 if diagnostics_enabled:
                     diagnostics = diagnostic_result.diagnostics
@@ -334,6 +376,23 @@ class Evaluator:
                             ),
                         }
                     )
+                    if layer_masks is not None:
+                        row.update(
+                            {
+                                "entanglement/medium_weight_on_lego_only": _masked_scalar(
+                                    medium_weight, layer_masks["lego_only"]
+                                ),
+                                "entanglement/gaussian_weight_on_cloud_only": _masked_scalar(
+                                    gaussian_weight, layer_masks["cloud_only"]
+                                ),
+                                "entanglement/gaussian_weight_on_background": _masked_scalar(
+                                    gaussian_weight, layer_masks["background"]
+                                ),
+                                "entanglement/medium_weight_on_background": _masked_scalar(
+                                    medium_weight, layer_masks["background"]
+                                ),
+                            }
+                        )
                     contribution_panel = torch.cat(
                         (
                             _heatmap(gaussian_weight),
@@ -390,6 +449,66 @@ class Evaluator:
                         wandb_images[
                             f"responsibility/view_{index:02d}"
                         ] = _uint8(contribution_panel)
+                    if lego_target is not None and cloud_target is not None:
+                        lego_alpha_rgb = lego_alpha.expand_as(lego_target)
+                        cloud_alpha_rgb = cloud_alpha.expand_as(cloud_target)
+                        gaussian_alpha_rgb = gaussian.alpha.expand_as(lego_target)
+                        medium_alpha_rgb = medium.alpha.expand_as(cloud_target)
+                        lego_panel = torch.cat(
+                            (
+                                lego_target,
+                                gaussian_image,
+                                (gaussian_image - lego_target).abs(),
+                                lego_alpha_rgb,
+                                gaussian_alpha_rgb,
+                                (gaussian_alpha_rgb - lego_alpha_rgb).abs(),
+                            ),
+                            dim=1,
+                        )
+                        cloud_panel = torch.cat(
+                            (
+                                cloud_target,
+                                medium_image,
+                                (medium_image - cloud_target).abs(),
+                                cloud_alpha_rgb,
+                                medium_alpha_rgb,
+                                (medium_alpha_rgb - cloud_alpha_rgb).abs(),
+                            ),
+                            dim=1,
+                        )
+                        mask_panel = torch.cat(
+                            tuple(
+                                layer_masks[name].float().expand_as(target)
+                                for name in (
+                                    "lego_only",
+                                    "cloud_only",
+                                    "overlap",
+                                    "background",
+                                )
+                            ),
+                            dim=1,
+                        )
+                        _save(
+                            directory / f"{prefix}_lego_lego.png",
+                            lego_panel,
+                        )
+                        _save(
+                            directory / f"{prefix}_lego_clouds.png",
+                            cloud_panel,
+                        )
+                        _save(
+                            directory / f"{prefix}_layer_masks.png",
+                            mask_panel,
+                        )
+                        wandb_images[f"lego_lego/view_{index:02d}"] = _uint8(
+                            lego_panel
+                        )
+                        wandb_images[f"lego_clouds/view_{index:02d}"] = _uint8(
+                            cloud_panel
+                        )
+                        wandb_images[f"entanglement/masks_{index:02d}"] = _uint8(
+                            mask_panel
+                        )
         finally:
             self.renderer.transmittance_threshold = original_threshold
 
@@ -408,7 +527,7 @@ class Evaluator:
             and isinstance(value, (float, int))
         ]
         summary = {
-            f"eval/{key}": float(
+            _summary_name(key): float(
                 np.mean([float(row[key]) for row in rows])
             )
             for key in numeric_keys

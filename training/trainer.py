@@ -11,7 +11,7 @@ from tqdm import trange
 
 from evaluation import Evaluator
 from foamsurf import NativeHybridRenderer
-from foamsurf_data import load_dataset
+from foamsurf_data import LayerGroundTruth, load_dataset
 from foamsurf_model import (
     HybridSceneModel,
     VoronoiTopologyController,
@@ -76,6 +76,19 @@ class Trainer:
             device=self.device,
             llffhold=config.dataset.llffhold,
         )
+        self.layer_ground_truth = None
+        if config.dataset.gaussian_ground_truth_path is not None:
+            self.layer_ground_truth = LayerGroundTruth.load(
+                self.dataset.test,
+                config.dataset.gaussian_ground_truth_path,
+                config.dataset.medium_ground_truth_path,
+                resolution=config.dataset.resolution,
+            )
+            print(
+                "Loaded aligned lego_lego and lego_clouds test ground truth "
+                "on CPU (evaluation only).",
+                flush=True,
+            )
         self.model = HybridSceneModel.initialize(
             self.dataset, config, self.device
         )
@@ -156,6 +169,7 @@ class Trainer:
             self.dataset,
             config,
             self.output_dir,
+            layer_ground_truth=self.layer_ground_truth,
         )
         self.logger = ExperimentLogger(
             config, self.output_dir, resume=self.resume_path is not None

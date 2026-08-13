@@ -86,8 +86,12 @@ def main() -> int:
     if base.exists():
         shutil.rmtree(base)
     dataset = base / "dataset"
+    lego_ground_truth = base / "lego_lego"
+    cloud_ground_truth = base / "lego_clouds"
     output = base / "output"
     _make_dataset(dataset)
+    _make_dataset(lego_ground_truth)
+    _make_dataset(cloud_ground_truth)
 
     config = ExperimentConfig(
         experiment_name="b0-smoke",
@@ -95,7 +99,11 @@ def main() -> int:
         seed=7,
         device="cuda",
         background=[1.0, 1.0, 1.0],
-        dataset=DatasetConfig(source_path=str(dataset)),
+        dataset=DatasetConfig(
+            source_path=str(dataset),
+            gaussian_ground_truth_path=str(lego_ground_truth),
+            medium_ground_truth_path=str(cloud_ground_truth),
+        ),
         model=ModelConfig(
             appearance="rgb",
             gaussian_initial_points=32,
@@ -141,6 +149,18 @@ def main() -> int:
         / "evaluation"
         / "iteration_000003"
         / "0000_test_0_responsibility.png",
+        output
+        / "evaluation"
+        / "iteration_000003"
+        / "0000_test_0_lego_lego.png",
+        output
+        / "evaluation"
+        / "iteration_000003"
+        / "0000_test_0_lego_clouds.png",
+        output
+        / "evaluation"
+        / "iteration_000003"
+        / "0000_test_0_layer_masks.png",
         output
         / "evaluation"
         / "iteration_000003"

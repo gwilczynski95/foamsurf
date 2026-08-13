@@ -23,6 +23,8 @@ class DatasetConfig:
     source_path: str = ""
     resolution: int = 1
     llffhold: int = 8
+    gaussian_ground_truth_path: str | None = None
+    medium_ground_truth_path: str | None = None
 
 
 @dataclass
@@ -86,6 +88,7 @@ class DiagnosticsConfig:
     enabled: bool = False
     save_per_primitive: bool = True
     contribution_epsilon: float = 1.0e-6
+    layer_alpha_threshold: float = 0.01
 
 
 @dataclass
@@ -165,6 +168,14 @@ class ExperimentConfig:
     def validate(self) -> None:
         if not self.dataset.source_path:
             raise ValueError("dataset.source_path is required")
+        layer_paths = (
+            self.dataset.gaussian_ground_truth_path,
+            self.dataset.medium_ground_truth_path,
+        )
+        if (layer_paths[0] is None) != (layer_paths[1] is None):
+            raise ValueError(
+                "dataset Gaussian and medium ground-truth paths must be set together"
+            )
         if self.dataset.resolution < 1:
             raise ValueError("dataset.resolution must be positive")
         if self.model.appearance not in {"rgb", "sh"}:
@@ -218,6 +229,10 @@ class ExperimentConfig:
         ):
             if getattr(self.validation, name) < 1:
                 raise ValueError(f"validation.{name} must be positive")
+        if not 0.0 <= self.diagnostics.layer_alpha_threshold <= 1.0:
+            raise ValueError(
+                "diagnostics.layer_alpha_threshold must be in [0, 1]"
+            )
         if self.diagnostics.contribution_epsilon < 0:
             raise ValueError(
                 "diagnostics.contribution_epsilon must be non-negative"

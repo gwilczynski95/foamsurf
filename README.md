@@ -85,6 +85,22 @@ For an interactive run use config configs/b01_lego.yaml. See
 [the B0.1 diagnostics guide](docs/B01_DIAGNOSTICS.md) for all metrics, images,
 CSV schemas and interpretation.
 
+### Layer-ground-truth entanglement experiment
+
+The aligned FoamSurf Lego dataset trains only on `lego_both`. Its `lego_lego`
+and `lego_clouds` test images are evaluation-only targets for the Gaussian and
+Voronoi branches respectively:
+
+~~~bash
+sbatch scripts/train_b01_lego_layers.sbatch
+~~~
+
+W&B exposes separate `lego_lego`, `lego_clouds`, and `entanglement` sections.
+The same scalar results are retained in `metrics/eval.csv`; aligned images and
+region masks are saved under each `evaluation/iteration_*` directory. The
+layer targets are kept on CPU and one view is moved to the GPU at evaluation
+time, so they do not triple persistent GPU image memory.
+
 ## Train B0 on NeRF Synthetic Lego
 
 The supplied configuration enables W&B online logging:

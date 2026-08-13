@@ -10,6 +10,11 @@ import torch
 from .config import ExperimentConfig
 
 
+def wandb_image_key(name: str) -> str:
+    direct_sections = ("lego_lego/", "lego_clouds/", "entanglement/")
+    return name if name.startswith(direct_sections) else f"images/{name}"
+
+
 class CsvTable:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -84,7 +89,8 @@ class ExperimentLogger:
 
         payload: dict[str, Any] = dict(row)
         for name, image in images.items():
-            payload[f"images/{name}"] = wandb.Image(image)
+            key = wandb_image_key(name)
+            payload[key] = wandb.Image(image)
         for name, values in histograms.items():
             flat = values.detach().float().reshape(-1).cpu()
             if flat.numel() > 100_000:
