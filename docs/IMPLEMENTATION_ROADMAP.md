@@ -1,160 +1,177 @@
-# Plan wdrażania po baseline B0
+# FoamSurf: roadmapa badań i implementacji
 
-Ten dokument rozdziela to, co działa dzisiaj, od kolejnych hipotez badawczych.
-Nie należy włączać kilku etapów naraz: B0 ma najpierw dostarczyć kontrolę i
-diagnostykę entanglementu bez regularyzacji.
+Ten dokument definiuje kolejność rozwoju FoamSurf oraz kryteria przejścia
+między etapami. Najważniejsza zasada brzmi: najpierw kwalifikujemy każdą
+reprezentację osobno, następnie badamy ich interakcję, dopiero potem
+rozwiązujemy entanglement i poprawiamy końcową jakość.
 
-Dokument koncepcyjny projektu pozostaje w
-[entanglement_proposition.md](../entanglement_proposition.md). Poniższy plan
-przekłada te pomysły na granice modułów, eksperymenty i kryteria akceptacji.
+Nie należy równocześnie zmieniać reprezentacji, adaptacji topologii i lossu
+disentanglement. Taki eksperyment nie pozwala ustalić przyczyny poprawy lub
+regresji.
 
-## Stan wyjściowy: B0
+Dokument koncepcyjny pozostaje w
+[entanglement_proposition.md](../entanglement_proposition.md).
 
-B0 zawiera:
+## Protokół danych
 
-- surface 2D Gaussians i sparse volumetric Voronoi medium;
+Aligned Lego zawiera trzy zgodne zestawy obrazów:
+
+- `lego_lego`: sama powierzchnia Lego;
+- `lego_clouds`: samo medium;
+- `lego_both`: kompozycja powierzchni i medium.
+
+Ich rola zależy od etapu:
+
+| etap | supervision treningowe | rola pozostałych warstw |
+|---|---|---|
+| 1. Gaussian-only | `lego_lego` | kwalifikacja powierzchni |
+| 2. Voronoi-only | `lego_clouds` | kwalifikacja medium |
+| 3. Integracja | wyłącznie `lego_both` | `lego_lego` i `lego_clouds` tylko do ewaluacji |
+| 4. Disentanglement | wyłącznie `lego_both` | `lego_lego` i `lego_clouds` tylko do ewaluacji |
+| 5. Dofitowanie | wyłącznie `lego_both` | `lego_lego` i `lego_clouds` tylko do ewaluacji |
+
+W etapach 1 i 2 warstwy są świadomie używane jako targets do kwalifikacji
+zdolności reprezentacji. Od etapu 3 nie wolno używać ich w lossie, wybierać
+nimi pikseli ani przekazywać modelowi masek warstw.
+
+Każdy etap zachowuje osobny train/test split kamer. Wynik na widokach
+treningowych nie jest kryterium ukończenia.
+
+Do eksperymentów hybrydowych nie przenosimy wag wytrenowanych na
+`lego_lego` lub `lego_clouds`. Etap 3 zaczyna się od świeżej inicjalizacji.
+Przenosimy wyłącznie sprawdzoną architekturę, algorytmy adaptacji i ustalone
+hiperparametry. Transfer layer-supervised weights byłby oracle initialization
+i fałszowałby ocenę disentanglementu.
+
+## Istniejąca infrastruktura: B0 i B0.1
+
+Baseline zawiera:
+
+- planar 2D Gaussians i sparse volumetric Voronoi medium;
 - wspólny depth-ordered renderer z gradientami obu reprezentacji;
-- wyłącznie hybrid RGB MSE;
-- stałą liczbę prymitywów;
-- okresowy rebuild Delaunay po ruchu sites;
-- trzy tryby walidacji, CSV, W&B, last/best checkpoints;
-- unit, native renderer i end-to-end resume tests.
+- tryby hybrid, Gaussian-only i Voronoi-only;
+- CSV, W&B, obrazy diagnostyczne oraz last/best checkpoints;
+- aligned evaluation dla `lego_lego` i `lego_clouds`;
+- testy renderera, gradientów i checkpoint/resume.
 
-Pierwszy pełny run B0 powinien odpowiedzieć:
+B0.1 dostarcza diagnostykę odpowiedzialności bez zmiany obrazu i lossu.
+Szczegóły opisuje [B01_DIAGNOSTICS.md](B01_DIAGNOSTICS.md). Raportowane są
+między innymi contribution, visibility, transmittance, overlap, responsibility
+oraz layer-specific leakage.
 
-- czy Voronoi pozostaje medium, czy kopiuje powierzchnie;
-- która gałąź najszybciej przejmuje rekonstrukcję;
-- jak zmieniają się density, opacity, alpha i gradient norm;
-- gdzie hybrid jest lepszy/gorszy od każdego izolowanego komponentu;
-- czy czas i pamięć ogranicza OptiX hit buffer, Voronoi traversal czy batch.
+Kod adaptacji Gaussianów i profil odpowiadający efektywnemu zachowaniu
+przypiętego oficjalnego 2DGS są zaimplementowane. Szczegóły opisuje
+[B1_2DGS_BASELINE.md](B1_2DGS_BASELINE.md). Nie oznacza to jeszcze
+kwalifikacji reprezentacji: dotychczasowy run był hybrydowy, więc wynik
+Gaussianów był zaburzony przez medium.
 
-Nie zmieniamy modelu przed obejrzeniem obrazów Gaussian-only, Voronoi-only,
-transmittance oraz wykresów parametrów z kilku scen i seedów.
+## Etap 1: kwalifikacja Gaussian-only
 
-## Etap B0.1: wiarygodna diagnostyka odpowiedzialności — zaimplementowany
+### Cel
 
-Stan: wdrożony jako opcjonalny, domyślnie wyłączony tryb. Szczegóły i
-artefakty opisuje [B01_DIAGNOSTICS.md](B01_DIAGNOSTICS.md). B0.1 nie zmienia
-lossu ani trajektorii treningu; instrumentacja działa w walidacji.
+Udowodnić, że powierzchniowa reprezentacja FoamSurf samodzielnie tworzy ostre,
+stabilne i wielowidokowo spójne Lego. Na tym etapie medium nie może wpływać na
+forward, loss, gradient ani optymalizator.
 
-Przed regularyzacją renderer powinien opcjonalnie zwracać per-ray/per-primitive
-statystyki bez zmiany obrazu:
+### Eksperyment
 
-- skumulowaną wagę compositingu Gaussianów i medium;
-- długość drogi w aktywnych komórkach;
-- liczbę Gaussian events i Voronoi crossings;
-- `T` przed/po każdym typie reprezentacji w formie zredukowanej;
-- widoczność, maksymalny błąd rayów i sumę gradient magnitude per primitive.
+- trening i walidacja na odpowiednich splitach `lego_lego`;
+- wyłącznie Gaussian renderer;
+- pełny obraz i kamery losowane bez zwracania;
+- inicjalizacja, SH, learning rates, densyfikacja, pruning i opacity schedule
+  kontrolowane względem oficjalnego 2DGS;
+- pełny run 30k oraz co najmniej trzy seedy dla finalnej konfiguracji;
+- bez regularyzacji wykorzystujących wiedzę o medium.
 
-Nie wolno alokować pełnej macierzy `rays x primitives`. CUDA ma atomowo
-redukować statystyki do buforów `[G]`, `[V]` i ewentualnie `[R]`.
-Tryb statystyk musi dać identyczny RGB i gradient w tolerancji do zwykłego
-renderu i być domyślnie wyłączony.
+Porównanie z oficjalnym 2DGS powinno używać tych samych kamer, obrazów,
+rozdzielczości, białego tła i możliwie zgodnej inicjalizacji. Różnice
+renderera muszą być jawnie opisane.
 
-Kryterium akceptacji:
+### Diagnostyka
 
-- test zgodności obrazu i gradientów statistics on/off;
-- brak znaczącego narzutu, gdy statistics są wyłączone;
-- W&B/CSV raportuje rozkłady contribution/visibility dla obu reprezentacji.
+Raportujemy:
 
-## Etap B1: kontrolowana densyfikacja/pruning Gaussianów
+- PSNR, SSIM, LPIPS i foreground PSNR;
+- obrazy oraz cropy wysokich częstotliwości;
+- liczbę Gaussianów i zdarzenia clone/split/prune;
+- opacity, projected radii, world scales i stopień SH;
+- skoki metryk wokół resetów oraz eventów topologii;
+- czas treningu, FPS i peak GPU memory.
 
-Najpierw warto odtworzyć standardowy cykl 3DGS/FlaRe w nowej strukturze:
+### Kryterium ukończenia
 
-- collect screen-space/ray error i visibility;
-- split/clone prymitywów o wysokim błędzie;
-- prune znikome opacity, contribution albo błędną geometrię;
-- zachowaj/przenieś stan Adam;
-- wykonaj `set_gaussian_geometry` po mutacji;
-- loguj liczbę split/clone/prune i pamięć GPU.
+- jakość testowych widoków jest zbliżona do ustalonego baseline'u 2DGS;
+- detale nie znikają po opacity resetach ani pruningu;
+- run 30k przechodzi bez NaN/OOM i trwałego załamania jakości;
+- wyniki są stabilne między seedami;
+- projected-radius i gradient regression tests pozostają zgodne;
+- checkpoint/resume zachowuje trajektorię w oczekiwanej tolerancji.
 
-Nie należy jeszcze aktywować adaptive Voronoi w tym samym eksperymencie.
-Porównanie B0 vs B1 pokaże wpływ samej adaptacji powierzchni.
+Jeżeli ten etap nie przechodzi, nie modyfikujemy medium ani
+disentanglementu. Naprawiamy wyłącznie surface model, renderer lub jego
+optymalizację.
 
-Kryterium akceptacji:
+## Etap 2: kwalifikacja adaptacyjnego Voronoi-only
 
-- unit test mapowania parametrów i momentów Adam;
-- renderer equivalence przed/po no-op topology operation;
-- pełny run osiąga zakładany budget Gaussianów bez NaN/OOM;
-- ablation z tą samą inicjalizacją i seedem.
+### Cel
 
-## Etap B2: pierwszy mechanizm disentanglement
+Udowodnić, że Voronoi samodzielnie reprezentuje miękkie, półprzezroczyste
+medium. Adaptacyjna densyfikacja i pruning są obowiązkową częścią tego etapu,
+a nie późniejszym dodatkiem.
 
-Dopiero na podstawie B0/B1 należy wybrać najmniejszą regularyzację. Kandydaci z
-propozycji entanglementu powinni być wdrażani pojedynczo, na przykład:
+### Eksperyment
 
-- powierzchnia: preferencja ostrej, zwartej odpowiedzi i spójności normalnych;
-- medium: preferencja rozproszonej, niskoczęstotliwościowej absorpcji/emisji;
-- penalizacja nakładania się dużej medium contribution z silną surface alpha
-  w bardzo bliskim zakresie głębokości;
-- stopniowany schedule, aby inicjalizacja jednej gałęzi nie zagłodziła drugiej.
+- trening i walidacja na odpowiednich splitach `lego_clouds`;
+- wyłącznie Voronoi renderer;
+- brak Gaussian events, parametrów i gradientów;
+- baseline ze stałą liczbą sites jako kontrola;
+- wariant adaptacyjny z pełnym testem 30k i kilkoma seedami;
+- porównania różnych budżetów punktów przy tym samym rendererze i lossie.
 
-Każdy składnik dostaje osobny klucz config, osobny log W&B/CSV i wagę równą
-zero w configu B0. Nie sumujemy anonimowego `regularization_loss`.
+Nie kopiujemy RadFoamowego depth quantization ani kryterium twardej
+powierzchni. Voronoi ma modelować objętościową absorpcję/emisję.
 
-Kryterium akceptacji:
+### Statystyki adaptacji komórki
 
-- przy wadze zero loss i gradient są zgodne z B0;
-- test gradientu pokazuje dokładnie, do której gałęzi działa składnik;
-- raportujemy quality hybrid i component-only, a nie tylko PSNR hybrid;
-- minimum trzy seedy i kilka scen, bo podział odpowiedzialności może być
-  niestabilny.
+Dla każdej komórki zbieramy w stabilnym oknie lub EMA:
 
-## Etap B3: adaptacyjna densyfikacja i pruning Voronoi
+- visibility i liczbę ray segments;
+- długość drogi ważoną wejściową transmittance;
+- contribution `T * alpha_medium`;
+- korelację contribution z residualem RGB;
+- gradient density, color i site position;
+- stabilny proxy rozmiaru/objętości komórki;
+- wiek komórki i czas od ostatniej mutacji.
 
-To jest wymagany element finalnej metody. Nie powinien kopiować mechanizmu
-Radiant Foam opartego na twardym surface error, ponieważ Voronoi ma modelować
-medium.
-
-### Statystyki dla komórki
-
-Dla każdej komórki zbieramy wykładniczo wygładzone:
-
-- `visibility`: liczba/masa rayów przechodzących przez komórkę;
-- `path_weight`: suma długości odcinków ważona wejściową transmittance;
-- `contribution`: suma `T * alpha_medium`;
-- `residual_correlation`: korelacja jej wkładu z residualem RGB;
-- `density_grad`, `color_grad`, `site_grad`;
-- objętość komórki lub stabilny proxy z sąsiadów;
-- overlap z Gaussian surface events wzdłuż tych samych rayów.
-
-EMA i minimalny okres obserwacji są konieczne, aby pojedynczy batch nie
-wywoływał zmiany topologii.
+Pojedynczy batch nie może wywoływać zmiany topologii.
 
 ### Densyfikacja
 
-Komórka jest kandydatem do splitu, gdy jest widoczna, ma istotną drogę/wkład i
-utrzymujący się błąd lub wariancję gradientu. Nowy site powinien powstać:
+Densyfikujemy komórkę, gdy jest dostatecznie obserwowana oraz ma utrzymujący
+się błąd, gradient lub niewystarczającą rozdzielczość przestrzenną. Nowy site
+powstaje wewnątrz volume:
 
-- wzdłuż osi największej przestrzennej niepewności komórki;
-- albo w ważonej residualem lokalizacji odcinków rayów;
-- z minimalnym odstępem od istniejących sites;
-- wewnątrz dozwolonego volume.
+- w lokalizacji ważonej błędnymi odcinkami rayów;
+- albo wzdłuż osi największej przestrzennej niepewności komórki;
+- z minimalnym odstępem od istniejących sites.
 
-Nowe density/color dziedziczymy tak, aby pierwszy render po splicie możliwie
-mało zmienił funkcję sceny. Momenty Adam są kopiowane lub kontrolowanie
-zerowane i operacja zawsze kończy się pełnym rebuildem Delaunay.
+Density i color dzieci inicjalizujemy tak, aby pierwszy render po operacji
+możliwie mało zmieniał funkcję medium.
 
 ### Pruning i merge
 
-Nie wystarczy usuwać niskiej density. Przezroczysta komórka może być potrzebna
-topologicznie jako przejście, a guard sites nie mogą zniknąć.
+Sama niska density nie jest wystarczającym kryterium usunięcia. Rzadka
+komórka może poprawnie reprezentować delikatny fragment chmury albo być
+potrzebna topologicznie.
 
-Kandydat do usunięcia/merge powinien przez odpowiednio długi czas mieć:
+Kandydat powinien przez odpowiednio długi czas mieć małą visibility lub
+contribution, mały wpływ na residual i bezpieczne sąsiedztwo. Preferujemy
+merge z podobnym sąsiadem, jeśli lepiej zachowuje funkcję. Guard sites nigdy
+nie są usuwane.
 
-- małą visibility/path weight albo małą contribution;
-- mały wpływ na residual;
-- density/color podobne do najlepszego sąsiada;
-- brak statusu guard;
-- bezpieczną geometrię po symulowanym usunięciu.
+### Kontrakt implementacyjny
 
-Preferowany jest merge do sąsiada z podobnymi właściwościami zamiast ślepego
-delete. Potrzebny jest minimalny i maksymalny budget punktów oraz cooldown po
-każdej operacji.
-
-### Własność kodu
-
-`VoronoiTopologyController` powinien dostać trzy jawne fazy:
+`VoronoiTopologyController` ma trzy jawne fazy:
 
 ```text
 collect_statistics(render_aux, residual)
@@ -162,77 +179,185 @@ propose_changes(iteration, budget) -> TopologyPlan
 apply_plan(model, optimizer, plan)
 ```
 
-`TopologyPlan` jest logowalny/testowalny przed mutacją. `apply_plan` musi
-przebudować wszystkie `Parameter`, przenieść stan Adam, zaktualizować guard
-mask, wykonać pełne Delaunay i zsynchronizować renderer. Trainer jedynie
-wywołuje kontroler na schedule; nie zna kryteriów split/prune.
+Plan jest logowalny przed mutacją. Aplikacja planu przenosi parametry i stan
+Adam, zachowuje guard mask, wykonuje pełny rebuild Delaunay i synchronizuje
+renderer.
 
-Kryterium akceptacji:
+### Kryterium ukończenia
 
-- deterministyczne unit tests planu na syntetycznych statystykach;
-- test zachowania wszystkich pól i stanu Adam przy split/prune/merge;
-- test topologii po setkach losowych mutacji bez błędnych indeksów;
-- brak pruningu guard sites;
-- obraz przed i po neutralnym splicie/merge zmienia się poniżej ustalonej
-  tolerancji;
-- liczność pozostaje w budżecie;
-- pełna diagnostyka operacji w CSV/W&B.
+- Voronoi-only poprawnie odtwarza testowe widoki `lego_clouds`;
+- wariant adaptacyjny mierzalnie przewyższa fixed-site baseline przy
+  porównywalnym budżecie;
+- adaptacja nie tworzy twardych powierzchni ani artefaktów komórkowych;
+- neutralny split/merge zmienia render poniżej ustalonej tolerancji;
+- testy obejmują optimizer-state migration, guard sites i losowe sekwencje
+  mutacji topologii;
+- run 30k jest stabilny, mieści się w budżecie i działa po resume;
+- CSV/W&B raportują każdą przyczynę split/prune/merge.
 
-## Etap B4: renderer drugiej generacji
+Jeżeli etap nie przechodzi, nie rozwiązujemy jeszcze entanglementu. Najpierw
+poprawiamy możliwości samego medium.
 
-Obecny renderer jest poprawnym baseline'em, ale ma pośredni OptiX hit buffer
-`[16,R]` i osobny kernel compositingu. CUDA roadmapa:
+## Etap 3: integracja obu reprezentacji
 
-1. dodać benchmark osobno dla hit generation i hybrid traversal;
-2. usunąć twardy limit 16 albo udowodnić, że truncation nie występuje;
-3. przenieść oba typy eventów do jednego traversal/launch;
-4. przyspieszyć starting-cell lookup;
-5. dodać opcjonalne zredukowane statystyki dla adaptacyjnej topologii;
-6. zachować publiczny kontrakt `GaussianScene/VoronoiScene`.
+### Cel
 
-Każdy etap porównujemy z `HybridRenderer` oracle i aktualnym native
-rendererem: forward, pure modes, finite differences/gradcheck, przypadki
-kolejności surface-before-medium i medium-before-surface oraz benchmark
-pełnego wywołania dla rzeczywistej rozdzielczości.
+Połączyć dwie zakwalifikowane reprezentacje i jednoznacznie zmierzyć ich
+naturalną interakcję bez mechanizmu disentanglementu.
 
-## Etap B5: duże sceny
+### Protokół
 
-Dla Mip-NeRF 360/COLMAP potrzebne będą osobne eksperymenty:
+- świeża inicjalizacja obu reprezentacji;
+- trening wyłącznie na `lego_both`;
+- `lego_lego` i `lego_clouds` wyłącznie w ewaluacji;
+- adaptacyjne Gaussy i adaptacyjne Voronoi;
+- brak layer-aware lossów, masek i oracle initialization;
+- identyczny split kamer, renderer i budżet dla wszystkich ablation.
 
-- normalizacja i jawne near/far per scena;
-- volume bounds odporne na outliery kamer/point cloudu;
-- budżety primitive zależne od extent/coverage;
-- chunked full-image validation;
-- kontrola pamięci AS/CSR/hit buffers;
-- ewentualny spatial partitioning bez zmiany wyniku compositingu.
+Minimalna macierz:
 
-Najpierw loader powinien przejść camera/ray regression tests przeciw 3DGS.
-Następnie mały crop/scene smoke test, dopiero potem pełne runy.
+1. obie reprezentacje uczone od początku;
+2. Gaussy uczone, medium zamrożone;
+3. medium uczone, Gaussy zamrożone;
+4. Gaussian warm-up, potem wspólny trening;
+5. Voronoi warm-up, potem wspólny trening.
 
-## Macierz eksperymentów
+Warianty zamrożone służą do audytu gradientów i nie są kandydatami finalnej
+metody.
 
-Minimalna sekwencja porównań:
+### Kryterium ukończenia
 
-| wariant | surface adaptive | medium adaptive | disentanglement |
-|---|---:|---:|---:|
-| B0 | nie | nie | nie |
-| B1 | tak | nie | nie |
-| B2 | tak | nie | jedna regularyzacja |
-| B3 | tak | tak | ta sama regularyzacja |
+- renderer zachowuje standalone forward i gradient obu reprezentacji;
+- wiemy, kiedy oraz jak jedna gałąź przejmuje sygnał drugiej;
+- znamy wpływ wspólnego treningu na population, opacity, density, scale i
+  contribution;
+- co najmniej trzy seedy pokazują, czy interakcja jest stabilna;
+- otrzymujemy jawny, odtwarzalny baseline entanglementu dla etapu 4.
 
-Dla każdego zachowujemy dataset/split, seed, budget rayów, liczbę iteracji i
-renderer settings. Raport obejmuje hybrid/Gaussian-only/Voronoi-only
-PSNR/SSIM, training time, FPS, peak memory, liczności prymitywów i wykresy
-responsibility/contribution.
+Etap 3 nie musi mieć dobrego rozdzielenia warstw. Jego wynikiem jest poprawnie
+zmierzony problem, a nie jego rozwiązanie.
 
-## Definicja ukończenia finalnej integracji
+## Etap 4: disentanglement
 
-Etap można uznać za gotowy do merge dopiero, gdy:
+### Cel
 
-- ma config z domyślnie jawnym zachowaniem;
-- ma unit test logiki i native integration smoke test;
-- zachowuje B0 przy wyłączonej opcji;
-- loguje własne sygnały i operacje do CSV oraz W&B;
-- działa po checkpoint/resume;
-- ma wynik pełnego eksperymentu, nie tylko pojedynczy render;
-- dokumentacja renderera i walkthrough odzwierciedlają faktyczny kod.
+Sprawić, aby Gaussy odpowiadały za powierzchnię, a Voronoi za medium, bez
+korzystania z rozdzielonych warstw podczas treningu.
+
+### Zasady
+
+- supervision pozostaje wyłącznie `lego_both`;
+- `lego_lego` i `lego_clouds` są wyłącznie ewaluacją i narzędziem rozwoju;
+- mechanizmy wprowadzamy pojedynczo;
+- każdy składnik ma osobny config, log i wagę zero odtwarzającą etap 3;
+- nie maskujemy pikseli oracle maskami;
+- nie przenosimy layer-supervised weights.
+
+Kandydaci z
+[entanglement_proposition.md](../entanglement_proposition.md) obejmują między
+innymi priory reprezentacji, regularyzację odpowiedzialności, schedule
+aktywacji oraz ograniczenie nakładania contribution. Kolejność wdrażania
+wynika z danych z etapu 3, a nie z jednoczesnego sweepu wielu nowych lossów.
+
+### Metryki sukcesu
+
+- spadek `medium_alpha_on_lego_only` i
+  `medium_weight_on_lego_only`;
+- spadek `gaussian_alpha_on_cloud_only` i
+  `gaussian_weight_on_cloud_only`;
+- wzrost Gaussian dominance na `lego_lego`;
+- wzrost medium dominance na `lego_clouds`;
+- spadek overlap i leakage na background;
+- zachowanie lub poprawa hybrid PSNR/SSIM/LPIPS.
+
+### Kryterium ukończenia
+
+- poprawa rozdzielenia występuje na testowych kamerach i kilku seedach;
+- hybrid quality nie jest kupowana przez wygaszenie jednej reprezentacji;
+- obie reprezentacje zachowują jakość udowodnioną w etapach 1 i 2;
+- ablation pokazuje wpływ każdego aktywnego składnika;
+- wynik przenosi się na co najmniej jedną dodatkową scenę.
+
+## Etap 5: dofitowanie reprezentacji i systemu
+
+### Cel
+
+Poprawić końcową jakość, szybkość i skalowalność dopiero po ustabilizowaniu
+podziału odpowiedzialności.
+
+Etap 4 odpowiada na pytanie: „która reprezentacja ma modelować dany sygnał?”.
+Etap 5 odpowiada: „jak dobrze każda reprezentacja modeluje właściwy sobie
+sygnał?”.
+
+### Zakres jakościowy
+
+- końcowe learning-rate schedules i harmonogramy adaptacji;
+- ostrość, SH i budżet Gaussianów;
+- subtelne struktury, density/color parameterization oraz budżet Voronoi;
+- inicjalizacja obu reprezentacji bez oracle danych;
+- kontrola footprintów, near/far i volume bounds;
+- końcowe wagi mechanizmu disentanglementu;
+- generalizacja na kilka scen i datasetów.
+
+Nie akceptujemy poprawy samego hybrid PSNR, jeżeli layer diagnostics pokazują
+większy entanglement.
+
+### Renderer drugiej generacji
+
+Obecny renderer ma pośredni OptiX hit buffer `[16,R]` i osobny kernel
+compositingu. Kierunki pracy:
+
+1. benchmark hit generation i hybrid traversal osobno;
+2. usunięcie limitu 16 albo dowód braku truncation;
+3. połączenie obu typów eventów w jednym traversal/launch;
+4. szybszy starting-cell lookup;
+5. zredukowane statystyki dla obu kontrolerów topologii;
+6. zachowanie publicznego kontraktu `GaussianScene/VoronoiScene`.
+
+Każda optymalizacja przechodzi forward, pure-mode, finite-difference,
+gradient i pełno-rozdzielczy benchmark przeciw aktualnemu rendererowi.
+
+### Duże sceny
+
+Dla COLMAP/Mip-NeRF 360 potrzebne są:
+
+- odporna normalizacja oraz jawne near/far;
+- volume bounds odporne na outliery;
+- budżety zależne od camera extent i coverage;
+- chunked validation;
+- kontrola pamięci AS, CSR i hit buffers;
+- ewentualny spatial partitioning bez zmiany compositingu.
+
+### Kryterium ukończenia
+
+- poprawa jakości występuje w hybrid i właściwych component-only metrics;
+- brak regresji disentanglementu;
+- pełne 30k działa bez NaN/OOM na scenach syntetycznych;
+- co najmniej jeden duży dataset COLMAP przechodzi end-to-end;
+- raport zawiera training time, FPS, peak memory i liczności obu reprezentacji;
+- renderer zachowuje testy forward/gradient po optymalizacjach.
+
+## Wymagania wspólne dla wszystkich etapów
+
+Każda nowa funkcja musi:
+
+- mieć jawny config i zachowanie wyłączone odtwarzające poprzedni etap;
+- mieć unit tests logiki oraz native integration smoke test;
+- raportować własne sygnały i operacje do CSV oraz W&B;
+- działać po checkpoint/resume;
+- mieć co najmniej jeden pełny eksperyment, nie tylko pojedynczy render;
+- zachowywać artefakty potrzebne do wizualnego porównania;
+- aktualizować dokumentację renderera i walkthrough.
+
+Minimalny raport eksperymentu zawiera:
+
+- hybrid, Gaussian-only i Voronoi-only PSNR/SSIM/LPIPS;
+- layer-specific foreground metrics;
+- responsibility, contribution, overlap i leakage;
+- liczności, zdarzenia topologii i rozkłady parametrów;
+- training time, render FPS i peak GPU memory;
+- config, seed, commit i źródło datasetu.
+
+Nie przechodzimy do kolejnego etapu tylko dlatego, że pojedynczy run wygląda
+obiecująco. Przejście wymaga spełnienia jawnych kryteriów oraz wyniku
+powtarzalnego między seedami.
