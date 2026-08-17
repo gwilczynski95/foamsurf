@@ -71,10 +71,14 @@ class ExperimentLogger:
             self.wandb_run.define_metric("iteration")
             self.wandb_run.define_metric("*", step_metric="iteration")
 
-    def log_train(self, row: dict[str, Any]) -> None:
+    def log_train(
+        self, row: dict[str, Any], *, commit: bool = True
+    ) -> None:
         self.train_csv.append(row)
         if self.wandb_run is not None:
-            self.wandb_run.log(row)
+            self.wandb_run.log(
+                row, step=int(row["iteration"]), commit=commit
+            )
 
     def log_eval(
         self,
@@ -101,7 +105,11 @@ class ExperimentLogger:
             payload[f"histograms/{name}"] = wandb.Histogram(
                 flat.numpy()
             )
-        self.wandb_run.log(payload)
+        self.wandb_run.log(
+            payload,
+            step=int(row["iteration"]),
+            commit=True,
+        )
 
     def close(self) -> None:
         if self.wandb_run is not None:

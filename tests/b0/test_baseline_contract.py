@@ -60,8 +60,8 @@ def test_oracle_b0_loss_reaches_both_representations() -> None:
     )
     loss.total.backward()
 
-    assert gaussians.appearance.grad is not None
-    assert gaussians.appearance.grad.abs().sum() > 0
+    assert gaussians.appearance_dc.grad is not None
+    assert gaussians.appearance_dc.grad.abs().sum() > 0
     assert medium.raw_density.grad is not None
     assert medium.raw_density.grad.abs().sum() > 0
     assert medium.raw_color.grad is not None
@@ -119,3 +119,33 @@ def test_b0_and_b01_configs_keep_diagnostics_explicit() -> None:
     assert b01.diagnostics.enabled is True
     assert b0.optimization == b01.optimization
     assert b0.model == b01.model
+
+
+def test_b1_uses_graphdeco_gaussian_optimization_from_layered_b01() -> None:
+    from pathlib import Path
+
+    from training.config import ExperimentConfig
+
+    root = Path(__file__).resolve().parents[2]
+    b01 = ExperimentConfig.load(root / "configs" / "b01_lego_layers.yaml")
+    b1 = ExperimentConfig.load(root / "configs" / "b1_lego_layers.yaml")
+    assert b01.gaussian_adaptation.enabled is False
+    assert b1.gaussian_adaptation.enabled is True
+    assert b1.model.gaussian_initial_points == 100_000
+    assert b1.gaussian_adaptation.max_points == 200_000
+    assert b1.gaussian_adaptation.densification_interval == 100
+    assert b1.gaussian_adaptation.gradient_threshold == 2.0e-4
+    assert b1.model.gaussian_initial_opacity == 0.1
+    assert b1.optimization.gaussian_appearance_lr == 0.0025
+    assert b1.optimization.gaussian_appearance_rest_lr_scale == 0.05
+    assert b1.optimization.gaussian_opacity_lr == 0.025
+    assert b1.optimization.gaussian_means_lr == 0.00016
+    assert b1.optimization.gaussian_means_lr_final == 0.0000016
+    assert b1.optimization.gaussian_means_spatial_scale is True
+    assert b1.optimization.gaussian_scales_lr == 0.005
+    assert b1.optimization.gaussian_quaternions_lr == 0.001
+    assert b1.optimization.gaussian_adam_eps == 1.0e-15
+    assert b1.optimization.gaussian_sh_degree_interval == 1000
+    assert b01.model.medium_points == b1.model.medium_points
+    assert b01.dataset == b1.dataset
+    assert b01.renderer == b1.renderer

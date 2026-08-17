@@ -32,7 +32,7 @@ class ModelConfig:
     appearance: str = "rgb"
     sh_degree: int = 3
     gaussian_initial_points: int = 100_000
-    gaussian_initial_opacity: float = 0.01
+    gaussian_initial_opacity: float = 0.1
     gaussian_initial_kappa: float = 1.01
     medium_points: int = 2_048
     medium_guard_points: int = 8
@@ -61,12 +61,24 @@ class RendererConfig:
 class OptimizationConfig:
     iterations: int = 35_000
     rays_per_batch: int = 65_536
-    gaussian_appearance_lr: float = 0.005
-    gaussian_opacity_lr: float = 0.05
+    full_image_batch: bool = False
+    cameras_without_replacement: bool = False
+    reconstruction_loss: str = "mse"
+    dssim_weight: float = 0.2
+    gaussian_appearance_lr: float = 0.0025
+    gaussian_appearance_rest_lr_scale: float = 0.05
+    gaussian_opacity_lr: float = 0.025
     gaussian_kappa_lr: float = 0.10
-    gaussian_means_lr: float = 0.0025
-    gaussian_scales_lr: float = 0.0396538025
-    gaussian_quaternions_lr: float = 0.01
+    gaussian_means_lr: float = 0.00016
+    gaussian_means_lr_final: float | None = 0.0000016
+    gaussian_means_lr_delay_steps: int = 0
+    gaussian_means_lr_delay_mult: float = 0.01
+    gaussian_means_lr_max_steps: int = 30_000
+    gaussian_means_spatial_scale: bool = True
+    gaussian_scales_lr: float = 0.005
+    gaussian_quaternions_lr: float = 0.001
+    gaussian_adam_eps: float = 1.0e-15
+    gaussian_sh_degree_interval: int = 1_000
     medium_sites_lr: float = 1.0e-4
     medium_density_lr: float = 1.0e-2
     medium_color_lr: float = 5.0e-3
@@ -89,6 +101,38 @@ class DiagnosticsConfig:
     save_per_primitive: bool = True
     contribution_epsilon: float = 1.0e-6
     layer_alpha_threshold: float = 0.01
+
+
+@dataclass
+class GaussianAdaptationConfig:
+    enabled: bool = False
+    max_points: int | None = 200_000
+    densify_from: int = 500
+    densify_until: int = 15_000
+    densification_interval: int = 100
+    gradient_threshold: float = 2.0e-4
+    min_opacity: float = 0.005
+    opacity_prune_from: int = 500
+    percent_dense: float = 0.01
+    size_prune_from: int = 3_000
+    # The pinned official 2DGS implementation resets max_radii2D inside
+    # densification_postfix before its final prune, so its advertised
+    # screen-space test is effectively inactive. Keep this explicit rather
+    # than reproducing that ordering side effect.
+    screen_pruning_enabled: bool = False
+    max_screen_size: float = 20.0
+    max_world_scale_fraction: float = 0.10
+    opacity_reset_interval: int = 0
+    opacity_reset_value: float = 0.01
+    opacity_reset_at_densify_from: bool = False
+    opacity_reset_optimizer_state: bool = True
+    medium_freeze_after_reset: int = 0
+    medium_freeze_interval: int = 0
+    medium_freeze_from: int = 0
+    medium_freeze_steps: int = 0
+    preserve_clone_opacity: bool = False
+    preserve_split_opacity: bool = False
+    runaway_max_points: int | None = None
 
 
 @dataclass
@@ -117,6 +161,9 @@ class ExperimentConfig:
     )
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
+    gaussian_adaptation: GaussianAdaptationConfig = field(
+        default_factory=GaussianAdaptationConfig
+    )
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     @classmethod
@@ -135,6 +182,7 @@ class ExperimentConfig:
             "optimization",
             "validation",
             "diagnostics",
+            "gaussian_adaptation",
             "wandb",
         }
         unknown = set(raw) - valid
@@ -160,6 +208,9 @@ class ExperimentConfig:
             diagnostics=_construct(
                 DiagnosticsConfig, raw.get("diagnostics")
             ),
+            gaussian_adaptation=_construct(
+                GaussianAdaptationConfig, raw.get("gaussian_adaptation")
+            ),
             wandb=_construct(WandbConfig, raw.get("wandb")),
         )
         config.validate()
@@ -184,6 +235,8 @@ class ExperimentConfig:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:
             raise ValueError("gaussian_initial_points must be positive")
+        if not 0.0 < self.model.gaussian_initial_opacity < 1.0:
+            raise ValueError("gaussian_initial_opacity must be in (0, 1)")
         if self.model.medium_points < 32:
             raise ValueError("medium_points must be at least 32")
         if not 0 <= self.model.medium_guard_points < self.model.medium_points:
@@ -220,6 +273,28 @@ class ExperimentConfig:
             raise ValueError("optimization.iterations must be positive")
         if self.optimization.rays_per_batch < 1:
             raise ValueError("rays_per_batch must be positive")
+        if self.optimization.reconstruction_loss not in {"mse", "l1", "l1_dssim"}:
+            raise ValueError(
+                "optimization.reconstruction_loss must be mse, l1, or l1_dssim"
+            )
+        if not 0.0 <= self.optimization.dssim_weight <= 1.0:
+            raise ValueError("optimization.dssim_weight must be in [0, 1]")
+        if self.optimization.gaussian_means_lr_final is not None and (
+            self.optimization.gaussian_means_lr_final <= 0
+        ):
+            raise ValueError("gaussian_means_lr_final must be positive")
+        if self.optimization.gaussian_means_lr_delay_steps < 0:
+            raise ValueError(
+                "gaussian_means_lr_delay_steps must be non-negative"
+            )
+        if self.optimization.gaussian_means_lr_max_steps < 1:
+            raise ValueError("gaussian_means_lr_max_steps must be positive")
+        if self.optimization.gaussian_sh_degree_interval < 0:
+            raise ValueError("gaussian_sh_degree_interval must be non-negative")
+        if self.optimization.gaussian_adam_eps <= 0:
+            raise ValueError("gaussian_adam_eps must be positive")
+        if not 0 < self.optimization.gaussian_appearance_rest_lr_scale <= 1:
+            raise ValueError("invalid Gaussian SH-rest LR scale")
         if self.optimization.topology_update_interval < 1:
             raise ValueError("topology_update_interval must be positive")
         for name in (
@@ -237,6 +312,65 @@ class ExperimentConfig:
             raise ValueError(
                 "diagnostics.contribution_epsilon must be non-negative"
             )
+        adaptation = self.gaussian_adaptation
+        if adaptation.max_points is not None and adaptation.max_points < 1:
+            raise ValueError("gaussian_adaptation.max_points must be positive")
+        if (
+            adaptation.enabled
+            and adaptation.max_points is not None
+            and self.model.gaussian_initial_points > adaptation.max_points
+        ):
+            raise ValueError("initial Gaussian count exceeds adaptation budget")
+        if (
+            adaptation.densify_from < 1
+            or adaptation.densify_until < adaptation.densify_from
+        ):
+            raise ValueError("invalid Gaussian adaptation iteration range")
+        if adaptation.densification_interval < 1:
+            raise ValueError(
+                "gaussian_adaptation.densification_interval must be positive"
+            )
+        if adaptation.size_prune_from < 0:
+            raise ValueError(
+                "gaussian_adaptation.size_prune_from must be non-negative"
+            )
+        if adaptation.opacity_prune_from < 0:
+            raise ValueError(
+                "gaussian_adaptation.opacity_prune_from must be non-negative"
+            )
+        for name in (
+            "opacity_reset_interval",
+            "medium_freeze_after_reset",
+            "medium_freeze_interval",
+            "medium_freeze_from",
+            "medium_freeze_steps",
+        ):
+            if getattr(adaptation, name) < 0:
+                raise ValueError(
+                    f"gaussian_adaptation.{name} must be non-negative"
+                )
+        if not 0.0 < adaptation.opacity_reset_value < 1.0:
+            raise ValueError(
+                "gaussian_adaptation.opacity_reset_value must be in (0, 1)"
+            )
+        if (
+            adaptation.runaway_max_points is not None
+            and adaptation.runaway_max_points < 1
+        ):
+            raise ValueError(
+                "gaussian_adaptation.runaway_max_points must be positive"
+            )
+        for name in (
+            "gradient_threshold",
+            "min_opacity",
+            "percent_dense",
+            "max_screen_size",
+            "max_world_scale_fraction",
+        ):
+            if getattr(adaptation, name) < 0:
+                raise ValueError(
+                    f"gaussian_adaptation.{name} must be non-negative"
+                )
         if len(self.background) != 3:
             raise ValueError("background must contain RGB")
         if self.wandb.mode not in {"online", "offline", "disabled"}:

@@ -41,3 +41,6 @@ venv/
 # Slurm runtime logs; keep the directory so #SBATCH paths always exist
 /slurm_logs/*
 !/slurm_logs/.gitkeep
+
+# Direct/manual training logs
+/run_logs/

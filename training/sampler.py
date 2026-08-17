@@ -12,8 +12,15 @@ from foamsurf_data.rays import RayBundle, generate_indexed_rays
 class TrainingBatch:
     rays: RayBundle
     target: torch.Tensor
-    camera_origin: torch.Tensor
-    camera_name: str
+    camera: object
+
+    @property
+    def camera_origin(self) -> torch.Tensor:
+        return self.camera.origin
+
+    @property
+    def camera_name(self) -> str:
+        return self.camera.name
 
 
 class RandomCameraRaySampler:
@@ -24,9 +31,17 @@ class RandomCameraRaySampler:
         dataset,
         rays_per_batch: int,
         background: tuple[float, float, float],
+        *,
+        full_image: bool = False,
+        cameras_without_replacement: bool = False,
     ) -> None:
         self.dataset = dataset
         self.rays_per_batch = int(rays_per_batch)
+        self.full_image = bool(full_image)
+        self.cameras_without_replacement = bool(
+            cameras_without_replacement
+        )
+        self._camera_stack: list[int] = []
         self.background = torch.tensor(
             background,
             dtype=torch.float32,
@@ -35,16 +50,27 @@ class RandomCameraRaySampler:
         self.data = dataset.stacked_training_data()
 
     def next(self) -> TrainingBatch:
-        camera_index = random.randrange(len(self.dataset.train))
+        if self.cameras_without_replacement:
+            if not self._camera_stack:
+                self._camera_stack = list(range(len(self.dataset.train)))
+                random.shuffle(self._camera_stack)
+            camera_index = self._camera_stack.pop()
+        else:
+            camera_index = random.randrange(len(self.dataset.train))
         camera = self.dataset.train[camera_index]
         pixel_count = camera.width * camera.height
-        sample_count = min(self.rays_per_batch, pixel_count)
-        pixel_indices = torch.randint(
-            0,
-            pixel_count,
-            (sample_count,),
-            device=self.dataset.device,
-        )
+        if self.full_image:
+            pixel_indices = torch.arange(
+                pixel_count, device=self.dataset.device
+            )
+        else:
+            sample_count = min(self.rays_per_batch, pixel_count)
+            pixel_indices = torch.randint(
+                0,
+                pixel_count,
+                (sample_count,),
+                device=self.dataset.device,
+            )
         rays = generate_indexed_rays(
             pixel_indices,
             self.data["origins"][camera_index : camera_index + 1],
@@ -62,6 +88,5 @@ class RandomCameraRaySampler:
         return TrainingBatch(
             rays=rays,
             target=target,
-            camera_origin=camera.origin,
-            camera_name=camera.name,
+            camera=camera,
         )

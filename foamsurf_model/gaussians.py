@@ -22,7 +22,8 @@ class SurfaceGaussianModel(nn.Module):
     """Trainable 2D Gaussian surface representation used by B0."""
 
     PARAMETER_NAMES = (
-        "appearance",
+        "appearance_dc",
+        "appearance_rest",
         "opacity_logits",
         "raw_kappa",
         "means",
@@ -40,6 +41,7 @@ class SurfaceGaussianModel(nn.Module):
         super().__init__()
         self.appearance_mode = config.appearance
         self.sh_degree = config.sh_degree
+        self.active_sh_degree = config.sh_degree
         self.device = torch.device(device)
 
         points = np.asarray(points, dtype=np.float32)
@@ -80,19 +82,21 @@ class SurfaceGaussianModel(nn.Module):
         )
 
         if self.appearance_mode == "rgb":
-            appearance = rgb
+            appearance_dc = rgb
+            appearance_rest = torch.empty(
+                points.shape[0], 3, 0, device=self.device
+            )
         else:
             coefficient_count = (self.sh_degree + 1) ** 2
-            appearance = torch.zeros(
-                points.shape[0],
-                3,
-                coefficient_count,
+            appearance_dc = rgb_to_sh_dc(rgb)[..., None]
+            appearance_rest = torch.zeros(
+                points.shape[0], 3, coefficient_count - 1,
                 dtype=torch.float32,
                 device=self.device,
             )
-            appearance[..., 0] = rgb_to_sh_dc(rgb)
 
-        self.appearance = nn.Parameter(appearance)
+        self.appearance_dc = nn.Parameter(appearance_dc)
+        self.appearance_rest = nn.Parameter(appearance_rest)
         self.opacity_logits = nn.Parameter(opacity_logits)
         self.raw_kappa = nn.Parameter(raw_kappa)
         self.means = nn.Parameter(means)
@@ -127,6 +131,15 @@ class SurfaceGaussianModel(nn.Module):
     def kappas(self) -> torch.Tensor:
         return 1.0 + F.softplus(self.raw_kappa)
 
+    @property
+    def appearance(self) -> torch.Tensor:
+        if self.appearance_mode == "rgb":
+            return self.appearance_dc
+        coefficient_count = (self.active_sh_degree + 1) ** 2
+        return torch.cat(
+            (self.appearance_dc, self.appearance_rest), dim=-1
+        )[..., :coefficient_count]
+
     def colors(
         self, camera_origin: torch.Tensor | None
     ) -> torch.Tensor:
@@ -138,19 +151,54 @@ class SurfaceGaussianModel(nn.Module):
             camera_origin.reshape(1, 3) - self.means, dim=-1
         )
         return 0.5 + evaluate_sh(
-            self.sh_degree, self.appearance, directions
+            self.active_sh_degree, self.appearance, directions
         )
 
     def render_scene(
-        self, camera_origin: torch.Tensor | None
+        self,
+        camera_origin: torch.Tensor | None,
+        means: torch.Tensor | None = None,
     ) -> GaussianScene:
         return GaussianScene(
-            means=self.means,
+            means=self.means if means is None else means,
             log_scales=self.log_scales,
             quaternions=F.normalize(self.quaternions, dim=-1),
             colors=self.colors(camera_origin),
             opacity_logits=self.opacity_logits,
             raw_kappa=self.raw_kappa,
+        )
+
+    def training_scene(
+        self, camera
+    ) -> tuple[GaussianScene, torch.Tensor]:
+        """Create the normalized-viewport gradient carrier used by 3DGS."""
+
+        screen_points = torch.zeros(
+            (self.point_count, 2),
+            dtype=self.means.dtype,
+            device=self.means.device,
+            requires_grad=True,
+        )
+        depth = (
+            (self.means.detach() - camera.origin) * camera.forward
+        ).sum(dim=-1)
+        x_world_per_viewport = depth * torch.tan(
+            self.means.new_tensor(0.5 * camera.fov_x)
+        )
+        y_world_per_viewport = depth * torch.tan(
+            self.means.new_tensor(0.5 * camera.fov_y)
+        )
+        offsets = (
+            screen_points[:, :1]
+            * x_world_per_viewport[:, None]
+            * camera.right[None]
+            + screen_points[:, 1:]
+            * y_world_per_viewport[:, None]
+            * camera.down[None]
+        )
+        return (
+            self.render_scene(camera.origin, self.means + offsets),
+            screen_points,
         )
 
     def named_primitive_parameters(self) -> dict[str, nn.Parameter]:
@@ -162,8 +210,13 @@ class SurfaceGaussianModel(nn.Module):
         return {
             "appearance_mode": self.appearance_mode,
             "sh_degree": self.sh_degree,
+            "active_sh_degree": self.active_sh_degree,
             "point_count": self.point_count,
         }
+
+    def one_up_sh_degree(self) -> None:
+        if self.active_sh_degree < self.sh_degree:
+            self.active_sh_degree += 1
 
     @classmethod
     def from_checkpoint(
@@ -176,6 +229,9 @@ class SurfaceGaussianModel(nn.Module):
         nn.Module.__init__(instance)
         instance.appearance_mode = str(metadata["appearance_mode"])
         instance.sh_degree = int(metadata["sh_degree"])
+        instance.active_sh_degree = int(
+            metadata.get("active_sh_degree", instance.sh_degree)
+        )
         instance.device = torch.device(device)
         for name in cls.PARAMETER_NAMES:
             setattr(

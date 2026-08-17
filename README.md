@@ -101,6 +101,22 @@ region masks are saved under each `evaluation/iteration_*` directory. The
 layer targets are kept on CPU and one view is moved to the GPU at evaluation
 time, so they do not triple persistent GPU image memory.
 
+## Train B1 Gaussian adaptation
+
+B1 keeps the Voronoi topology fixed and applies the effective policy of the
+pinned official 2DGS implementation to the surface Gaussians: full images,
+cameras without replacement, L1+DSSIM, opacity reset, and clone/split/prune
+without a 200k cap:
+
+~~~bash
+sbatch scripts/train_b1_2dgs_baseline.sbatch
+~~~
+
+The 30k run logs operation counts, Gaussian count, memory, layer diagnostics,
+images and metrics to CSV and W&B. It saves both last and best-PSNR
+checkpoints. See [the 2DGS baseline guide](docs/B1_2DGS_BASELINE.md) for the
+exact pinned sources, policy, and intentional hybrid-model differences.
+
 ## Train B0 on NeRF Synthetic Lego
 
 The supplied configuration enables W&B online logging:
