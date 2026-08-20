@@ -67,7 +67,9 @@ class SurfaceGaussianModel(nn.Module):
             _inverse_softplus(config.gaussian_initial_kappa - 1.0),
         )
         log_scales = torch.as_tensor(
-            self._initial_log_scales(points),
+            self._initial_log_scales(
+                points, config.gaussian_initial_scale_neighbors
+            ),
             dtype=torch.float32,
             device=self.device,
         )
@@ -104,15 +106,24 @@ class SurfaceGaussianModel(nn.Module):
         self.quaternions = nn.Parameter(quaternions)
 
     @staticmethod
-    def _initial_log_scales(points: np.ndarray) -> np.ndarray:
+    def _initial_log_scales(
+        points: np.ndarray, neighbor_count: int = 1
+    ) -> np.ndarray:
         if points.shape[0] == 1:
             distance = np.full((1,), 1.0e-2, dtype=np.float32)
         else:
+            neighbor_count = min(int(neighbor_count), points.shape[0] - 1)
             tree = cKDTree(points)
-            distances, _ = tree.query(points, k=2, workers=-1)
-            distance = np.maximum(distances[:, 1], 1.0e-4).astype(
-                np.float32
+            distances, _ = tree.query(
+                points, k=neighbor_count + 1, workers=-1
             )
+            neighbor_distances = distances[:, 1:]
+            if neighbor_distances.ndim == 1:
+                neighbor_distances = neighbor_distances[:, None]
+            distance = np.sqrt(
+                np.mean(neighbor_distances**2, axis=1)
+            )
+            distance = np.maximum(distance, 1.0e-4).astype(np.float32)
         return np.log(distance)[:, None].repeat(2, axis=1)
 
     @property
@@ -217,6 +228,12 @@ class SurfaceGaussianModel(nn.Module):
     def one_up_sh_degree(self) -> None:
         if self.active_sh_degree < self.sh_degree:
             self.active_sh_degree += 1
+
+    @torch.no_grad()
+    def clamp_scales_(self, minimum: float, maximum: float) -> None:
+        if maximum < minimum:
+            raise ValueError("maximum Gaussian scale must exceed minimum")
+        self.log_scales.clamp_(min=np.log(minimum), max=np.log(maximum))
 
     @classmethod
     def from_checkpoint(

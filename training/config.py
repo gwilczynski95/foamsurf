@@ -25,6 +25,7 @@ class DatasetConfig:
     llffhold: int = 8
     gaussian_ground_truth_path: str | None = None
     medium_ground_truth_path: str | None = None
+    train_target: str = "both"
 
 
 @dataclass
@@ -34,6 +35,7 @@ class ModelConfig:
     gaussian_initial_points: int = 100_000
     gaussian_initial_opacity: float = 0.1
     gaussian_initial_kappa: float = 1.01
+    gaussian_initial_scale_neighbors: int = 1
     medium_points: int = 2_048
     medium_guard_points: int = 8
     medium_guard_scale: float = 1.25
@@ -55,6 +57,7 @@ class RendererConfig:
     max_intersections: int = 1_024
     number_of_sides: int = 8
     gaussian_radius_squared: float = 11.3449
+    gaussian_hit_buffer_size: int = 16
 
 
 @dataclass
@@ -67,18 +70,32 @@ class OptimizationConfig:
     dssim_weight: float = 0.2
     gaussian_appearance_lr: float = 0.0025
     gaussian_appearance_rest_lr_scale: float = 0.05
+    gaussian_appearance_lr_decay: float = 0.0
+    gaussian_appearance_lr_final: float | None = None
     gaussian_opacity_lr: float = 0.025
+    gaussian_opacity_lr_decay: float = 0.0
+    gaussian_opacity_lr_final: float | None = None
     gaussian_kappa_lr: float = 0.10
+    gaussian_kappa_lr_decay: float = 0.0
+    gaussian_kappa_lr_final: float | None = None
     gaussian_means_lr: float = 0.00016
+    gaussian_means_lr_decay: float | None = None
     gaussian_means_lr_final: float | None = 0.0000016
     gaussian_means_lr_delay_steps: int = 0
     gaussian_means_lr_delay_mult: float = 0.01
     gaussian_means_lr_max_steps: int = 30_000
     gaussian_means_spatial_scale: bool = True
     gaussian_scales_lr: float = 0.005
+    gaussian_scales_lr_decay: float = 0.0
+    gaussian_scales_lr_final: float | None = None
     gaussian_quaternions_lr: float = 0.001
+    gaussian_quaternions_lr_decay: float = 0.0
+    gaussian_quaternions_lr_final: float | None = None
     gaussian_adam_eps: float = 1.0e-15
     gaussian_sh_degree_interval: int = 1_000
+    gaussian_scale_regularization: float = 0.0
+    gaussian_min_scale: float | None = None
+    gaussian_max_scale_fraction: float | None = None
     medium_sites_lr: float = 1.0e-4
     medium_density_lr: float = 1.0e-2
     medium_color_lr: float = 5.0e-3
@@ -106,6 +123,10 @@ class DiagnosticsConfig:
 @dataclass
 class GaussianAdaptationConfig:
     enabled: bool = False
+    # graphdeco: screen-gradient clone/split/prune (3DGS/current FlaRe)
+    # flare_movement: duplicate points moving during one optimizer step
+    # fixed: fixed topology with optional opacity reset
+    policy: str = "graphdeco"
     max_points: int | None = 200_000
     densify_from: int = 500
     densify_until: int = 15_000
@@ -133,6 +154,28 @@ class GaussianAdaptationConfig:
     preserve_clone_opacity: bool = False
     preserve_split_opacity: bool = False
     runaway_max_points: int | None = None
+    movement_threshold: float = 1.0e-3
+    min_effective_scale: float = 1.0e-5
+
+
+@dataclass
+class VoronoiAdaptationConfig:
+    """Adaptive medium population without RadFoam solid-surface regularization."""
+
+    enabled: bool = False
+    densify_from: int = 1_000
+    densify_until: int = 20_000
+    interval: int = 500
+    densify_fraction: float = 0.10
+    max_points: int | None = 65_536
+    min_points: int = 1_024
+    min_visibility: float = 1.0
+    contribution_threshold: float = 1.0e-6
+    gradient_threshold: float = 0.0
+    prune_cell_radius_fraction: float = 0.02
+    max_prune_fraction: float = 0.10
+    prune_patience: int = 2
+    child_jitter_fraction: float = 0.05
 
 
 @dataclass
@@ -150,6 +193,7 @@ class ExperimentConfig:
     output_dir: str = "outputs/b0"
     seed: int = 42
     device: str = "cuda"
+    representation_mode: str = "hybrid"
     background: list[float] = field(
         default_factory=lambda: [1.0, 1.0, 1.0]
     )
@@ -164,6 +208,9 @@ class ExperimentConfig:
     gaussian_adaptation: GaussianAdaptationConfig = field(
         default_factory=GaussianAdaptationConfig
     )
+    voronoi_adaptation: VoronoiAdaptationConfig = field(
+        default_factory=VoronoiAdaptationConfig
+    )
     wandb: WandbConfig = field(default_factory=WandbConfig)
 
     @classmethod
@@ -175,6 +222,7 @@ class ExperimentConfig:
             "output_dir",
             "seed",
             "device",
+            "representation_mode",
             "background",
             "dataset",
             "model",
@@ -183,6 +231,7 @@ class ExperimentConfig:
             "validation",
             "diagnostics",
             "gaussian_adaptation",
+            "voronoi_adaptation",
             "wandb",
         }
         unknown = set(raw) - valid
@@ -195,6 +244,7 @@ class ExperimentConfig:
             output_dir=raw.get("output_dir", "outputs/b0"),
             seed=int(raw.get("seed", 42)),
             device=raw.get("device", "cuda"),
+            representation_mode=raw.get("representation_mode", "hybrid"),
             background=list(raw.get("background", [1.0, 1.0, 1.0])),
             dataset=_construct(DatasetConfig, raw.get("dataset")),
             model=_construct(ModelConfig, raw.get("model")),
@@ -211,6 +261,9 @@ class ExperimentConfig:
             gaussian_adaptation=_construct(
                 GaussianAdaptationConfig, raw.get("gaussian_adaptation")
             ),
+            voronoi_adaptation=_construct(
+                VoronoiAdaptationConfig, raw.get("voronoi_adaptation")
+            ),
             wandb=_construct(WandbConfig, raw.get("wandb")),
         )
         config.validate()
@@ -219,6 +272,13 @@ class ExperimentConfig:
     def validate(self) -> None:
         if not self.dataset.source_path:
             raise ValueError("dataset.source_path is required")
+        if self.representation_mode not in {"hybrid", "gaussian_only", "voronoi_only"}:
+            raise ValueError("invalid representation_mode")
+        if self.dataset.train_target not in {"both", "lego", "clouds"}:
+            raise ValueError("dataset.train_target must be both, lego, or clouds")
+        expected_target = {"hybrid": "both", "gaussian_only": "lego", "voronoi_only": "clouds"}[self.representation_mode]
+        if self.dataset.train_target != expected_target:
+            raise ValueError(f"{self.representation_mode} requires dataset.train_target={expected_target}")
         layer_paths = (
             self.dataset.gaussian_ground_truth_path,
             self.dataset.medium_ground_truth_path,
@@ -227,6 +287,8 @@ class ExperimentConfig:
             raise ValueError(
                 "dataset Gaussian and medium ground-truth paths must be set together"
             )
+        if self.dataset.train_target != "both" and layer_paths[0] is None:
+            raise ValueError("standalone training requires both layer ground-truth paths")
         if self.dataset.resolution < 1:
             raise ValueError("dataset.resolution must be positive")
         if self.model.appearance not in {"rgb", "sh"}:
@@ -235,6 +297,8 @@ class ExperimentConfig:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:
             raise ValueError("gaussian_initial_points must be positive")
+        if self.model.gaussian_initial_scale_neighbors < 1:
+            raise ValueError("gaussian_initial_scale_neighbors must be positive")
         if not 0.0 < self.model.gaussian_initial_opacity < 1.0:
             raise ValueError("gaussian_initial_opacity must be in (0, 1)")
         if self.model.medium_points < 32:
@@ -269,6 +333,11 @@ class ExperimentConfig:
                 raise ValueError("medium_bbox_max must exceed medium_bbox_min")
         if self.renderer.far <= self.renderer.near:
             raise ValueError("renderer.far must exceed renderer.near")
+        if self.renderer.gaussian_hit_buffer_size not in {16, 32, 64, 128, 256}:
+            raise ValueError(
+                "renderer.gaussian_hit_buffer_size must be one of "
+                "16, 32, 64, 128, 256"
+            )
         if self.optimization.iterations < 1:
             raise ValueError("optimization.iterations must be positive")
         if self.optimization.rays_per_batch < 1:
@@ -283,6 +352,16 @@ class ExperimentConfig:
             self.optimization.gaussian_means_lr_final <= 0
         ):
             raise ValueError("gaussian_means_lr_final must be positive")
+        for name in (
+            "gaussian_appearance_lr_final",
+            "gaussian_opacity_lr_final",
+            "gaussian_kappa_lr_final",
+            "gaussian_scales_lr_final",
+            "gaussian_quaternions_lr_final",
+        ):
+            value = getattr(self.optimization, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"optimization.{name} must be positive")
         if self.optimization.gaussian_means_lr_delay_steps < 0:
             raise ValueError(
                 "gaussian_means_lr_delay_steps must be non-negative"
@@ -293,6 +372,18 @@ class ExperimentConfig:
             raise ValueError("gaussian_sh_degree_interval must be non-negative")
         if self.optimization.gaussian_adam_eps <= 0:
             raise ValueError("gaussian_adam_eps must be positive")
+        if self.optimization.gaussian_scale_regularization < 0:
+            raise ValueError("gaussian_scale_regularization must be non-negative")
+        if (
+            self.optimization.gaussian_min_scale is not None
+            and self.optimization.gaussian_min_scale <= 0
+        ):
+            raise ValueError("gaussian_min_scale must be positive")
+        if (
+            self.optimization.gaussian_max_scale_fraction is not None
+            and self.optimization.gaussian_max_scale_fraction <= 0
+        ):
+            raise ValueError("gaussian_max_scale_fraction must be positive")
         if not 0 < self.optimization.gaussian_appearance_rest_lr_scale <= 1:
             raise ValueError("invalid Gaussian SH-rest LR scale")
         if self.optimization.topology_update_interval < 1:
@@ -313,6 +404,13 @@ class ExperimentConfig:
                 "diagnostics.contribution_epsilon must be non-negative"
             )
         adaptation = self.gaussian_adaptation
+        if adaptation.policy not in {"graphdeco", "flare_movement", "fixed"}:
+            raise ValueError(
+                "gaussian_adaptation.policy must be graphdeco, "
+                "flare_movement, or fixed"
+            )
+        if adaptation.enabled and self.representation_mode == "voronoi_only":
+            raise ValueError("Gaussian adaptation cannot run in voronoi_only mode")
         if adaptation.max_points is not None and adaptation.max_points < 1:
             raise ValueError("gaussian_adaptation.max_points must be positive")
         if (
@@ -366,11 +464,30 @@ class ExperimentConfig:
             "percent_dense",
             "max_screen_size",
             "max_world_scale_fraction",
+            "movement_threshold",
+            "min_effective_scale",
         ):
             if getattr(adaptation, name) < 0:
                 raise ValueError(
                     f"gaussian_adaptation.{name} must be non-negative"
                 )
+        medium_adaptation = self.voronoi_adaptation
+        if medium_adaptation.enabled and self.representation_mode == "gaussian_only":
+            raise ValueError("Voronoi adaptation cannot run in gaussian_only mode")
+        if medium_adaptation.interval < 1:
+            raise ValueError("voronoi_adaptation.interval must be positive")
+        if medium_adaptation.densify_from < 1 or medium_adaptation.densify_until < medium_adaptation.densify_from:
+            raise ValueError("invalid Voronoi adaptation iteration range")
+        if medium_adaptation.min_points < self.model.medium_guard_points:
+            raise ValueError("Voronoi min_points must preserve guard sites")
+        if medium_adaptation.max_points is not None and medium_adaptation.max_points < self.model.medium_points:
+            raise ValueError("initial medium count exceeds Voronoi adaptation budget")
+        for name in ("densify_fraction", "max_prune_fraction"):
+            if not 0.0 <= getattr(medium_adaptation, name) <= 1.0:
+                raise ValueError(f"voronoi_adaptation.{name} must be in [0, 1]")
+        if medium_adaptation.prune_patience < 1:
+            raise ValueError("voronoi_adaptation.prune_patience must be positive")
+
         if len(self.background) != 3:
             raise ValueError("background must contain RGB")
         if self.wandb.mode not in {"online", "offline", "disabled"}:

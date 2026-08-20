@@ -11,6 +11,7 @@
 
 PYBIND11_MODULE(PYOPTIXFLARERENDERER, m) {
 	m.doc() = "Python OptiX FLARE Renderer";
+	m.attr("HIT_BUFFER_SIZE") = HIT_BUFFER_SIZE;
 
 	// *********************************************************************************************
 

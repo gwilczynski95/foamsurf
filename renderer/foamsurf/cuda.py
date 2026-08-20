@@ -196,6 +196,7 @@ class NativeHybridRenderer:
         max_intersections: int = 1024,
         number_of_sides: int = 8,
         gaussian_radius_squared: float = 11.3449,
+        gaussian_hit_buffer_size: int = 16,
         flare_renderer_directory: str | Path | None = None,
     ) -> None:
         if max_batch_size <= 0:
@@ -211,6 +212,11 @@ class NativeHybridRenderer:
         self._flare_renderer_directory = flare_renderer_directory
         self._number_of_sides = int(number_of_sides)
         self._gaussian_radius_squared = float(gaussian_radius_squared)
+        self.gaussian_hit_buffer_size = int(gaussian_hit_buffer_size)
+        if self.gaussian_hit_buffer_size not in {16, 32, 64, 128, 256}:
+            raise ValueError(
+                "gaussian_hit_buffer_size must be one of 16, 32, 64, 128, 256"
+            )
         self._optix = None
         self._gaussian_geometry_is_set = False
         self._gaussian_signature: tuple[int, int] | None = None
@@ -251,7 +257,20 @@ class NativeHybridRenderer:
         scene.validate()
         self._require_cuda_float32(scene.means, "Gaussian scene")
         if self._optix is None:
-            optix_module = self._load_optix(self._flare_renderer_directory)
+            directory = self._flare_renderer_directory
+            if directory is None:
+                directory = (
+                    Path(__file__).resolve().parent
+                    / f"_optix_k{self.gaussian_hit_buffer_size}"
+                )
+            optix_module = self._load_optix(directory)
+            compiled_size = int(getattr(optix_module, "HIT_BUFFER_SIZE", -1))
+            if compiled_size != self.gaussian_hit_buffer_size:
+                raise RuntimeError(
+                    "OptiX hit-buffer mismatch: requested "
+                    f"K={self.gaussian_hit_buffer_size}, backend reports "
+                    f"K={compiled_size} ({directory})"
+                )
             self._optix = optix_module.CPyOptiXFLARERenderer(
                 self._number_of_sides,
                 self._gaussian_radius_squared,

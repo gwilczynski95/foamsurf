@@ -86,18 +86,43 @@ def _exponential_lr(
     return delay_rate * log_lerp
 
 
-def update_gaussian_learning_rate(
+def _flare_exponential_lr(
+    step: int,
+    initial: float,
+    decay: float,
+    final: float | None,
+) -> float:
+    """Per-parameter schedule used by the working flare_new trainer."""
+
+    rate = initial * math.exp(decay * step)
+    if final is None:
+        return rate
+    return max(rate, final) if decay <= 0.0 else min(rate, final)
+
+
+def update_gaussian_learning_rates(
     optimizer: torch.optim.Adam,
     config: OptimizationConfig,
     scene_extent: float,
     iteration: int,
 ) -> float:
-    """Update the position group exactly as in GraphDECO 3DGS."""
+    """Update Gaussian groups while preserving the GraphDECO defaults."""
 
     spatial_scale = (
         scene_extent if config.gaussian_means_spatial_scale else 1.0
     )
-    if config.gaussian_means_lr_final is None:
+    if config.gaussian_means_lr_decay is not None:
+        rate = _flare_exponential_lr(
+            iteration,
+            config.gaussian_means_lr * spatial_scale,
+            config.gaussian_means_lr_decay,
+            (
+                None
+                if config.gaussian_means_lr_final is None
+                else config.gaussian_means_lr_final * spatial_scale
+            ),
+        )
+    elif config.gaussian_means_lr_final is None:
         rate = config.gaussian_means_lr * spatial_scale
     else:
         rate = _exponential_lr(
@@ -108,13 +133,60 @@ def update_gaussian_learning_rate(
             config.gaussian_means_lr_delay_mult,
             config.gaussian_means_lr_max_steps,
         )
-    group = next(
-        group
-        for group in optimizer.param_groups
-        if group.get("name") == "gaussian_means"
-    )
-    group["lr"] = rate
+
+    rates = {
+        "gaussian_appearance_dc": _flare_exponential_lr(
+            iteration,
+            config.gaussian_appearance_lr,
+            config.gaussian_appearance_lr_decay,
+            config.gaussian_appearance_lr_final,
+        ),
+        "gaussian_appearance_rest": _flare_exponential_lr(
+            iteration,
+            config.gaussian_appearance_lr
+            * config.gaussian_appearance_rest_lr_scale,
+            config.gaussian_appearance_lr_decay,
+            (
+                None
+                if config.gaussian_appearance_lr_final is None
+                else config.gaussian_appearance_lr_final
+                * config.gaussian_appearance_rest_lr_scale
+            ),
+        ),
+        "gaussian_opacity_logits": _flare_exponential_lr(
+            iteration,
+            config.gaussian_opacity_lr,
+            config.gaussian_opacity_lr_decay,
+            config.gaussian_opacity_lr_final,
+        ),
+        "gaussian_raw_kappa": _flare_exponential_lr(
+            iteration,
+            config.gaussian_kappa_lr,
+            config.gaussian_kappa_lr_decay,
+            config.gaussian_kappa_lr_final,
+        ),
+        "gaussian_means": rate,
+        "gaussian_log_scales": _flare_exponential_lr(
+            iteration,
+            config.gaussian_scales_lr,
+            config.gaussian_scales_lr_decay,
+            config.gaussian_scales_lr_final,
+        ),
+        "gaussian_quaternions": _flare_exponential_lr(
+            iteration,
+            config.gaussian_quaternions_lr,
+            config.gaussian_quaternions_lr_decay,
+            config.gaussian_quaternions_lr_final,
+        ),
+    }
+    for group in optimizer.param_groups:
+        name = group.get("name")
+        if name in rates:
+            group["lr"] = rates[name]
     return rate
+
+
+update_gaussian_learning_rate = update_gaussian_learning_rates
 
 
 def gradient_norm(parameters) -> float:

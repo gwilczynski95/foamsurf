@@ -31,6 +31,7 @@ class VoronoiTopologyController:
                 medium.sites.detach()
             )
             permutation = self.triangulation.permutation().to(torch.long)
+            self.last_permutation = permutation
             if optimizer is None:
                 medium.reorder_without_optimizer(permutation)
             else:
@@ -59,6 +60,7 @@ class VoronoiTopologyController:
         optimizer: torch.optim.Optimizer,
         permutation: torch.Tensor,
     ) -> None:
+        medium.guard_mask = medium.guard_mask[permutation].contiguous()
         groups = {
             group.get("name"): group for group in optimizer.param_groups
         }
@@ -91,6 +93,48 @@ class VoronoiTopologyController:
                     )
             if new_state:
                 optimizer.state[new_parameter] = new_state
+
+    @torch.no_grad()
+    def replace_population(
+        self,
+        medium: VoronoiMediumModel,
+        optimizer: torch.optim.Optimizer,
+        keep_indices: torch.Tensor,
+        parent_indices: torch.Tensor,
+        child_sites: torch.Tensor,
+    ) -> None:
+        """Apply prune and split atomically, preserving survivor Adam state."""
+        old_count = medium.point_count
+        child_count = int(parent_indices.numel())
+        medium.guard_mask = torch.cat(
+            (medium.guard_mask[keep_indices], torch.zeros(child_count, dtype=torch.bool, device=medium.sites.device))
+        )
+        groups = {group.get("name"): group for group in optimizer.param_groups}
+        for attribute, group_name in self.GROUP_NAMES.items():
+            old_parameter = getattr(medium, attribute)
+            group = groups[group_name]
+            old_state = optimizer.state.pop(old_parameter, {})
+            survivor = old_parameter.detach()[keep_indices]
+            child = child_sites if attribute == "sites" else old_parameter.detach()[parent_indices]
+            new_parameter = nn.Parameter(torch.cat((survivor, child), dim=0).contiguous())
+            setattr(medium, attribute, new_parameter)
+            group["params"][0] = new_parameter
+            new_state = {}
+            for name, value in old_state.items():
+                if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == old_count:
+                    zeros = torch.zeros((child_count, *value.shape[1:]), dtype=value.dtype, device=value.device)
+                    new_state[name] = torch.cat((value[keep_indices], zeros), dim=0).contiguous()
+                else:
+                    new_state[name] = value.clone() if torch.is_tensor(value) else value
+            if new_state:
+                optimizer.state[new_parameter] = new_state
+
+        self.triangulation = foamsurf_topology.Triangulation(medium.sites.detach())
+        permutation = self.triangulation.permutation().to(torch.long)
+        self._permute_with_optimizer(medium, optimizer, permutation)
+        self.last_permutation = permutation
+        self._read_topology()
+        self.revision += 1
 
     @torch.no_grad()
     def update(
@@ -138,6 +182,9 @@ class VoronoiTopologyController:
                 medium, optimizer, permutation
             )
 
+        self.last_permutation = (
+            permutation if needs_permutation else None
+        )
         self._read_topology()
         self.revision += 1
         return needs_permutation

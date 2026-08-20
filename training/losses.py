@@ -15,6 +15,7 @@ class B0Loss:
     psnr: torch.Tensor
     rgb_l1: torch.Tensor
     ssim: torch.Tensor
+    gaussian_scale_regularization: torch.Tensor
 
 
 def b0_reconstruction_loss(
@@ -62,4 +63,5 @@ def b0_reconstruction_loss(
         psnr=psnr,
         rgb_l1=rgb_l1,
         ssim=ssim,
+        gaussian_scale_regularization=rgb_mse.new_zeros(()),
     )

@@ -533,6 +533,13 @@ class Evaluator:
             for key in numeric_keys
         }
         hybrid_psnrs = [float(row["hybrid_psnr"]) for row in rows]
+        primary_name = {
+            "hybrid": "hybrid",
+            "gaussian_only": "gaussian_only",
+            "voronoi_only": "voronoi_only",
+        }[self.config.representation_mode]
+        summary["eval/primary_psnr"] = summary[f"eval/{primary_name}_psnr"]
+        summary["eval/primary_ssim"] = summary[f"eval/{primary_name}_ssim"]
         summary.update(
             {
                 "iteration": iteration,

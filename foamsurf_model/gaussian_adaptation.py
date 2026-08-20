@@ -12,6 +12,13 @@ from .gaussians import SurfaceGaussianModel
 
 
 @dataclass(frozen=True)
+class FlareMovementSnapshot:
+    means: torch.Tensor
+    means_exp_avg: torch.Tensor
+    means_exp_avg_sq: torch.Tensor
+
+
+@dataclass(frozen=True)
 class GaussianTopologyPlan:
     """Explicit GraphDECO clone/split/prune operation."""
 
@@ -125,12 +132,29 @@ class GaussianAdaptationController:
         self.max_radii2d = torch.zeros(count, device=device)
 
     def should_collect(self, iteration: int) -> bool:
-        return self.config.enabled and iteration < self.config.densify_until
-
-    def should_adapt(self, iteration: int) -> bool:
         return (
             self.config.enabled
-            and self.config.densify_from < iteration < self.config.densify_until
+            and self.config.policy == "graphdeco"
+            and iteration < self.config.densify_until
+        )
+
+    def should_adapt(self, iteration: int) -> bool:
+        if self.config.policy == "flare_movement":
+            in_range = (
+                self.config.densify_from
+                <= iteration
+                <= self.config.densify_until
+            )
+        else:
+            in_range = (
+                self.config.densify_from
+                < iteration
+                < self.config.densify_until
+            )
+        return (
+            self.config.enabled
+            and self.config.policy != "fixed"
+            and in_range
             and iteration % self.config.densification_interval == 0
         )
 
@@ -167,6 +191,150 @@ class GaussianAdaptationController:
         self.total_opacity_resets += 1
         self.last_opacity_reset_changed = changed
         return changed
+
+    @torch.no_grad()
+    def snapshot_movement(self) -> FlareMovementSnapshot:
+        """Capture the pre-step state used by the working flare_new policy."""
+
+        state = self.optimizer.state.get(self.model.means, {})
+        zeros = torch.zeros_like(self.model.means)
+        return FlareMovementSnapshot(
+            means=self.model.means.detach().clone(),
+            means_exp_avg=state.get("exp_avg", zeros).detach().clone(),
+            means_exp_avg_sq=state.get("exp_avg_sq", zeros).detach().clone(),
+        )
+
+    @torch.no_grad()
+    def apply_movement(
+        self,
+        snapshot: FlareMovementSnapshot,
+    ) -> dict[str, int]:
+        """Apply flare_new's post-step movement duplication and pruning."""
+
+        count = self.model.point_count
+        if snapshot.means.shape != self.model.means.shape:
+            raise ValueError("flare movement snapshot does not match model")
+
+        opacity = self.model.opacities.squeeze(-1)
+        kappa = self.model.kappas.squeeze(-1)
+        effective = torch.clamp(
+            kappa * (11.3449 + 2.0 * torch.log(opacity)), min=0.0
+        )
+        effective = effective.pow(1.0 / (2.0 * kappa)) / math.sqrt(11.3449)
+        scale_norm = torch.linalg.vector_norm(
+            self.model.scales, dim=1
+        ) * effective
+        keep_mask = (
+            (opacity >= self.config.min_opacity)
+            & (scale_norm >= self.config.min_effective_scale)
+        )
+        if not bool(keep_mask.any()):
+            raise RuntimeError("flare movement adaptation would prune every Gaussian")
+
+        indices = torch.arange(count, device=self.model.means.device)
+        kept = indices[keep_mask]
+        movement = torch.linalg.vector_norm(
+            self.model.means[kept] - snapshot.means[kept], dim=1
+        )
+        split_mask = movement >= self.config.movement_threshold
+        split = kept[split_mask]
+
+        if self.config.max_points is not None:
+            capacity = max(self.config.max_points - int(kept.numel()), 0)
+            if split.numel() > capacity:
+                order = torch.argsort(
+                    movement[split_mask], descending=True, stable=True
+                )
+                split = split[order[:capacity]]
+
+        selected = torch.zeros(count, dtype=torch.bool, device=kept.device)
+        selected[split] = True
+        originals = kept[~selected[kept]]
+        old_parameters = self.model.named_primitive_parameters()
+
+        for name, old in old_parameters.items():
+            post = old.detach()
+            middle_value = snapshot.means[split] if name == "means" else post[split]
+            value = torch.cat(
+                (post[originals], middle_value, post[split]), dim=0
+            ).contiguous()
+            new_parameter = nn.Parameter(value)
+
+            group_name = f"gaussian_{name}"
+            group = next(
+                group
+                for group in self.optimizer.param_groups
+                if group.get("name") == group_name
+            )
+            if len(group["params"]) != 1 or group["params"][0] is not old:
+                raise RuntimeError(f"optimizer group mismatch for {name}")
+            old_state = self.optimizer.state.pop(old, None)
+            group["params"] = [new_parameter]
+            if old_state is not None:
+                mapped: dict[str, Any] = {}
+                for state_name, state_value in old_state.items():
+                    if torch.is_tensor(state_value) and state_value.shape == old.shape:
+                        middle_state = state_value[split]
+                        if name == "means" and state_name == "exp_avg":
+                            middle_state = snapshot.means_exp_avg[split]
+                        elif name == "means" and state_name == "exp_avg_sq":
+                            middle_state = snapshot.means_exp_avg_sq[split]
+                        mapped[state_name] = torch.cat(
+                            (
+                                state_value[originals],
+                                middle_state,
+                                state_value[split],
+                            ),
+                            dim=0,
+                        )
+                    elif torch.is_tensor(state_value):
+                        mapped[state_name] = state_value.clone()
+                    else:
+                        mapped[state_name] = state_value
+                self.optimizer.state[new_parameter] = mapped
+            setattr(self.model, name, new_parameter)
+
+        pruned = count - int(kept.numel())
+        duplicated = int(split.numel())
+        self.total_split += duplicated
+        self.total_pruned += pruned
+        if duplicated or pruned:
+            self.revision += 1
+
+        if movement.numel():
+            movement_p50 = float(torch.quantile(movement, 0.50).item())
+            movement_p95 = float(torch.quantile(movement, 0.95).item())
+            movement_max = float(movement.max().item())
+        else:
+            movement_p50 = movement_p95 = movement_max = 0.0
+        self.last_plan_statistics = {
+            "gradient_p50": movement_p50,
+            "gradient_p95": movement_p95,
+            "gradient_max": movement_max,
+            "gradient_candidates": int(split_mask.sum().item()),
+            "clone_candidates": 0,
+            "split_candidates": duplicated,
+            "prune_candidates": pruned,
+            "opacity_prune": int((opacity < self.config.min_opacity).sum().item()),
+            "screen_prune": 0,
+            "world_prune": int((scale_norm < self.config.min_effective_scale).sum().item()),
+            "gradient_opacity_overlap": 0,
+            "gradient_screen_overlap": 0,
+            "gradient_world_overlap": 0,
+            "budget_rejected": int(split_mask.sum().item()) - duplicated,
+            "screen_replacements": 0,
+            "radius_p50": 0.0,
+            "radius_p95": 0.0,
+            "radius_p99": 0.0,
+            "radius_max": 0.0,
+        }
+        self._reset_statistics()
+        return {
+            "clone": 0,
+            "split": duplicated,
+            "prune": pruned,
+            "budget_skip": 0,
+        }
 
     @torch.no_grad()
     def projected_radii(self, camera) -> torch.Tensor:

@@ -12,7 +12,16 @@ trap 'echo "Build failed at line ${LINENO}." >&2' ERR
 
 PROJECT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RENDERER_DIRECTORY="$PROJECT_DIRECTORY/third_party/flare_renderer"
-OUTPUT_DIRECTORY="$PROJECT_DIRECTORY/foamsurf/_optix"
+HIT_BUFFER_SIZE="${HIT_BUFFER_SIZE:-16}"
+OUTPUT_DIRECTORY="${OPTIX_OUTPUT_DIRECTORY:-$PROJECT_DIRECTORY/foamsurf/_optix}"
+
+case "$HIT_BUFFER_SIZE" in
+    16|32|64|128|256) ;;
+    *)
+        echo "Error: HIT_BUFFER_SIZE must be one of 16, 32, 64, 128, 256." >&2
+        exit 1
+        ;;
+esac
 
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/shared/results/gmwilczn/conda/envs/foamsurf}"
 OPTIX_DIRECTORY="${OPTIX_DIRECTORY:-${FOAMSURF_OPTIX_DIRECTORY:-/shared/results/gmwilczn/drivers/NVIDIA-OptiX-SDK-8.0.0-linux64-x86_64}}"
@@ -131,6 +140,7 @@ NVCC_FLAGS=(
     -code="$SM"
     -I"$OPTIX_INCLUDE"
     -I"$CUDA_INCLUDE"
+    -DHIT_BUFFER_SIZE="$HIT_BUFFER_SIZE"
 )
 CPP_FLAGS=(
     -std=c++17
@@ -141,6 +151,7 @@ CPP_FLAGS=(
     -I"$TORCH_INCLUDE"
     -I"$TORCH_API_INCLUDE"
     -I"$PYTHON_INCLUDE"
+    -DHIT_BUFFER_SIZE="$HIT_BUFFER_SIZE"
 )
 
 CUDA_SOURCES=(
@@ -172,13 +183,16 @@ echo "OptiX SDK:        $OPTIX_DIRECTORY"
 echo "OptiX headers:    version $OPTIX_HEADER_VERSION / ABI $OPTIX_HEADER_ABI"
 echo "NVIDIA libraries: $DRIVER_LIBRARY_DIRECTORY"
 echo "CUDA target:      $COMPUTE / $SM"
+echo "Hit buffer size:  $HIT_BUFFER_SIZE"
+echo "Output directory: $OUTPUT_DIRECTORY"
 
 echo "Building OptiX PTX..."
 rm -f "$OUTPUT_DIRECTORY/shaders.cu.optixir"
 "$NVCC" -std=c++17 -ptx -arch="$COMPUTE" \
     "$RENDERER_DIRECTORY/shaders.cu" \
     -o "$OUTPUT_DIRECTORY/shaders.cu.ptx" \
-    -I"$OPTIX_INCLUDE"
+    -I"$OPTIX_INCLUDE" \
+    -DHIT_BUFFER_SIZE="$HIT_BUFFER_SIZE"
 
 CUDA_OBJECTS=()
 echo "Compiling CUDA sources..."

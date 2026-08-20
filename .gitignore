@@ -29,6 +29,7 @@ compile_commands.json
 /src/foamsurf_topology/
 /renderer/build/
 /renderer/foamsurf/_optix/
+/renderer/foamsurf/_optix_k*/
 
 # Local environments
 .venv/

@@ -20,6 +20,7 @@ def checkpoint_payload(
     best_psnr: float,
     topology_revision: int,
     gaussian_adaptation_state: dict[str, Any] | None = None,
+    voronoi_adaptation_state: dict[str, Any] | None = None,
     medium_frozen_until: int = 0,
 ) -> dict[str, Any]:
     return {
@@ -35,6 +36,7 @@ def checkpoint_payload(
         "gaussian_optimizer": gaussian_optimizer.state_dict(),
         "medium_optimizer": medium_optimizer.state_dict(),
         "gaussian_adaptation": gaussian_adaptation_state,
+        "voronoi_adaptation": voronoi_adaptation_state,
         "medium_frozen_until": int(medium_frozen_until),
         "rng": {
             "torch": torch.get_rng_state(),

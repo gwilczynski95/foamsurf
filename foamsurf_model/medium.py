@@ -111,6 +111,10 @@ class VoronoiMediumModel(nn.Module):
         self.device = torch.device(device)
         self.register_buffer("bbox_min", lower.to(self.device))
         self.register_buffer("bbox_max", upper.to(self.device))
+        guard_mask = torch.zeros(config.medium_points, dtype=torch.bool, device=self.device)
+        if config.medium_guard_points:
+            guard_mask[-config.medium_guard_points:] = True
+        self.register_buffer("guard_mask", guard_mask)
 
         inner_count = config.medium_points - config.medium_guard_points
         sites = _stratified_sites(
@@ -174,6 +178,7 @@ class VoronoiMediumModel(nn.Module):
     def reorder_without_optimizer(
         self, permutation: torch.Tensor
     ) -> None:
+        self.guard_mask = self.guard_mask[permutation].contiguous()
         for name in self.PARAMETER_NAMES:
             value = getattr(self, name)
             setattr(
@@ -183,7 +188,7 @@ class VoronoiMediumModel(nn.Module):
             )
 
     def checkpoint_metadata(self) -> dict[str, object]:
-        return {"point_count": self.point_count}
+        return {"point_count": self.point_count, "guard_count": int(self.guard_mask.sum().item())}
 
     @classmethod
     def from_checkpoint(
@@ -203,6 +208,11 @@ class VoronoiMediumModel(nn.Module):
         instance.register_buffer(
             "bbox_max", bbox_max.to(instance.device)
         )
+        guard_count = int(metadata.get("guard_count", 0))
+        guard_mask = torch.zeros(int(metadata["point_count"]), dtype=torch.bool, device=instance.device)
+        if guard_count:
+            guard_mask[-guard_count:] = True
+        instance.register_buffer("guard_mask", guard_mask)
         for name in cls.PARAMETER_NAMES:
             setattr(
                 instance,

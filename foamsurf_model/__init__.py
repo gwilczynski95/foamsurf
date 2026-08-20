@@ -6,6 +6,10 @@ from .gaussians import SurfaceGaussianModel
 from .medium import VoronoiMediumModel
 from .scene import HybridSceneModel
 from .topology import VoronoiTopologyController
+from .voronoi_adaptation import (
+    VoronoiAdaptationController,
+    VoronoiTopologyPlan,
+)
 
 __all__ = [
     "GaussianAdaptationController",
@@ -14,4 +18,6 @@ __all__ = [
     "SurfaceGaussianModel",
     "VoronoiMediumModel",
     "VoronoiTopologyController",
+    "VoronoiAdaptationController",
+    "VoronoiTopologyPlan",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import random
 import time
@@ -17,6 +18,8 @@ from foamsurf_model import (
     GaussianAdaptationController,
     HybridSceneModel,
     SurfaceGaussianModel,
+    VoronoiAdaptationController,
+    VoronoiMediumModel,
     VoronoiTopologyController,
 )
 from .checkpoints import (
@@ -30,7 +33,7 @@ from .losses import b0_reconstruction_loss
 from .optimizer import (
     build_optimizers,
     gradient_norm,
-    update_gaussian_learning_rate,
+    update_gaussian_learning_rates,
 )
 from .sampler import RandomCameraRaySampler
 
@@ -49,6 +52,18 @@ def _primitive_gradient_magnitude(module) -> torch.Tensor:
     return squared.sqrt()
 
 
+def training_source(config: ExperimentConfig) -> str:
+    paths = {
+        "both": config.dataset.source_path,
+        "lego": config.dataset.gaussian_ground_truth_path,
+        "clouds": config.dataset.medium_ground_truth_path,
+    }
+    selected = paths[config.dataset.train_target]
+    if selected is None:
+        raise ValueError(f"missing path for train target {config.dataset.train_target}")
+    return selected
+
+
 class Trainer:
     """End-to-end B0 trainer: joint optimization with RGB MSE only."""
 
@@ -61,6 +76,8 @@ class Trainer:
         if not torch.cuda.is_available():
             raise RuntimeError("FoamSurf B0 training requires CUDA")
         self.config = config
+        self.uses_gaussians = config.representation_mode != "voronoi_only"
+        self.uses_voronoi = config.representation_mode != "gaussian_only"
         self.device = torch.device(config.device)
         self.resume_path = Path(resume).resolve() if resume else None
         self._seed_everything(config.seed)
@@ -78,7 +95,7 @@ class Trainer:
         config.save(self.output_dir / "config.yaml")
 
         self.dataset = load_dataset(
-            config.dataset.source_path,
+            training_source(config),
             resolution=config.dataset.resolution,
             device=self.device,
             llffhold=config.dataset.llffhold,
@@ -93,7 +110,7 @@ class Trainer:
             )
             print(
                 "Loaded aligned lego_lego and lego_clouds test ground truth "
-                "on CPU (evaluation only).",
+                "on CPU for validation diagnostics.",
                 flush=True,
             )
         self.camera_center, self.scene_extent = camera_normalization(
@@ -128,6 +145,12 @@ class Trainer:
             payload = load_checkpoint(
                 self.resume_path
             )
+            saved_mode = payload.get("config", {}).get("representation_mode", "hybrid")
+            saved_target = payload.get("config", {}).get("dataset", {}).get("train_target", "both")
+            if saved_mode != config.representation_mode or saved_target != config.dataset.train_target:
+                raise ValueError(
+                    "resume representation_mode and dataset.train_target must match the checkpoint"
+                )
             gaussian_state = {
                 name: payload["model"][f"gaussians.{name}"]
                 for name in SurfaceGaussianModel.PARAMETER_NAMES
@@ -135,6 +158,24 @@ class Trainer:
             self.model.gaussians = SurfaceGaussianModel.from_checkpoint(
                 gaussian_state,
                 payload["model_metadata"]["gaussians"],
+                self.device,
+            )
+            medium_state = {
+                name: payload["model"][f"medium.{name}"]
+                for name in VoronoiMediumModel.PARAMETER_NAMES
+            }
+            if "medium.guard_mask" not in payload["model"]:
+                count = int(payload["model_metadata"]["medium"]["point_count"])
+                guard_count = int(payload["model_metadata"]["medium"].get("guard_count", config.model.medium_guard_points))
+                guard_mask = torch.zeros(count, dtype=torch.bool)
+                if guard_count:
+                    guard_mask[-guard_count:] = True
+                payload["model"]["medium.guard_mask"] = guard_mask
+            self.model.medium = VoronoiMediumModel.from_checkpoint(
+                medium_state,
+                payload["model_metadata"]["medium"],
+                payload["model"]["medium.bbox_min"],
+                payload["model"]["medium.bbox_max"],
                 self.device,
             )
             self.model.load_state_dict(payload["model"], strict=True)
@@ -164,6 +205,12 @@ class Trainer:
             torch.set_rng_state(payload["rng"]["torch"])
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
 
+        self.gaussian_point_extent = self._gaussian_point_extent()
+        if not self.uses_gaussians:
+            self.model.gaussians.requires_grad_(False)
+        if not self.uses_voronoi:
+            self.model.medium.requires_grad_(False)
+
         self.gaussian_adaptation = GaussianAdaptationController(
             self.model.gaussians,
             self.gaussian_optimizer,
@@ -174,6 +221,13 @@ class Trainer:
             self.gaussian_adaptation.load_state_dict(
                 payload["gaussian_adaptation"]
             )
+        self.voronoi_adaptation = VoronoiAdaptationController(
+            self.model.medium, self.medium_optimizer, self.topology,
+            config.voronoi_adaptation,
+        )
+        if payload is not None and payload.get("voronoi_adaptation") is not None:
+            self.voronoi_adaptation.load_state_dict(payload["voronoi_adaptation"])
+        self.last_voronoi_adaptation = {"densify": 0, "prune": 0}
         self.last_adaptation = {
             "clone": 0,
             "split": 0,
@@ -210,14 +264,19 @@ class Trainer:
             gaussian_radius_squared=(
                 config.renderer.gaussian_radius_squared
             ),
+            gaussian_hit_buffer_size=(
+                config.renderer.gaussian_hit_buffer_size
+            ),
         )
         first_origin = self.dataset.train[0].origin
-        self.renderer.set_gaussian_geometry(
-            self.model.gaussians.render_scene(first_origin)
-        )
-        self.topology.synchronize_renderer(
-            self.renderer, self.model.medium
-        )
+        if self.uses_gaussians:
+            self.renderer.set_gaussian_geometry(
+                self.model.gaussians.render_scene(first_origin)
+            )
+        if self.uses_voronoi:
+            self.topology.synchronize_renderer(
+                self.renderer, self.model.medium
+            )
         self.sampler = RandomCameraRaySampler(
             self.dataset,
             config.optimization.rays_per_batch,
@@ -239,6 +298,13 @@ class Trainer:
         self.logger = ExperimentLogger(
             config, self.output_dir, resume=self.resume_path is not None
         )
+        self.last_hit_statistics = {
+            "renderer/hit_buffer_size": config.renderer.gaussian_hit_buffer_size,
+            "renderer/hit_count_mean": 0.0,
+            "renderer/hit_count_p90": 0.0,
+            "renderer/hit_count_p99": 0.0,
+            "renderer/hit_buffer_full_fraction": 0.0,
+        }
 
     def _seed_everything(self, seed: int) -> None:
         random.seed(seed)
@@ -260,6 +326,7 @@ class Trainer:
                 self.best_psnr,
                 self.topology.revision,
                 self.gaussian_adaptation.state_dict(),
+                self.voronoi_adaptation.state_dict(),
                 self.medium_frozen_until,
             ),
         )
@@ -284,6 +351,9 @@ class Trainer:
             "train/rgb_l1": float(loss.rgb_l1.item()),
             "train/ssim": float(loss.ssim.item()),
             "train/psnr": float(loss.psnr.item()),
+            "train/gaussian_scale_regularization": float(
+                loss.gaussian_scale_regularization.item()
+            ),
             "gradient/gaussian_norm": gaussian_gradient_norm,
             "gradient/medium_norm": medium_gradient_norm,
             "gaussian/opacity_mean": float(
@@ -313,6 +383,12 @@ class Trainer:
             "model/gaussian_count": self.model.gaussians.point_count,
             "model/voronoi_count": self.model.medium.point_count,
             "topology/revision": self.topology.revision,
+            "voronoi_adaptation/enabled": int(self.config.voronoi_adaptation.enabled),
+            "voronoi_adaptation/densified": self.last_voronoi_adaptation["densify"],
+            "voronoi_adaptation/pruned": self.last_voronoi_adaptation["prune"],
+            "voronoi_adaptation/total_densified": self.voronoi_adaptation.total_densified,
+            "voronoi_adaptation/total_pruned": self.voronoi_adaptation.total_pruned,
+            "voronoi_adaptation/revision": self.voronoi_adaptation.revision,
             "adaptation/enabled": int(
                 self.config.gaussian_adaptation.enabled
             ),
@@ -408,6 +484,8 @@ class Trainer:
                 self.device
             ) / (1024.0**2),
         }
+        for name, value in self.voronoi_adaptation.last_statistics.items():
+            row[f"voronoi_adaptation/{name}"] = value
         gaussian_opacity = self.model.gaussians.opacities.detach().flatten()
         gaussian_scale = self.model.gaussians.scales.detach().flatten()
         medium_density = self.model.medium.densities.detach().flatten()
@@ -435,18 +513,20 @@ class Trainer:
                 "gradient/medium_active_fraction": float((medium_grad > 0).float().mean().item()),
             }
         )
+        row.update(self.last_hit_statistics)
         return row
 
     @torch.no_grad()
     def _same_batch_psnr(self, batch, rays: torch.Tensor) -> float:
-        gaussian_scene = self.model.gaussians.render_scene(
-            batch.camera_origin
-        )
-        self.renderer.set_gaussian_geometry(gaussian_scene)
+        gaussian_scene = None
+        medium_scene = None
+        if self.uses_gaussians:
+            gaussian_scene = self.model.gaussians.render_scene(batch.camera_origin)
+            self.renderer.set_gaussian_geometry(gaussian_scene)
+        if self.uses_voronoi:
+            medium_scene = self.model.medium.render_scene()
         render = self.renderer.render(
-            rays,
-            gaussians=gaussian_scene,
-            voronoi=self.model.medium.render_scene(),
+            rays, gaussians=gaussian_scene, voronoi=medium_scene,
             background=tuple(self.config.background),
             collect_diagnostics=False,
         )
@@ -478,102 +558,136 @@ class Trainer:
         )
 
     def _train_step(self, iteration: int):
-        self.current_gaussian_means_lr = update_gaussian_learning_rate(
-            self.gaussian_optimizer,
-            self.config.optimization,
-            self.scene_extent,
-            iteration,
-        )
-        sh_interval = self.config.optimization.gaussian_sh_degree_interval
-        if sh_interval > 0 and iteration % sh_interval == 0:
-            self.model.gaussians.one_up_sh_degree()
+        if self.uses_gaussians:
+            self.current_gaussian_means_lr = update_gaussian_learning_rates(
+                self.gaussian_optimizer, self.config.optimization,
+                self.scene_extent, iteration,
+            )
+            sh_interval = self.config.optimization.gaussian_sh_degree_interval
+            if sh_interval > 0 and iteration % sh_interval == 0:
+                self.model.gaussians.one_up_sh_degree()
+        else:
+            self.current_gaussian_means_lr = 0.0
+
         torch.cuda.synchronize()
         started = time.perf_counter()
         batch = self.sampler.next()
-        collect_adaptation = self.gaussian_adaptation.should_collect(
-            iteration
-        )
-        if collect_adaptation:
-            gaussian_scene, screen_points = (
-                self.model.gaussians.training_scene(batch.camera)
-            )
-        else:
-            gaussian_scene = self.model.gaussians.render_scene(batch.camera_origin)
-            screen_points = None
-        self.renderer.set_gaussian_geometry(gaussian_scene)
-        medium_scene = self.model.medium.render_scene()
-        rays = torch.cat(
-            (batch.rays.origins, batch.rays.directions), dim=-1
-        ).contiguous()
+        collect_gaussian = self.uses_gaussians and self.gaussian_adaptation.should_collect(iteration)
+        collect_voronoi = self.uses_voronoi and self.voronoi_adaptation.should_collect(iteration)
+        collect_any = collect_gaussian or collect_voronoi
+
+        gaussian_scene = None
+        screen_points = None
+        if self.uses_gaussians:
+            if collect_gaussian:
+                gaussian_scene, screen_points = self.model.gaussians.training_scene(batch.camera)
+            else:
+                gaussian_scene = self.model.gaussians.render_scene(batch.camera_origin)
+            self.renderer.set_gaussian_geometry(gaussian_scene)
+        medium_scene = self.model.medium.render_scene() if self.uses_voronoi else None
+        rays = torch.cat((batch.rays.origins, batch.rays.directions), dim=-1).contiguous()
 
         self.gaussian_optimizer.zero_grad(set_to_none=True)
         self.medium_optimizer.zero_grad(set_to_none=True)
         render = self.renderer.render(
-            rays,
-            gaussians=gaussian_scene,
-            voronoi=medium_scene,
+            rays, gaussians=gaussian_scene, voronoi=medium_scene,
             background=tuple(self.config.background),
-            collect_diagnostics=collect_adaptation,
-            diagnostic_target=(batch.target if collect_adaptation else None),
+            collect_diagnostics=collect_any,
+            diagnostic_target=batch.target if collect_any else None,
         )
+        if (
+            render.hit_indices.numel()
+            and (
+                iteration == self.start_iteration
+                or iteration % self.config.validation.log_interval == 0
+                or iteration == self.config.optimization.iterations
+            )
+        ):
+            with torch.no_grad():
+                hit_counts = (render.hit_indices >= 0).sum(dim=0).float()
+                self.last_hit_statistics = {
+                    "renderer/hit_buffer_size": (
+                        self.config.renderer.gaussian_hit_buffer_size
+                    ),
+                    "renderer/hit_count_mean": float(hit_counts.mean().item()),
+                    "renderer/hit_count_p90": float(
+                        torch.quantile(hit_counts, 0.90).item()
+                    ),
+                    "renderer/hit_count_p99": float(
+                        torch.quantile(hit_counts, 0.99).item()
+                    ),
+                    "renderer/hit_buffer_full_fraction": float(
+                        (hit_counts >= render.hit_indices.size(0))
+                        .float()
+                        .mean()
+                        .item()
+                    ),
+                }
         loss = b0_reconstruction_loss(
-            render.image,
-            batch.target,
+            render.image, batch.target,
             mode=self.config.optimization.reconstruction_loss,
             dssim_weight=self.config.optimization.dssim_weight,
             image_size=(batch.camera.height, batch.camera.width),
         )
-        loss.total.backward()
-        if collect_adaptation:
-            if render.diagnostics is None:
-                raise RuntimeError("B1 statistics were not returned")
-            self.gaussian_adaptation.collect_statistics(
-                screen_points.grad,
-                render.diagnostics.gaussian,
-                batch.camera,
+        scale_weight = self.config.optimization.gaussian_scale_regularization
+        if self.uses_gaussians and scale_weight > 0.0:
+            scale_regularization = (
+                scale_weight
+                / self.model.gaussians.point_count
+                * torch.linalg.vector_norm(
+                    self.model.gaussians.scales, dim=1
+                ).sum()
             )
-        gaussian_gradient_norm = gradient_norm(
-            self.model.gaussians.parameters()
-        )
-        medium_gradient_norm = gradient_norm(
-            self.model.medium.parameters()
-        )
-        self.last_adaptation = {
-            "clone": 0,
-            "split": 0,
-            "prune": 0,
-            "budget_skip": 0,
-        }
+            loss = replace(
+                loss,
+                total=loss.total + scale_regularization,
+                gaussian_scale_regularization=scale_regularization,
+            )
+        loss.total.backward()
+        if collect_any and render.diagnostics is None:
+            raise RuntimeError("adaptation statistics were not returned")
+        if collect_gaussian:
+            self.gaussian_adaptation.collect_statistics(
+                screen_points.grad, render.diagnostics.gaussian, batch.camera
+            )
+        if collect_voronoi:
+            self.voronoi_adaptation.collect_statistics(render.diagnostics.medium)
+
+        gaussian_gradient_norm = gradient_norm(self.model.gaussians.parameters())
+        medium_gradient_norm = gradient_norm(self.model.medium.parameters())
+        self.last_adaptation = {"clone": 0, "split": 0, "prune": 0, "budget_skip": 0}
+        self.last_voronoi_adaptation = {"densify": 0, "prune": 0}
         self.last_opacity_reset = {"applied": 0, "changed": 0}
         self.last_adaptation_pre_psnr = float("nan")
         self.last_adaptation_post_psnr = float("nan")
         self.last_adaptation_psnr_delta = float("nan")
         self.last_reset_post_psnr = float("nan")
         self.last_reset_psnr_delta = float("nan")
-        if self._independent_medium_freeze_event(iteration):
-            self._schedule_medium_freeze(
-                iteration,
-                self.config.gaussian_adaptation.medium_freeze_steps,
-            )
-        if self.gaussian_adaptation.should_adapt(iteration):
+
+        movement_snapshot = None
+        if (
+            self.uses_gaussians
+            and self.config.gaussian_adaptation.policy == "flare_movement"
+            and self.gaussian_adaptation.should_adapt(iteration)
+        ):
+            movement_snapshot = self.gaussian_adaptation.snapshot_movement()
+            self.last_adaptation_pre_psnr = float(loss.psnr.item())
+
+        if self.uses_gaussians and self._independent_medium_freeze_event(iteration):
+            self._schedule_medium_freeze(iteration, self.config.gaussian_adaptation.medium_freeze_steps)
+        if (
+            self.uses_gaussians
+            and self.config.gaussian_adaptation.policy == "graphdeco"
+            and self.gaussian_adaptation.should_adapt(iteration)
+        ):
             plan = self.gaussian_adaptation.propose_plan(iteration)
             self.last_adaptation_pre_psnr = float(loss.psnr.item())
             self.last_adaptation = self.gaussian_adaptation.apply_plan(plan)
-            self.population_runaway = (
-                self._population_exceeds_safety_threshold()
-            )
+            self.population_runaway = self._population_exceeds_safety_threshold()
             if not self.population_runaway:
-                self.last_adaptation_post_psnr = self._same_batch_psnr(
-                    batch, rays
-                )
-                self.last_adaptation_psnr_delta = (
-                    self.last_adaptation_post_psnr
-                    - self.last_adaptation_pre_psnr
-                )
-            if any(
-                self.last_adaptation[name]
-                for name in ("clone", "split", "prune")
-            ):
+                self.last_adaptation_post_psnr = self._same_batch_psnr(batch, rays)
+                self.last_adaptation_psnr_delta = self.last_adaptation_post_psnr - self.last_adaptation_pre_psnr
+            if any(self.last_adaptation[name] for name in ("clone", "split", "prune")):
                 torch.cuda.empty_cache()
             statistics = self.gaussian_adaptation.last_plan_statistics
             print(
@@ -584,90 +698,121 @@ class Trainer:
                 f"budget_skip={self.last_adaptation['budget_skip']} "
                 f"count={self.model.gaussians.point_count} "
                 f"grad_p95={statistics['gradient_p95']:.3e} "
-                f"grad_max={statistics['gradient_max']:.3e} "
-                f"grad_candidates={statistics['gradient_candidates']} "
-                f"clone_candidates={statistics['clone_candidates']} "
-                f"split_candidates={statistics['split_candidates']} "
-                f"opacity_prune={statistics['opacity_prune']} "
-                f"screen_prune={statistics['screen_prune']} "
-                f"world_prune={statistics['world_prune']} "
-                f"budget_rejected="
-                f"{statistics['budget_rejected']} "
-                f"grad_screen_overlap="
-                f"{statistics['gradient_screen_overlap']} "
-                f"screen_replacements="
-                f"{statistics['screen_replacements']} "
-                f"radius_p95={statistics['radius_p95']:.3f} "
-                f"radius_max={statistics['radius_max']:.3f}",
+                f"grad_candidates={statistics['gradient_candidates']}",
                 flush=True,
             )
 
-        if self.gaussian_adaptation.should_reset_opacity(iteration):
+        if self.uses_gaussians and self.gaussian_adaptation.should_reset_opacity(iteration):
             reset_reference_psnr = (
                 self.last_adaptation_post_psnr
-                if self.last_adaptation_post_psnr
-                == self.last_adaptation_post_psnr
+                if self.last_adaptation_post_psnr == self.last_adaptation_post_psnr
                 else float(loss.psnr.item())
             )
             changed = self.gaussian_adaptation.reset_opacity()
             self.last_opacity_reset = {"applied": 1, "changed": changed}
             self._schedule_medium_freeze(
-                iteration,
-                self.config.gaussian_adaptation.medium_freeze_after_reset,
+                iteration, self.config.gaussian_adaptation.medium_freeze_after_reset
             )
             if not self.population_runaway:
-                self.last_reset_post_psnr = self._same_batch_psnr(
-                    batch, rays
-                )
-                self.last_reset_psnr_delta = (
-                    self.last_reset_post_psnr - reset_reference_psnr
-                )
+                self.last_reset_post_psnr = self._same_batch_psnr(batch, rays)
+                self.last_reset_psnr_delta = self.last_reset_post_psnr - reset_reference_psnr
             print(
                 f"iteration={iteration} opacity reset "
                 f"value={self.config.gaussian_adaptation.opacity_reset_value} "
-                f"changed={changed} "
-                f"medium_frozen_until={self.medium_frozen_until}",
+                f"changed={changed} medium_frozen_until={self.medium_frozen_until}",
                 flush=True,
             )
 
+        voronoi_changed = False
+        if self.uses_voronoi and self.voronoi_adaptation.should_adapt(iteration):
+            plan = self.voronoi_adaptation.propose_plan()
+            self.last_voronoi_adaptation = self.voronoi_adaptation.apply_plan(plan)
+            voronoi_changed = not plan.is_noop
+            if voronoi_changed:
+                self.topology.synchronize_renderer(self.renderer, self.model.medium)
+                torch.cuda.empty_cache()
+            print(
+                f"iteration={iteration} Voronoi adaptation "
+                f"densify={self.last_voronoi_adaptation['densify']} "
+                f"prune={self.last_voronoi_adaptation['prune']} "
+                f"count={self.model.medium.point_count}", flush=True,
+            )
+
         if not self.population_runaway:
-            self.gaussian_optimizer.step()
-            if iteration >= self.medium_frozen_until:
+            if self.uses_gaussians:
+                self.gaussian_optimizer.step()
+                if movement_snapshot is not None:
+                    self.last_adaptation = (
+                        self.gaussian_adaptation.apply_movement(
+                            movement_snapshot
+                        )
+                    )
+                    self.last_adaptation_post_psnr = self._same_batch_psnr(
+                        batch, rays
+                    )
+                    self.last_adaptation_psnr_delta = (
+                        self.last_adaptation_post_psnr
+                        - self.last_adaptation_pre_psnr
+                    )
+                    statistics = self.gaussian_adaptation.last_plan_statistics
+                    print(
+                        f"iteration={iteration} flare movement adaptation "
+                        f"split={self.last_adaptation['split']} "
+                        f"prune={self.last_adaptation['prune']} "
+                        f"count={self.model.gaussians.point_count} "
+                        f"movement_p95={statistics['gradient_p95']:.3e}",
+                        flush=True,
+                    )
+                self._apply_gaussian_scale_guard()
+            if self.uses_voronoi and iteration >= self.medium_frozen_until and not voronoi_changed:
                 self.medium_optimizer.step()
 
         if (
-            not self.population_runaway
-            and iteration
-            % self.config.optimization.topology_update_interval
-            == 0
+            self.uses_voronoi and not self.population_runaway and not voronoi_changed
+            and iteration % self.config.optimization.topology_update_interval == 0
         ):
-            self.topology.update(
-                self.model.medium,
-                self.medium_optimizer,
-                incremental=(
-                    self.config.optimization.topology_incremental
-                ),
+            changed = self.topology.update(
+                self.model.medium, self.medium_optimizer,
+                incremental=self.config.optimization.topology_incremental,
             )
-            self.topology.synchronize_renderer(
-                self.renderer, self.model.medium
-            )
+            if changed:
+                self.voronoi_adaptation.reorder_statistics(self.topology.last_permutation)
+            self.topology.synchronize_renderer(self.renderer, self.model.medium)
 
         torch.cuda.synchronize()
         step_seconds = time.perf_counter() - started
         self.training_seconds += step_seconds
-        return (
-            loss,
-            gaussian_gradient_norm,
-            medium_gradient_norm,
-            step_seconds,
+        return loss, gaussian_gradient_norm, medium_gradient_norm, step_seconds
+
+    @torch.no_grad()
+    def _gaussian_point_extent(self) -> float:
+        means = self.model.gaussians.means
+        span = means.amax(dim=0) - means.amin(dim=0)
+        return float(torch.linalg.vector_norm(span).item())
+
+    @torch.no_grad()
+    def _apply_gaussian_scale_guard(self) -> None:
+        optimization = self.config.optimization
+        if (
+            optimization.gaussian_min_scale is None
+            or optimization.gaussian_max_scale_fraction is None
+        ):
+            return
+        maximum = (
+            optimization.gaussian_max_scale_fraction
+            * (self.gaussian_point_extent / 2.0)
         )
+        self.model.gaussians.clamp_scales_(
+            optimization.gaussian_min_scale, maximum
+        )
+        self.gaussian_point_extent = self._gaussian_point_extent()
 
     def _evaluate_and_checkpoint(self, iteration: int) -> None:
         summary, images, histograms = self.evaluator.evaluate(
             iteration
         )
         self.logger.log_eval(summary, images, histograms)
-        current_psnr = float(summary["eval/hybrid_psnr"])
+        current_psnr = float(summary["eval/primary_psnr"])
         if current_psnr > self.best_psnr:
             self.best_psnr = current_psnr
             self._checkpoint(
@@ -680,7 +825,7 @@ class Trainer:
         )
         print(
             f"iteration={iteration} "
-            f"hybrid_psnr={current_psnr:.4f} "
+            f"primary_psnr={current_psnr:.4f} "
             f"gaussian_only_psnr="
             f"{summary['eval/gaussian_only_psnr']:.4f} "
             f"voronoi_only_psnr="
@@ -699,6 +844,10 @@ class Trainer:
             "best_psnr": self.best_psnr,
             "gaussian_count": self.model.gaussians.point_count,
             "voronoi_count": self.model.medium.point_count,
+            "representation_mode": self.config.representation_mode,
+            "voronoi_adaptation_revision": self.voronoi_adaptation.revision,
+            "total_voronoi_densified": self.voronoi_adaptation.total_densified,
+            "total_voronoi_pruned": self.voronoi_adaptation.total_pruned,
             "adaptation_revision": self.gaussian_adaptation.revision,
             "total_cloned": self.gaussian_adaptation.total_cloned,
             "total_split": self.gaussian_adaptation.total_split,
