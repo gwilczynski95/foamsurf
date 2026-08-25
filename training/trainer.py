@@ -34,6 +34,7 @@ from .optimizer import (
     build_optimizers,
     gradient_norm,
     update_gaussian_learning_rates,
+    update_medium_learning_rates,
 )
 from .sampler import RandomCameraRaySampler
 
@@ -356,6 +357,15 @@ class Trainer:
             ),
             "gradient/gaussian_norm": gaussian_gradient_norm,
             "gradient/medium_norm": medium_gradient_norm,
+            "optimization/medium_sites_lr": self.current_medium_lrs[
+                "medium_sites"
+            ],
+            "optimization/medium_density_lr": self.current_medium_lrs[
+                "medium_density"
+            ],
+            "optimization/medium_color_lr": self.current_medium_lrs[
+                "medium_color"
+            ],
             "gaussian/opacity_mean": float(
                 self.model.gaussians.opacities.mean().item()
             ),
@@ -568,6 +578,17 @@ class Trainer:
                 self.model.gaussians.one_up_sh_degree()
         else:
             self.current_gaussian_means_lr = 0.0
+
+        if self.uses_voronoi:
+            self.current_medium_lrs = update_medium_learning_rates(
+                self.medium_optimizer, self.config.optimization, iteration
+            )
+        else:
+            self.current_medium_lrs = {
+                "medium_sites": 0.0,
+                "medium_density": 0.0,
+                "medium_color": 0.0,
+            }
 
         torch.cuda.synchronize()
         started = time.perf_counter()

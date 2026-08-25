@@ -186,6 +186,45 @@ def update_gaussian_learning_rates(
     return rate
 
 
+def update_medium_learning_rates(
+    optimizer: torch.optim.Adam,
+    config: OptimizationConfig,
+    iteration: int,
+) -> dict[str, float]:
+    """Apply an optional log-linear decay to each Voronoi parameter group."""
+
+    progress_step = max(0, iteration - config.medium_lr_decay_from)
+    schedule_steps = max(
+        1, config.medium_lr_decay_until - config.medium_lr_decay_from
+    )
+    rates: dict[str, float] = {}
+    for group_name, initial_name, final_name in (
+        ("medium_sites", "medium_sites_lr", "medium_sites_lr_final"),
+        ("medium_density", "medium_density_lr", "medium_density_lr_final"),
+        ("medium_color", "medium_color_lr", "medium_color_lr_final"),
+    ):
+        initial = float(getattr(config, initial_name))
+        final = getattr(config, final_name)
+        if final is None or iteration <= config.medium_lr_decay_from:
+            rate = initial
+        else:
+            rate = _exponential_lr(
+                progress_step,
+                initial,
+                float(final),
+                delay_steps=0,
+                delay_mult=1.0,
+                max_steps=schedule_steps,
+            )
+        rates[group_name] = rate
+
+    for group in optimizer.param_groups:
+        name = group.get("name")
+        if name in rates:
+            group["lr"] = rates[name]
+    return rates
+
+
 update_gaussian_learning_rate = update_gaussian_learning_rates
 
 

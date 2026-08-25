@@ -99,6 +99,11 @@ class OptimizationConfig:
     medium_sites_lr: float = 1.0e-4
     medium_density_lr: float = 1.0e-2
     medium_color_lr: float = 5.0e-3
+    medium_sites_lr_final: float | None = None
+    medium_density_lr_final: float | None = None
+    medium_color_lr_final: float | None = None
+    medium_lr_decay_from: int = 0
+    medium_lr_decay_until: int = 30_000
     topology_update_interval: int = 25
     topology_incremental: bool = True
 
@@ -374,6 +379,33 @@ class ExperimentConfig:
             raise ValueError("gaussian_adam_eps must be positive")
         if self.optimization.gaussian_scale_regularization < 0:
             raise ValueError("gaussian_scale_regularization must be non-negative")
+        for name in (
+            "medium_sites_lr",
+            "medium_density_lr",
+            "medium_color_lr",
+        ):
+            if getattr(self.optimization, name) <= 0:
+                raise ValueError(f"optimization.{name} must be positive")
+        medium_finals = (
+            "medium_sites_lr_final",
+            "medium_density_lr_final",
+            "medium_color_lr_final",
+        )
+        for name in medium_finals:
+            value = getattr(self.optimization, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"optimization.{name} must be positive")
+        if self.optimization.medium_lr_decay_from < 0:
+            raise ValueError("medium_lr_decay_from must be non-negative")
+        if (
+            any(getattr(self.optimization, name) is not None for name in medium_finals)
+            and self.optimization.medium_lr_decay_until
+            <= self.optimization.medium_lr_decay_from
+        ):
+            raise ValueError(
+                "medium_lr_decay_until must exceed medium_lr_decay_from "
+                "when a medium LR schedule is enabled"
+            )
         if (
             self.optimization.gaussian_min_scale is not None
             and self.optimization.gaussian_min_scale <= 0

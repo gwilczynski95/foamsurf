@@ -63,6 +63,7 @@ class VoronoiAdaptationController:
         return {
             "densified": 0,
             "pruned": 0,
+            "duplicate_repairs": 0,
             "score_p95": 0.0,
             "cell_radius_p95": 0.0,
             "active_fraction": 0.0,
@@ -148,6 +149,68 @@ class VoronoiAdaptationController:
         return radii, farthest
 
     @torch.no_grad()
+    def _repair_duplicate_children(
+        self,
+        keep_indices: torch.Tensor,
+        child_sites: torch.Tensor,
+    ) -> tuple[torch.Tensor, int]:
+        """Perturb only exact child collisions before Delaunay construction.
+
+        A zero configured jitter may place a midpoint exactly on another site.
+        The triangulation rejects such populations.  This safety perturbation
+        is several orders of magnitude below the explicit child jitter and is
+        applied only to colliding children.
+        """
+
+        if child_sites.numel() == 0:
+            return child_sites, 0
+        occupied = self.model.sites[keep_indices]
+        repaired = child_sites.clone()
+        repaired_total = 0
+        diagonal = float(
+            (self.model.bbox_max - self.model.bbox_min).norm().item()
+        )
+        base_step = max(diagonal * 1.0e-6, 1.0e-7)
+        child_ids = torch.arange(
+            repaired.shape[0], device=repaired.device, dtype=repaired.dtype
+        )
+
+        for attempt in range(8):
+            combined = torch.cat((occupied, repaired), dim=0)
+            _, inverse, counts = torch.unique(
+                combined, dim=0, return_inverse=True, return_counts=True
+            )
+            duplicate = counts[inverse[occupied.shape[0]:]] > 1
+            duplicate_count = int(duplicate.sum().item())
+            if duplicate_count == 0:
+                return repaired, repaired_total
+            repaired_total += duplicate_count
+
+            phase = child_ids + float(1 + attempt * repaired.shape[0])
+            offsets = torch.stack(
+                (
+                    torch.sin(phase * 12.9898),
+                    torch.sin(phase * 78.233 + 0.5),
+                    torch.sin(phase * 37.719 + 1.0),
+                ),
+                dim=-1,
+            )
+            offsets = offsets / offsets.norm(
+                dim=-1, keepdim=True
+            ).clamp_min(1.0e-8)
+            repaired[duplicate] += (
+                offsets[duplicate] * base_step * float(2**attempt)
+            )
+            repaired = torch.maximum(
+                torch.minimum(repaired, self.model.bbox_max),
+                self.model.bbox_min,
+            )
+
+        raise RuntimeError(
+            "failed to separate duplicate Voronoi child sites after 8 attempts"
+        )
+
+    @torch.no_grad()
     def propose_plan(self) -> VoronoiTopologyPlan:
         count = self.model.point_count
         device = self.model.sites.device
@@ -216,11 +279,15 @@ class VoronoiAdaptationController:
         child_sites = torch.maximum(
             torch.minimum(child_sites, self.model.bbox_max), self.model.bbox_min
         )
+        child_sites, duplicate_repairs = self._repair_duplicate_children(
+            keep, child_sites
+        )
 
         observed_values = score[observed]
         self.last_statistics = {
             "densified": int(parents.numel()),
             "pruned": int(prune_indices.numel()),
+            "duplicate_repairs": duplicate_repairs,
             "score_p95": float(torch.quantile(observed_values, 0.95).item()) if observed_values.numel() else 0.0,
             "cell_radius_p95": float(torch.quantile(radii, 0.95).item()),
             "active_fraction": float(active.float().mean().item()),
