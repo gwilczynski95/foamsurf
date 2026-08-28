@@ -1,0 +1,71 @@
+experiment_name: stage2-voronoi-only
+output_dir: outputs/stage2-voronoi-only
+seed: 42
+device: cuda
+representation_mode: voronoi_only
+background: [1.0, 1.0, 1.0]
+dataset:
+  source_path: /shared/sets/datasets/foamsurf/lego/lego_both
+  gaussian_ground_truth_path: /shared/sets/datasets/foamsurf/lego/lego_lego
+  medium_ground_truth_path: /shared/sets/datasets/foamsurf/lego/lego_clouds
+  train_target: clouds
+  resolution: 1
+  llffhold: 8
+model:
+  appearance: rgb
+  gaussian_initial_points: 1
+  medium_points: 8192
+  medium_guard_points: 8
+  medium_guard_scale: 1.25
+  medium_bbox_margin: 0.10
+  medium_initial_density: 0.01
+  medium_initial_color: [0.5, 0.5, 0.5]
+renderer:
+  near: 0.1
+  far: 6.0
+  training_transmittance_threshold: 0.0001
+  validation_transmittance_threshold: 0.001
+  max_intersections: 1024
+  number_of_sides: 8
+optimization:
+  iterations: 30000
+  rays_per_batch: 65536
+  full_image_batch: false
+  cameras_without_replacement: true
+  reconstruction_loss: mse
+  medium_sites_lr: 0.0001
+  medium_density_lr: 0.01
+  medium_color_lr: 0.005
+  topology_update_interval: 25
+  topology_incremental: true
+validation:
+  eval_interval: 1000
+  log_interval: 10
+  checkpoint_interval: 1000
+  max_eval_views: -1
+  image_views: 4
+diagnostics:
+  enabled: true
+  save_per_primitive: true
+gaussian_adaptation:
+  enabled: false
+voronoi_adaptation:
+  enabled: true
+  densify_from: 1000
+  densify_until: 20000
+  interval: 500
+  densify_fraction: 0.10
+  max_points: 32768
+  min_points: 1024
+  min_visibility: 1.0
+  contribution_threshold: 0.000001
+  gradient_threshold: 0.0
+  prune_cell_radius_fraction: 0.02
+  max_prune_fraction: 0.10
+  prune_patience: 2
+  child_jitter_fraction: 0.05
+wandb:
+  mode: online
+  project: foamsurf_stage2_voronoi
+  name: stage2-voronoi-only
+  tags: [stage2, voronoi-only, lego-clouds, adaptive-medium]

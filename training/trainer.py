@@ -245,6 +245,9 @@ class Trainer:
         self.last_adaptation_pre_psnr = float("nan")
         self.last_adaptation_post_psnr = float("nan")
         self.last_adaptation_psnr_delta = float("nan")
+        self.last_voronoi_adaptation_pre_psnr = float("nan")
+        self.last_voronoi_adaptation_post_psnr = float("nan")
+        self.last_voronoi_adaptation_psnr_delta = float("nan")
         self.last_reset_post_psnr = float("nan")
         self.last_reset_psnr_delta = float("nan")
         torch.cuda.reset_peak_memory_stats(self.device)
@@ -399,6 +402,9 @@ class Trainer:
             "voronoi_adaptation/total_densified": self.voronoi_adaptation.total_densified,
             "voronoi_adaptation/total_pruned": self.voronoi_adaptation.total_pruned,
             "voronoi_adaptation/revision": self.voronoi_adaptation.revision,
+            "voronoi_adaptation/pre_psnr": self.last_voronoi_adaptation_pre_psnr,
+            "voronoi_adaptation/post_psnr": self.last_voronoi_adaptation_post_psnr,
+            "voronoi_adaptation/psnr_delta": self.last_voronoi_adaptation_psnr_delta,
             "adaptation/enabled": int(
                 self.config.gaussian_adaptation.enabled
             ),
@@ -423,6 +429,12 @@ class Trainer:
             ),
             "opacity_reset/post_psnr": self.last_reset_post_psnr,
             "opacity_reset/psnr_delta": self.last_reset_psnr_delta,
+            "gaussian/frozen": int(
+                iteration <= self.config.optimization.gaussian_freeze_until
+            ),
+            "gaussian/frozen_until": (
+                self.config.optimization.gaussian_freeze_until
+            ),
             "medium/frozen": int(iteration < self.medium_frozen_until),
             "medium/frozen_until": self.medium_frozen_until,
             "safety/population_runaway": int(self.population_runaway),
@@ -568,6 +580,10 @@ class Trainer:
         )
 
     def _train_step(self, iteration: int):
+        gaussian_trainable = (
+            self.uses_gaussians
+            and iteration > self.config.optimization.gaussian_freeze_until
+        )
         if self.uses_gaussians:
             self.current_gaussian_means_lr = update_gaussian_learning_rates(
                 self.gaussian_optimizer, self.config.optimization,
@@ -593,7 +609,10 @@ class Trainer:
         torch.cuda.synchronize()
         started = time.perf_counter()
         batch = self.sampler.next()
-        collect_gaussian = self.uses_gaussians and self.gaussian_adaptation.should_collect(iteration)
+        collect_gaussian = (
+            gaussian_trainable
+            and self.gaussian_adaptation.should_collect(iteration)
+        )
         collect_voronoi = self.uses_voronoi and self.voronoi_adaptation.should_collect(iteration)
         collect_any = collect_gaussian or collect_voronoi
 
@@ -682,12 +701,15 @@ class Trainer:
         self.last_adaptation_pre_psnr = float("nan")
         self.last_adaptation_post_psnr = float("nan")
         self.last_adaptation_psnr_delta = float("nan")
+        self.last_voronoi_adaptation_pre_psnr = float("nan")
+        self.last_voronoi_adaptation_post_psnr = float("nan")
+        self.last_voronoi_adaptation_psnr_delta = float("nan")
         self.last_reset_post_psnr = float("nan")
         self.last_reset_psnr_delta = float("nan")
 
         movement_snapshot = None
         if (
-            self.uses_gaussians
+            gaussian_trainable
             and self.config.gaussian_adaptation.policy == "flare_movement"
             and self.gaussian_adaptation.should_adapt(iteration)
         ):
@@ -697,7 +719,7 @@ class Trainer:
         if self.uses_gaussians and self._independent_medium_freeze_event(iteration):
             self._schedule_medium_freeze(iteration, self.config.gaussian_adaptation.medium_freeze_steps)
         if (
-            self.uses_gaussians
+            gaussian_trainable
             and self.config.gaussian_adaptation.policy == "graphdeco"
             and self.gaussian_adaptation.should_adapt(iteration)
         ):
@@ -723,7 +745,10 @@ class Trainer:
                 flush=True,
             )
 
-        if self.uses_gaussians and self.gaussian_adaptation.should_reset_opacity(iteration):
+        if (
+            gaussian_trainable
+            and self.gaussian_adaptation.should_reset_opacity(iteration)
+        ):
             reset_reference_psnr = (
                 self.last_adaptation_post_psnr
                 if self.last_adaptation_post_psnr == self.last_adaptation_post_psnr
@@ -746,21 +771,37 @@ class Trainer:
 
         voronoi_changed = False
         if self.uses_voronoi and self.voronoi_adaptation.should_adapt(iteration):
+            self.last_voronoi_adaptation_pre_psnr = self._same_batch_psnr(
+                batch, rays
+            )
             plan = self.voronoi_adaptation.propose_plan()
-            self.last_voronoi_adaptation = self.voronoi_adaptation.apply_plan(plan)
+            self.last_voronoi_adaptation = (
+                self.voronoi_adaptation.apply_plan(plan)
+            )
             voronoi_changed = not plan.is_noop
             if voronoi_changed:
-                self.topology.synchronize_renderer(self.renderer, self.model.medium)
+                self.topology.synchronize_renderer(
+                    self.renderer, self.model.medium
+                )
                 torch.cuda.empty_cache()
+            self.last_voronoi_adaptation_post_psnr = self._same_batch_psnr(
+                batch, rays
+            )
+            self.last_voronoi_adaptation_psnr_delta = (
+                self.last_voronoi_adaptation_post_psnr
+                - self.last_voronoi_adaptation_pre_psnr
+            )
             print(
                 f"iteration={iteration} Voronoi adaptation "
                 f"densify={self.last_voronoi_adaptation['densify']} "
                 f"prune={self.last_voronoi_adaptation['prune']} "
-                f"count={self.model.medium.point_count}", flush=True,
+                f"count={self.model.medium.point_count} "
+                f"psnr_delta={self.last_voronoi_adaptation_psnr_delta:.6f}",
+                flush=True,
             )
 
         if not self.population_runaway:
-            if self.uses_gaussians:
+            if gaussian_trainable:
                 self.gaussian_optimizer.step()
                 if movement_snapshot is not None:
                     self.last_adaptation = (

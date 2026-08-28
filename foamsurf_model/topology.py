@@ -39,6 +39,7 @@ class VoronoiTopologyController:
                     medium, optimizer, permutation
                 )
         self.revision = 0
+        self.last_replacement_retries = 0
         self._read_topology()
 
     def _read_topology(self) -> None:
@@ -102,35 +103,118 @@ class VoronoiTopologyController:
         keep_indices: torch.Tensor,
         parent_indices: torch.Tensor,
         child_sites: torch.Tensor,
+        max_attempts: int = 12,
     ) -> None:
-        """Apply prune and split atomically, preserving survivor Adam state."""
+        """Atomically replace sites and retry ambiguous triangulations.
+
+        Candidate geometry is triangulated before model or optimizer state is
+        mutated. If every attempt fails, the pre-event state remains intact.
+        """
         old_count = medium.point_count
         child_count = int(parent_indices.numel())
-        medium.guard_mask = torch.cat(
-            (medium.guard_mask[keep_indices], torch.zeros(child_count, dtype=torch.bool, device=medium.sites.device))
+        candidate_guard_mask = torch.cat(
+            (
+                medium.guard_mask[keep_indices],
+                torch.zeros(
+                    child_count, dtype=torch.bool, device=medium.sites.device
+                ),
+            )
         )
-        groups = {group.get("name"): group for group in optimizer.param_groups}
+        survivor_sites = medium.sites.detach()[keep_indices]
+        candidate_children = child_sites.detach().clone()
+        diagonal = float((medium.bbox_max - medium.bbox_min).norm().item())
+        base_step = max(diagonal * 1.0e-7, 1.0e-8)
+        triangulation = None
+        failure_count = 0
+        while triangulation is None:
+            candidate_sites = torch.cat(
+                (survivor_sites, candidate_children), dim=0
+            ).contiguous()
+            try:
+                triangulation = foamsurf_topology.Triangulation(candidate_sites)
+            except foamsurf_topology.TriangulationFailedError:
+                failure_count += 1
+                if failure_count >= max_attempts or child_count == 0:
+                    self.last_replacement_retries = failure_count
+                    raise
+                child_ids = torch.arange(
+                    child_count,
+                    device=candidate_children.device,
+                    dtype=candidate_children.dtype,
+                )
+                phase = child_ids + float(failure_count * child_count + 1)
+                directions = torch.stack(
+                    (
+                        torch.sin(phase * 12.9898),
+                        torch.sin(phase * 78.233 + 0.5),
+                        torch.sin(phase * 37.719 + 1.0),
+                    ),
+                    dim=-1,
+                )
+                directions = directions / directions.norm(
+                    dim=-1, keepdim=True
+                ).clamp_min(1.0e-8)
+                candidate_children = child_sites.detach() + (
+                    directions * base_step * float(2 ** (failure_count - 1))
+                )
+                candidate_children = torch.maximum(
+                    torch.minimum(candidate_children, medium.bbox_max),
+                    medium.bbox_min,
+                )
+
+        groups = {
+            group.get("name"): group for group in optimizer.param_groups
+        }
+        for attribute, group_name in self.GROUP_NAMES.items():
+            parameter = getattr(medium, attribute)
+            group = groups.get(group_name)
+            if group is None or group["params"][0] is not parameter:
+                raise RuntimeError(
+                    f"optimizer group {group_name!r} does not own "
+                    f"medium.{attribute}"
+                )
+
+        self.last_replacement_retries = failure_count
+        permutation = triangulation.permutation().to(torch.long)
         for attribute, group_name in self.GROUP_NAMES.items():
             old_parameter = getattr(medium, attribute)
             group = groups[group_name]
             old_state = optimizer.state.pop(old_parameter, {})
             survivor = old_parameter.detach()[keep_indices]
-            child = child_sites if attribute == "sites" else old_parameter.detach()[parent_indices]
-            new_parameter = nn.Parameter(torch.cat((survivor, child), dim=0).contiguous())
+            child = (
+                candidate_children
+                if attribute == "sites"
+                else old_parameter.detach()[parent_indices]
+            )
+            new_parameter = nn.Parameter(
+                torch.cat((survivor, child), dim=0).contiguous()
+            )
             setattr(medium, attribute, new_parameter)
             group["params"][0] = new_parameter
             new_state = {}
             for name, value in old_state.items():
-                if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == old_count:
-                    zeros = torch.zeros((child_count, *value.shape[1:]), dtype=value.dtype, device=value.device)
-                    new_state[name] = torch.cat((value[keep_indices], zeros), dim=0).contiguous()
+                if (
+                    torch.is_tensor(value)
+                    and value.ndim > 0
+                    and value.shape[0] == old_count
+                ):
+                    zeros = torch.zeros(
+                        (child_count, *value.shape[1:]),
+                        dtype=value.dtype,
+                        device=value.device,
+                    )
+                    new_state[name] = torch.cat(
+                        (value[keep_indices], zeros), dim=0
+                    ).contiguous()
                 else:
-                    new_state[name] = value.clone() if torch.is_tensor(value) else value
+                    new_state[name] = (
+                        value.clone() if torch.is_tensor(value) else value
+                    )
             if new_state:
                 optimizer.state[new_parameter] = new_state
 
-        self.triangulation = foamsurf_topology.Triangulation(medium.sites.detach())
-        permutation = self.triangulation.permutation().to(torch.long)
+        medium.guard_mask = candidate_guard_mask
+        self.triangulation = triangulation
         self._permute_with_optimizer(medium, optimizer, permutation)
         self.last_permutation = permutation
         self._read_topology()

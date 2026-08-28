@@ -1,0 +1,90 @@
+experiment_name: stage2-voronoi-capacity
+output_dir: outputs/stage2-voronoi-capacity
+seed: 42
+device: cuda
+representation_mode: voronoi_only
+background: [0.0, 0.0, 0.0]
+
+dataset:
+  source_path: /shared/sets/datasets/foamsurf/lego/lego_both
+  gaussian_ground_truth_path: /shared/sets/datasets/foamsurf/lego/lego_lego
+  medium_ground_truth_path: /shared/sets/datasets/foamsurf/lego/lego_clouds
+  train_target: clouds
+  resolution: 1
+  llffhold: 8
+
+model:
+  appearance: rgb
+  gaussian_initial_points: 1
+  medium_points: 2048
+  medium_guard_points: 8
+  medium_guard_scale: 1.25
+  medium_bbox_margin: 0.10
+  medium_initial_density: 0.005
+  medium_initial_color: [0.5, 0.5, 0.5]
+
+renderer:
+  near: 0.1
+  far: 6.0
+  training_transmittance_threshold: 0.0001
+  validation_transmittance_threshold: 0.001
+  max_intersections: 1024
+  number_of_sides: 8
+  gaussian_radius_squared: 11.3449
+  gaussian_hit_buffer_size: 16
+
+optimization:
+  iterations: 30000
+  rays_per_batch: 640000
+  full_image_batch: true
+  cameras_without_replacement: true
+  reconstruction_loss: l1_dssim
+  dssim_weight: 0.2
+  medium_sites_lr: 0.00005
+  medium_density_lr: 0.01
+  medium_color_lr: 0.0025
+  medium_sites_lr_final: 0.000005
+  medium_density_lr_final: 0.001
+  medium_color_lr_final: 0.0005
+  medium_lr_decay_from: 15000
+  medium_lr_decay_until: 30000
+  topology_update_interval: 25
+  topology_incremental: true
+
+validation:
+  eval_interval: 1000
+  log_interval: 10
+  checkpoint_interval: 1000
+  max_eval_views: -1
+  image_views: 4
+
+diagnostics:
+  enabled: true
+  save_per_primitive: true
+  contribution_epsilon: 0.000001
+  layer_alpha_threshold: 0.01
+
+gaussian_adaptation:
+  enabled: false
+
+voronoi_adaptation:
+  enabled: true
+  densify_from: 1000
+  densify_until: 20000
+  interval: 500
+  densify_fraction: 0.05
+  max_points: 8192
+  min_points: 1024
+  min_visibility: 1.0
+  contribution_threshold: 0.000001
+  gradient_threshold: 0.0
+  prune_cell_radius_fraction: 0.02
+  max_prune_fraction: 0.10
+  prune_patience: 2
+  child_jitter_fraction: 0.025
+
+wandb:
+  mode: online
+  project: foamsurf_stage2_voronoi_capacity_sweep
+  name: stage2-voronoi-capacity
+  tags: [stage2, voronoi-only, lego-clouds, black-background, l1-dssim, capacity]

@@ -7,10 +7,7 @@ FoamSurf is a research codebase for jointly learning two scene representations:
 - **medium:** a piecewise-constant emission/absorption field carried by 3D
   Voronoi cells derived from Radiant Foam.
 
-The current milestone is **B0.1**: the same intentionally unregularized B0 baseline with optional responsibility diagnostics. One
-hybrid render is supervised with RGB MSE and a single backward pass updates
-both representations. B0 reveals the natural behaviour and failure modes of
-the coupled model before adding disentanglement losses or adaptive topology.
+The current milestone is **standalone representation qualification**. Gaussian-only training uses `lego_lego`; adaptive Voronoi-only training uses `lego_clouds`. Hybrid B0/B0.1 remains available for later integration and entanglement measurement. See [the Stage 1/2 guide](docs/STANDALONE_REPRESENTATIONS.md).
 
 ## What B0 does—and does not do
 
@@ -24,11 +21,7 @@ L_B0 = mean((RGB_hybrid - RGB_target)^2),
 then steps separate Gaussian and medium Adam optimizers from the same backward.
 
 B0 deliberately has no depth-quantile, opacity, density, sparsity, separation,
-or other regularizer. It also has no Gaussian or Voronoi densification/pruning
-yet. The sparse, volume-distributed Voronoi point count stays fixed, although
-Delaunay connectivity is rebuilt periodically as sites move. Adaptive Voronoi
-topology is a required future stage; see
-[the implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
+or other regularizer. Gaussian adaptation is available in B1. Adaptive Voronoi split/prune is now available for Stage 2 and remains disabled unless `voronoi_adaptation.enabled` is set. Neither mechanism adds a surface-aware or oracle loss; see [the implementation roadmap](docs/IMPLEMENTATION_ROADMAP.md).
 
 ## Repository map
 
@@ -44,6 +37,8 @@ renderer/                   standalone `foamsurf` Python/CUDA/OptiX renderer
 tests/b0/                   B0 contract tests
 scripts/train_b01_lego.sbatch Slurm entry point for B0.1 Lego
 scripts/smoke_test_b0.py    tiny end-to-end train/resume smoke test
+scripts/test_stage12.sbatch  standalone contract and CUDA regression tests
+scripts/sweep_stage{1,2}_*.sbatch  overnight standalone sweeps
 docs/                       developer walkthrough and implementation roadmap
 ```
 
@@ -71,6 +66,10 @@ CUDA_VISIBLE_DEVICES=1 ./build.sh
 standalone renderer and verifies the imports. The renderer vendors every
 required source file; it does not search for a neighbouring RadFoam, FALCON or
 `flare_new` checkout at runtime.
+
+## Qualify representations separately
+
+Use `configs/stage1_gaussian_only.yaml` and `configs/stage2_voronoi_only.yaml`. The exact mode contract, adaptive Voronoi policy, tests and 94-run sweep matrix are documented in [the standalone qualification guide](docs/STANDALONE_REPRESENTATIONS.md).
 
 ## Train B0.1 diagnostics on NeRF Synthetic Lego
 

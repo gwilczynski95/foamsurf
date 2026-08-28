@@ -67,6 +67,8 @@ Gaussianów był zaburzony przez medium.
 
 ## Etap 1: kwalifikacja Gaussian-only
 
+**Status implementacji:** tryb, target, izolacja gradientów, testy i sweep są gotowe; kwalifikacja jakościowa czeka na wyniki 30k.
+
 ### Cel
 
 Udowodnić, że powierzchniowa reprezentacja FoamSurf samodzielnie tworzy ostre,
@@ -112,6 +114,8 @@ disentanglementu. Naprawiamy wyłącznie surface model, renderer lub jego
 optymalizację.
 
 ## Etap 2: kwalifikacja adaptacyjnego Voronoi-only
+
+**Status implementacji:** pure forward, adaptacyjny split/prune, migracja Adam, checkpoint/resume, testy i sweep 2k–32k są gotowe; etap nie jest zaliczony bez analizy runów 30k.
 
 ### Cel
 

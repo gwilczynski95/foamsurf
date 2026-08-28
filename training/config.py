@@ -92,6 +92,7 @@ class OptimizationConfig:
     gaussian_quaternions_lr_decay: float = 0.0
     gaussian_quaternions_lr_final: float | None = None
     gaussian_adam_eps: float = 1.0e-15
+    gaussian_freeze_until: int = 0
     gaussian_sh_degree_interval: int = 1_000
     gaussian_scale_regularization: float = 0.0
     gaussian_min_scale: float | None = None
@@ -171,6 +172,7 @@ class VoronoiAdaptationConfig:
     densify_from: int = 1_000
     densify_until: int = 20_000
     interval: int = 500
+    adaptation_offset: int = 0
     densify_fraction: float = 0.10
     max_points: int | None = 65_536
     min_points: int = 1_024
@@ -181,6 +183,7 @@ class VoronoiAdaptationConfig:
     max_prune_fraction: float = 0.10
     prune_patience: int = 2
     child_jitter_fraction: float = 0.05
+    freeze_at_capacity: bool = False
 
 
 @dataclass
@@ -375,6 +378,8 @@ class ExperimentConfig:
             raise ValueError("gaussian_means_lr_max_steps must be positive")
         if self.optimization.gaussian_sh_degree_interval < 0:
             raise ValueError("gaussian_sh_degree_interval must be non-negative")
+        if self.optimization.gaussian_freeze_until < 0:
+            raise ValueError("gaussian_freeze_until must be non-negative")
         if self.optimization.gaussian_adam_eps <= 0:
             raise ValueError("gaussian_adam_eps must be positive")
         if self.optimization.gaussian_scale_regularization < 0:
@@ -508,6 +513,10 @@ class ExperimentConfig:
             raise ValueError("Voronoi adaptation cannot run in gaussian_only mode")
         if medium_adaptation.interval < 1:
             raise ValueError("voronoi_adaptation.interval must be positive")
+        if not 0 <= medium_adaptation.adaptation_offset < medium_adaptation.interval:
+            raise ValueError(
+                "voronoi_adaptation.adaptation_offset must be in [0, interval)"
+            )
         if medium_adaptation.densify_from < 1 or medium_adaptation.densify_until < medium_adaptation.densify_from:
             raise ValueError("invalid Voronoi adaptation iteration range")
         if medium_adaptation.min_points < self.model.medium_guard_points:

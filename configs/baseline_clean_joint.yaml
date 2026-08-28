@@ -1,0 +1,145 @@
+# Clean Stage 3 baseline: both qualified representations trained from scratch.
+# Training supervision is exclusively lego_both. Layer-separated datasets are
+# loaded only by the evaluator and never enter the training loss.
+experiment_name: clean-joint-baseline
+output_dir: outputs/baseline_clean_joint
+seed: 0
+device: cuda
+representation_mode: hybrid
+background: [0.0, 0.0, 0.0]
+
+dataset:
+  source_path: /shared/sets/datasets/foamsurf/lego/lego_both
+  resolution: 1
+  llffhold: 8
+  gaussian_ground_truth_path: /shared/sets/datasets/foamsurf/lego/lego_lego
+  medium_ground_truth_path: /shared/sets/datasets/foamsurf/lego/lego_clouds
+  train_target: both
+
+model:
+  appearance: rgb
+  sh_degree: 3
+  gaussian_initial_points: 100000
+  gaussian_initial_opacity: 0.01
+  gaussian_initial_kappa: 1.01
+  gaussian_initial_scale_neighbors: 3
+  medium_points: 2048
+  medium_guard_points: 8
+  medium_guard_scale: 1.25
+  medium_bbox_margin: 0.10
+  medium_initial_density: 0.005
+  medium_initial_color: [0.5, 0.5, 0.5]
+
+# Canonical renderer contract from baseline_best_2d_gaussians.yaml.
+renderer:
+  near: 0.1
+  far: 1000.0
+  training_transmittance_threshold: 0.0001
+  validation_transmittance_threshold: 0.01
+  max_intersections: 1024
+  number_of_sides: 8
+  gaussian_radius_squared: 11.3449
+  gaussian_hit_buffer_size: 64
+
+optimization:
+  iterations: 30000
+  rays_per_batch: 640000
+  full_image_batch: true
+  cameras_without_replacement: true
+  reconstruction_loss: l1_dssim
+  dssim_weight: 0.2
+
+  # Qualified Gaussian schedule.
+  gaussian_appearance_lr: 0.005
+  gaussian_appearance_rest_lr_scale: 1.0
+  gaussian_appearance_lr_decay: -0.000086643
+  gaussian_appearance_lr_final: 0.001
+  gaussian_opacity_lr: 0.05
+  gaussian_opacity_lr_decay: -0.000086643
+  gaussian_opacity_lr_final: 0.025
+  gaussian_kappa_lr: 0.1
+  gaussian_kappa_lr_decay: -0.000086643
+  gaussian_kappa_lr_final: 0.1
+  gaussian_means_lr: 0.0025
+  gaussian_means_lr_decay: -0.00015
+  gaussian_means_lr_final: 0.000001189614075
+  gaussian_means_lr_max_steps: 35000
+  gaussian_means_spatial_scale: false
+  gaussian_scales_lr: 0.0396538025
+  gaussian_scales_lr_decay: -0.000086643
+  gaussian_scales_lr_final: 0.0396538025
+  gaussian_quaternions_lr: 0.01
+  gaussian_quaternions_lr_decay: -0.000086643
+  gaussian_quaternions_lr_final: 0.001
+  gaussian_adam_eps: 0.00000001
+  gaussian_sh_degree_interval: 0
+  gaussian_scale_regularization: 0.001
+  gaussian_min_scale: 0.0001
+  gaussian_max_scale_fraction: 0.05
+
+  # Qualified medium schedule.
+  medium_sites_lr: 0.00005
+  medium_density_lr: 0.01
+  medium_color_lr: 0.0025
+  medium_sites_lr_final: 0.000005
+  medium_density_lr_final: 0.001
+  medium_color_lr_final: 0.0005
+  medium_lr_decay_from: 15000
+  medium_lr_decay_until: 30000
+  topology_update_interval: 25
+  topology_incremental: true
+
+validation:
+  eval_interval: 1000
+  log_interval: 10
+  checkpoint_interval: 1000
+  max_eval_views: -1
+  image_views: 4
+
+diagnostics:
+  enabled: true
+  save_per_primitive: false
+  contribution_epsilon: 0.000001
+  layer_alpha_threshold: 0.01
+
+gaussian_adaptation:
+  enabled: true
+  policy: graphdeco
+  max_points: null
+  runaway_max_points: null
+  densify_from: 500
+  densify_until: 15000
+  densification_interval: 250
+  gradient_threshold: 0.0004
+  min_opacity: 0.01
+  opacity_prune_from: 500
+  percent_dense: 0.02
+  size_prune_from: 3000
+  screen_pruning_enabled: false
+  max_world_scale_fraction: 0.10
+  opacity_reset_interval: 0
+  opacity_reset_value: 0.01
+  opacity_reset_at_densify_from: false
+  opacity_reset_optimizer_state: true
+
+voronoi_adaptation:
+  enabled: true
+  densify_from: 1000
+  densify_until: 20000
+  interval: 500
+  densify_fraction: 0.05
+  max_points: 8192
+  min_points: 1024
+  min_visibility: 1.0
+  contribution_threshold: 0.000001
+  gradient_threshold: 0.0
+  prune_cell_radius_fraction: 0.02
+  max_prune_fraction: 0.10
+  prune_patience: 2
+  child_jitter_fraction: 0.025
+
+wandb:
+  mode: online
+  project: foamsurf_clean_joint_baseline
+  name: clean-joint-seed0
+  tags: [baseline, stage3, clean-joint, lego-both, k64, no-disentanglement]

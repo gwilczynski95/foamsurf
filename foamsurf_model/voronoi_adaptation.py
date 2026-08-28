@@ -64,6 +64,7 @@ class VoronoiAdaptationController:
             "densified": 0,
             "pruned": 0,
             "duplicate_repairs": 0,
+            "triangulation_retries": 0,
             "score_p95": 0.0,
             "cell_radius_p95": 0.0,
             "active_fraction": 0.0,
@@ -81,13 +82,27 @@ class VoronoiAdaptationController:
         self.gradient = torch.zeros(count, device=device)
 
     def should_collect(self, iteration: int) -> bool:
-        return self.config.enabled and iteration < self.config.densify_until
+        return (
+            self.config.enabled
+            and iteration < self.config.densify_until
+            and not self._frozen_at_capacity()
+        )
+
+    def _frozen_at_capacity(self) -> bool:
+        return (
+            self.config.freeze_at_capacity
+            and self.config.max_points is not None
+            and self.model.point_count >= self.config.max_points
+        )
 
     def should_adapt(self, iteration: int) -> bool:
         return (
             self.config.enabled
+            and not self._frozen_at_capacity()
             and self.config.densify_from <= iteration < self.config.densify_until
-            and iteration % self.config.interval == 0
+            and (iteration - self.config.adaptation_offset)
+            % self.config.interval
+            == 0
         )
 
     @torch.no_grad()
@@ -309,6 +324,9 @@ class VoronoiAdaptationController:
         self.topology.replace_population(
             self.model, self.optimizer, plan.keep_indices,
             plan.parent_indices, plan.child_sites,
+        )
+        self.last_statistics["triangulation_retries"] = (
+            self.topology.last_replacement_retries
         )
         self.low_activity_streak = combined_streak[self.topology.last_permutation]
         self.total_densified += plan.densify_count
