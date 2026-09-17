@@ -45,3 +45,7 @@ venv/
 
 # Direct/manual training logs
 /run_logs/
+/*.log
+
+# Local editor and manual patch backups
+*.orig
