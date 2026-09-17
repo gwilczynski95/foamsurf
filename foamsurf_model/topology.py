@@ -40,6 +40,7 @@ class VoronoiTopologyController:
                 )
         self.revision = 0
         self.last_replacement_retries = 0
+        self.last_replacement_failed = False
         self._read_topology()
 
     def _read_topology(self) -> None:
@@ -104,11 +105,13 @@ class VoronoiTopologyController:
         parent_indices: torch.Tensor,
         child_sites: torch.Tensor,
         max_attempts: int = 12,
-    ) -> None:
+    ) -> bool:
         """Atomically replace sites and retry ambiguous triangulations.
 
         Candidate geometry is triangulated before model or optimizer state is
-        mutated. If every attempt fails, the pre-event state remains intact.
+        mutated. If every attempt fails, the pre-event state remains intact
+        and ``False`` is returned. A single degenerate adaptation proposal is
+        recoverable and must not terminate a multi-hour training run.
         """
         old_count = medium.point_count
         child_count = int(parent_indices.numel())
@@ -121,28 +124,42 @@ class VoronoiTopologyController:
             )
         )
         survivor_sites = medium.sites.detach()[keep_indices]
-        candidate_children = child_sites.detach().clone()
+        original_sites = torch.cat(
+            (survivor_sites, child_sites.detach()), dim=0
+        ).contiguous()
+        candidate_sites = original_sites.clone()
         diagonal = float((medium.bbox_max - medium.bbox_min).norm().item())
         base_step = max(diagonal * 1.0e-7, 1.0e-8)
         triangulation = None
         failure_count = 0
         while triangulation is None:
-            candidate_sites = torch.cat(
-                (survivor_sites, candidate_children), dim=0
-            ).contiguous()
             try:
                 triangulation = foamsurf_topology.Triangulation(candidate_sites)
             except foamsurf_topology.TriangulationFailedError:
                 failure_count += 1
-                if failure_count >= max_attempts or child_count == 0:
+                if failure_count >= max_attempts:
                     self.last_replacement_retries = failure_count
-                    raise
-                child_ids = torch.arange(
-                    child_count,
-                    device=candidate_children.device,
-                    dtype=candidate_children.dtype,
+                    self.last_replacement_failed = True
+                    return False
+
+                # First move inserted sites. If ambiguity is inherited from
+                # survivors, broaden the microscopic deterministic jitter to
+                # all non-guard sites. Domain-defining guards never move.
+                movable = torch.zeros(
+                    original_sites.shape[0], dtype=torch.bool,
+                    device=original_sites.device,
                 )
-                phase = child_ids + float(failure_count * child_count + 1)
+                if child_count:
+                    movable[-child_count:] = True
+                if failure_count >= 4 or child_count == 0:
+                    movable |= ~candidate_guard_mask
+                ids = torch.arange(
+                    original_sites.shape[0], device=original_sites.device,
+                    dtype=original_sites.dtype,
+                )
+                phase = ids + float(
+                    failure_count * original_sites.shape[0] + 1
+                )
                 directions = torch.stack(
                     (
                         torch.sin(phase * 12.9898),
@@ -154,13 +171,15 @@ class VoronoiTopologyController:
                 directions = directions / directions.norm(
                     dim=-1, keepdim=True
                 ).clamp_min(1.0e-8)
-                candidate_children = child_sites.detach() + (
+                offsets = (
                     directions * base_step * float(2 ** (failure_count - 1))
                 )
-                candidate_children = torch.maximum(
-                    torch.minimum(candidate_children, medium.bbox_max),
+                candidate_sites = original_sites.clone()
+                candidate_sites[movable] += offsets[movable]
+                candidate_sites = torch.maximum(
+                    torch.minimum(candidate_sites, medium.bbox_max),
                     medium.bbox_min,
-                )
+                ).contiguous()
 
         groups = {
             group.get("name"): group for group in optimizer.param_groups
@@ -175,20 +194,20 @@ class VoronoiTopologyController:
                 )
 
         self.last_replacement_retries = failure_count
+        self.last_replacement_failed = False
         permutation = triangulation.permutation().to(torch.long)
         for attribute, group_name in self.GROUP_NAMES.items():
             old_parameter = getattr(medium, attribute)
             group = groups[group_name]
             old_state = optimizer.state.pop(old_parameter, {})
             survivor = old_parameter.detach()[keep_indices]
-            child = (
-                candidate_children
+            child = old_parameter.detach()[parent_indices]
+            values = (
+                candidate_sites
                 if attribute == "sites"
-                else old_parameter.detach()[parent_indices]
+                else torch.cat((survivor, child), dim=0).contiguous()
             )
-            new_parameter = nn.Parameter(
-                torch.cat((survivor, child), dim=0).contiguous()
-            )
+            new_parameter = nn.Parameter(values)
             setattr(medium, attribute, new_parameter)
             group["params"][0] = new_parameter
             new_state = {}
@@ -219,6 +238,7 @@ class VoronoiTopologyController:
         self.last_permutation = permutation
         self._read_topology()
         self.revision += 1
+        return True
 
     @torch.no_grad()
     def update(

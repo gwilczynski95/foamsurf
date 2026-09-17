@@ -71,6 +71,7 @@ def _medium_and_optimizer():
     controller = VoronoiTopologyController.__new__(VoronoiTopologyController)
     controller.revision = 7
     controller.last_replacement_retries = 0
+    controller.last_replacement_failed = False
     return medium, optimizer, controller
 
 
@@ -93,7 +94,7 @@ def test_replace_population_retries_before_committing(monkeypatch) -> None:
         ),
     )
     child = medium.sites.detach()[[1]].clone()
-    controller.replace_population(
+    applied = controller.replace_population(
         medium,
         optimizer,
         keep_indices=torch.tensor([0, 2, 3]),
@@ -103,6 +104,8 @@ def test_replace_population_retries_before_committing(monkeypatch) -> None:
     )
 
     assert len(calls) == 3
+    assert applied
+    assert not controller.last_replacement_failed
     assert controller.last_replacement_retries == 2
     assert controller.revision == 8
     assert medium.point_count == 4
@@ -114,7 +117,7 @@ def test_replace_population_retries_before_committing(monkeypatch) -> None:
         torch.testing.assert_close(state["exp_avg_sq"][-1], torch.zeros_like(state["exp_avg_sq"][-1]))
 
 
-def test_replace_population_rolls_back_after_all_retries(monkeypatch) -> None:
+def test_replace_population_skips_and_rolls_back_after_all_retries(monkeypatch) -> None:
     medium, optimizer, controller = _medium_and_optimizer()
     parameters = {
         name: getattr(medium, name) for name in medium.PARAMETER_NAMES
@@ -134,16 +137,17 @@ def test_replace_population_rolls_back_after_all_retries(monkeypatch) -> None:
             TriangulationFailedError=AmbiguousTriangulation,
         ),
     )
-    with pytest.raises(AmbiguousTriangulation):
-        controller.replace_population(
-            medium,
-            optimizer,
-            keep_indices=torch.tensor([0, 2, 3]),
-            parent_indices=torch.tensor([1]),
-            child_sites=medium.sites.detach()[[1]].clone(),
-            max_attempts=3,
-        )
+    applied = controller.replace_population(
+        medium,
+        optimizer,
+        keep_indices=torch.tensor([0, 2, 3]),
+        parent_indices=torch.tensor([1]),
+        child_sites=medium.sites.detach()[[1]].clone(),
+        max_attempts=3,
+    )
 
+    assert not applied
+    assert controller.last_replacement_failed
     assert controller.last_replacement_retries == 3
     assert controller.revision == 7
     torch.testing.assert_close(medium.guard_mask, guard_mask)
@@ -162,3 +166,37 @@ def test_replace_population_rolls_back_after_all_retries(monkeypatch) -> None:
                 torch.testing.assert_close(current, old_value)
             else:
                 assert current == old_value
+
+
+def test_replace_population_eventually_jitters_non_guard_survivors(monkeypatch) -> None:
+    medium, optimizer, controller = _medium_and_optimizer()
+    calls = []
+
+    def triangulate(sites):
+        calls.append(sites.detach().clone())
+        if len(calls) <= 4:
+            raise AmbiguousTriangulation("survivor degeneracy")
+        return IdentityTriangulation(sites)
+
+    monkeypatch.setattr(
+        topology_module,
+        "foamsurf_topology",
+        SimpleNamespace(
+            Triangulation=triangulate,
+            TriangulationFailedError=AmbiguousTriangulation,
+        ),
+    )
+    applied = controller.replace_population(
+        medium,
+        optimizer,
+        keep_indices=torch.tensor([0, 2, 3]),
+        parent_indices=torch.tensor([1]),
+        child_sites=medium.sites.detach()[[1]].clone(),
+        max_attempts=6,
+    )
+
+    assert applied
+    assert len(calls) == 5
+    assert not torch.equal(calls[-1][0], calls[0][0])
+    # Candidate index 2 is the guard survivor and must remain exact.
+    torch.testing.assert_close(calls[-1][2], calls[0][2], rtol=0, atol=0)

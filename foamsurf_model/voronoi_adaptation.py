@@ -52,6 +52,7 @@ class VoronoiAdaptationController:
         self.revision = 0
         self.total_densified = 0
         self.total_pruned = 0
+        self.total_failed_events = 0
         self._reset_statistics()
         self.low_activity_streak = torch.zeros(
             model.point_count, dtype=torch.int32, device=model.sites.device
@@ -65,6 +66,7 @@ class VoronoiAdaptationController:
             "pruned": 0,
             "duplicate_repairs": 0,
             "triangulation_retries": 0,
+            "triangulation_failed": 0,
             "score_p95": 0.0,
             "cell_radius_p95": 0.0,
             "active_fraction": 0.0,
@@ -303,6 +305,8 @@ class VoronoiAdaptationController:
             "densified": int(parents.numel()),
             "pruned": int(prune_indices.numel()),
             "duplicate_repairs": duplicate_repairs,
+            "triangulation_retries": 0,
+            "triangulation_failed": 0,
             "score_p95": float(torch.quantile(observed_values, 0.95).item()) if observed_values.numel() else 0.0,
             "cell_radius_p95": float(torch.quantile(radii, 0.95).item()),
             "active_fraction": float(active.float().mean().item()),
@@ -316,30 +320,43 @@ class VoronoiAdaptationController:
             raise RuntimeError("stale Voronoi topology plan")
         if plan.is_noop:
             self._reset_statistics()
-            return {"densify": 0, "prune": 0}
+            return {"densify": 0, "prune": 0, "skipped": 0}
         old_streak = self.low_activity_streak
         combined_streak = torch.cat(
             (old_streak[plan.keep_indices], torch.zeros(plan.densify_count, dtype=old_streak.dtype, device=old_streak.device))
         )
-        self.topology.replace_population(
+        applied = self.topology.replace_population(
             self.model, self.optimizer, plan.keep_indices,
             plan.parent_indices, plan.child_sites,
         )
         self.last_statistics["triangulation_retries"] = (
             self.topology.last_replacement_retries
         )
+        if not applied:
+            self.last_statistics["triangulation_failed"] = 1
+            self.total_failed_events += 1
+            # Discard stale evidence so the next event does not immediately
+            # reproduce the exact same invalid proposal.
+            self.low_activity_streak.zero_()
+            self._reset_statistics()
+            return {"densify": 0, "prune": 0, "skipped": 1}
         self.low_activity_streak = combined_streak[self.topology.last_permutation]
         self.total_densified += plan.densify_count
         self.total_pruned += plan.prune_count
         self.revision += 1
         self._reset_statistics()
-        return {"densify": plan.densify_count, "prune": plan.prune_count}
+        return {
+            "densify": plan.densify_count,
+            "prune": plan.prune_count,
+            "skipped": 0,
+        }
 
     def state_dict(self) -> dict[str, Any]:
         return {
             "revision": self.revision,
             "total_densified": self.total_densified,
             "total_pruned": self.total_pruned,
+            "total_failed_events": self.total_failed_events,
             "low_activity_streak": self.low_activity_streak.detach().cpu(),
         }
 
@@ -351,3 +368,4 @@ class VoronoiAdaptationController:
         self.revision = int(state["revision"])
         self.total_densified = int(state["total_densified"])
         self.total_pruned = int(state["total_pruned"])
+        self.total_failed_events = int(state.get("total_failed_events", 0))

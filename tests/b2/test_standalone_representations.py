@@ -185,7 +185,7 @@ def test_voronoi_mutation_migrates_adam_state_and_rebuilds_topology() -> None:
     plan = controller.propose_plan()
     event = controller.apply_plan(plan)
 
-    assert event == {"densify": 3, "prune": 0}
+    assert event == {"densify": 3, "prune": 0, "skipped": 0}
     assert model.point_count == 43
     assert int(model.guard_mask.sum().item()) == 8
     assert topology.offsets.numel() == 44
@@ -209,6 +209,7 @@ def test_voronoi_adaptation_state_roundtrip_requires_matching_population() -> No
     first.revision = 7
     first.total_densified = 11
     first.total_pruned = 4
+    first.total_failed_events = 2
     state = first.state_dict()
     second = VoronoiAdaptationController(
         model, _medium_optimizer(model), _complete_topology(32, model.sites.device), config
@@ -217,4 +218,5 @@ def test_voronoi_adaptation_state_roundtrip_requires_matching_population() -> No
     assert second.revision == 7
     assert second.total_densified == 11
     assert second.total_pruned == 4
+    assert second.total_failed_events == 2
     torch.testing.assert_close(second.low_activity_streak, first.low_activity_streak)
