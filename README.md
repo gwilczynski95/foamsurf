@@ -7,7 +7,15 @@ FoamSurf is a research codebase for jointly learning two scene representations:
 - **medium:** a piecewise-constant emission/absorption field carried by 3D
   Voronoi cells derived from Radiant Foam.
 
-The current milestone is **standalone representation qualification**. Gaussian-only training uses `lego_lego`; adaptive Voronoi-only training uses `lego_clouds`. Hybrid B0/B0.1 remains available for later integration and entanglement measurement. See [the Stage 1/2 guide](docs/STANDALONE_REPRESENTATIONS.md).
+The standalone representations have been qualified, and the current
+disentanglement baseline initializes FoamSurf from a separated RadFoam spatial
+prior. On the reference Lego run it reaches 34.824 dB hybrid PSNR while
+assigning 99.71% of cloud-only responsibility to Voronoi and 99.45% of
+Lego-only responsibility to Gaussians. See
+[the current RadFoam-prior baseline](docs/RADFOAM_PRIOR_HANDOFF_TRAINING.md)
+for the exact inputs, initialization, launch command, results and analysis
+protocol. The earlier standalone stage is documented in
+[the Stage 1/2 guide](docs/STANDALONE_REPRESENTATIONS.md).
 
 ## What B0 does—and does not do
 
