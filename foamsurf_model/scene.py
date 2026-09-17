@@ -28,6 +28,13 @@ class HybridSceneModel(nn.Module):
         config: ExperimentConfig,
         device: torch.device,
     ) -> "HybridSceneModel":
+        if config.radfoam_prior.enabled:
+            from training.radfoam_handoff import initialize_from_radfoam_prior
+
+            initialized = initialize_from_radfoam_prior(config, device)
+            initialized.model.initialization_report = initialized.report
+            return initialized.model
+
         points, colors = dataset.initial_point_cloud(
             config.model.gaussian_initial_points
         )
