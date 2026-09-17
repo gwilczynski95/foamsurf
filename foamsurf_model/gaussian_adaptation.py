@@ -59,6 +59,40 @@ class GaussianTopologyPlan:
         )
 
 
+def scheduled_opacity_threshold(
+    config: GaussianAdaptationConfig,
+    iteration: int,
+) -> float:
+    """Return the opacity-pruning threshold at a given iteration."""
+    initial = (
+        config.min_opacity
+        if config.min_opacity_initial is None
+        else config.min_opacity_initial
+    )
+    if config.opacity_prune_ramp == 0:
+        return float(config.min_opacity)
+    progress = min(
+        max(
+            (iteration - config.opacity_prune_from)
+            / float(config.opacity_prune_ramp),
+            0.0,
+        ),
+        1.0,
+    )
+    if config.opacity_prune_ramp_shape == "linear":
+        factor = progress
+    elif config.opacity_prune_ramp_shape == "cosine":
+        factor = 0.5 - 0.5 * math.cos(math.pi * progress)
+    elif config.opacity_prune_ramp_shape == "quadratic":
+        factor = progress * progress
+    else:
+        raise ValueError(
+            f"unknown opacity-pruning ramp: "
+            f"{config.opacity_prune_ramp_shape}"
+        )
+    return float(initial + factor * (config.min_opacity - initial))
+
+
 def _quaternion_rotation(quaternion: torch.Tensor) -> torch.Tensor:
     q = torch.nn.functional.normalize(quaternion, dim=-1)
     w, x, y, z = q.unbind(-1)
@@ -110,6 +144,11 @@ class GaussianAdaptationController:
             "split_candidates": 0,
             "prune_candidates": 0,
             "opacity_prune": 0,
+            "opacity_prune_raw": 0,
+            "opacity_prune_rejected": 0,
+            "opacity_threshold": 0.0,
+            "densification_active": 0,
+            "opacity_pruning_active": 0,
             "screen_prune": 0,
             "world_prune": 0,
             "gradient_opacity_overlap": 0,
@@ -138,6 +177,33 @@ class GaussianAdaptationController:
             and iteration < self.config.densify_until
         )
 
+    def should_densify(self, iteration: int) -> bool:
+        return (
+            self.config.enabled
+            and self.config.policy == "graphdeco"
+            and self.config.densify_from < iteration
+            and iteration < self.config.densify_until
+            and iteration % self.config.densification_interval == 0
+        )
+
+    def should_prune(self, iteration: int) -> bool:
+        if (
+            not self.config.enabled
+            or self.config.policy != "graphdeco"
+            or iteration <= self.config.opacity_prune_from
+        ):
+            return False
+        if self.config.opacity_prune_until is None:
+            in_range = iteration < self.config.densify_until
+        else:
+            in_range = iteration < self.config.opacity_prune_until
+        interval = (
+            self.config.densification_interval
+            if self.config.opacity_prune_interval is None
+            else self.config.opacity_prune_interval
+        )
+        return in_range and iteration % interval == 0
+
     def should_adapt(self, iteration: int) -> bool:
         if self.config.policy == "flare_movement":
             in_range = (
@@ -145,18 +211,16 @@ class GaussianAdaptationController:
                 <= iteration
                 <= self.config.densify_until
             )
-        else:
-            in_range = (
-                self.config.densify_from
-                < iteration
-                < self.config.densify_until
+            return (
+                self.config.enabled
+                and in_range
+                and iteration % self.config.densification_interval == 0
             )
-        return (
-            self.config.enabled
-            and self.config.policy != "fixed"
-            and in_range
-            and iteration % self.config.densification_interval == 0
-        )
+        if self.config.policy == "graphdeco":
+            return self.should_densify(iteration) or self.should_prune(
+                iteration
+            )
+        return False
 
     def should_reset_opacity(self, iteration: int) -> bool:
         if (
@@ -316,6 +380,13 @@ class GaussianAdaptationController:
             "split_candidates": duplicated,
             "prune_candidates": pruned,
             "opacity_prune": int((opacity < self.config.min_opacity).sum().item()),
+            "opacity_prune_raw": int(
+                (opacity < self.config.min_opacity).sum().item()
+            ),
+            "opacity_prune_rejected": 0,
+            "opacity_threshold": float(self.config.min_opacity),
+            "densification_active": 0,
+            "opacity_pruning_active": 1,
             "screen_prune": 0,
             "world_prune": int((scale_norm < self.config.min_effective_scale).sum().item()),
             "gradient_opacity_overlap": 0,
@@ -469,7 +540,9 @@ class GaussianAdaptationController:
         )
 
     @torch.no_grad()
-    def propose_plan(self, iteration: int) -> GaussianTopologyPlan:
+    def propose_plan(
+        self, iteration: int, *, allow_densification: bool = True
+    ) -> GaussianTopologyPlan:
         count = self.model.point_count
         device = self.model.means.device
         indices = torch.arange(count, device=device)
@@ -480,15 +553,22 @@ class GaussianAdaptationController:
 
         opacities = self.model.opacities.squeeze(-1)
         scales = self.model.scales.amax(dim=-1)
-        opacity_pruning_active = (
-            iteration > self.config.opacity_prune_from
+        densification_active = (
+            allow_densification and self.should_densify(iteration)
         )
-        opacity_prune = torch.zeros_like(opacities, dtype=torch.bool)
+        opacity_pruning_active = self.should_prune(iteration)
+        opacity_threshold = scheduled_opacity_threshold(
+            self.config, iteration
+        )
+        raw_opacity_prune = torch.zeros_like(opacities, dtype=torch.bool)
         if opacity_pruning_active:
-            opacity_prune = opacities < self.config.min_opacity
-        size_pruning_active = iteration > self.config.size_prune_from
-        screen_prune = torch.zeros_like(opacity_prune)
-        world_prune = torch.zeros_like(opacity_prune)
+            raw_opacity_prune = opacities < opacity_threshold
+        size_pruning_active = (
+            densification_active
+            and iteration > self.config.size_prune_from
+        )
+        screen_prune = torch.zeros_like(raw_opacity_prune)
+        world_prune = torch.zeros_like(raw_opacity_prune)
         if size_pruning_active:
             if self.config.screen_pruning_enabled:
                 screen_prune = (
@@ -497,13 +577,42 @@ class GaussianAdaptationController:
             world_prune = scales > (
                 self.config.max_world_scale_fraction * self.scene_extent
             )
-        prune = opacity_prune | screen_prune | world_prune
+        mandatory_prune = screen_prune | world_prune
+        opacity_prune = raw_opacity_prune & mandatory_prune
+        optional_opacity = indices[
+            raw_opacity_prune & ~mandatory_prune
+        ]
+        maximum_opacity_prunes = int(
+            math.floor(
+                count * self.config.max_opacity_prune_fraction
+            )
+        )
+        remaining_opacity_budget = max(
+            maximum_opacity_prunes - int(opacity_prune.sum().item()), 0
+        )
+        remaining_population_budget = max(
+            count
+            - self.config.min_points
+            - int(mandatory_prune.sum().item()),
+            0,
+        )
+        accepted_count = min(
+            int(optional_opacity.numel()),
+            remaining_opacity_budget,
+            remaining_population_budget,
+        )
+        if accepted_count:
+            order = torch.argsort(
+                opacities[optional_opacity], stable=True
+            )
+            opacity_prune[optional_opacity[order[:accepted_count]]] = True
+        prune = opacity_prune | mandatory_prune
 
         average_gradient = self.gradient_sum / self.gradient_denom
         average_gradient.nan_to_num_(0.0)
         gradient_candidates = (
             average_gradient >= self.config.gradient_threshold
-        )
+        ) & densification_active
         densify = gradient_candidates.clone()
 
         # GraphDECO creates replacements before pruning the old parents.
@@ -613,6 +722,14 @@ class GaussianAdaptationController:
             "split_candidates": int(split_mask.sum().item()),
             "prune_candidates": int(prune.sum().item()),
             "opacity_prune": int(opacity_prune.sum().item()),
+            "opacity_prune_raw": int(raw_opacity_prune.sum().item()),
+            "opacity_prune_rejected": int(
+                raw_opacity_prune.sum().item()
+                - opacity_prune.sum().item()
+            ),
+            "opacity_threshold": opacity_threshold,
+            "densification_active": int(densification_active),
+            "opacity_pruning_active": int(opacity_pruning_active),
             "screen_prune": int(screen_prune.sum().item()),
             "world_prune": int(world_prune.sum().item()),
             "gradient_opacity_overlap": int(

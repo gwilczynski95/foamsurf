@@ -22,15 +22,25 @@ from foamsurf_model import (
     VoronoiMediumModel,
     VoronoiTopologyController,
 )
+from foamsurf_model.gaussian_adaptation import scheduled_opacity_threshold
 from .checkpoints import (
     checkpoint_payload,
     load_checkpoint,
     save_checkpoint,
 )
 from .config import ExperimentConfig
+from .disentanglement import DisentanglementRegularizer
+from .handoff import (
+    apply_medium_lr_multipliers,
+    gaussian_is_frozen,
+    handoff_boundary_iterations,
+    handoff_freeze_active,
+    medium_lr_multipliers,
+)
 from .experiment_logging import ExperimentLogger
 from .losses import b0_reconstruction_loss
 from .optimizer import (
+    build_medium_optimizer,
     build_optimizers,
     gradient_norm,
     update_gaussian_learning_rates,
@@ -122,6 +132,7 @@ class Trainer:
         )
         self.start_iteration = 1
         self.training_seconds = 0.0
+        self.prefix_training_seconds = 0.0
         self.best_psnr = -float("inf")
         payload = None
 
@@ -203,6 +214,9 @@ class Trainer:
                 payload["training_seconds"]
             )
             self.best_psnr = float(payload["best_psnr"])
+            self.prefix_training_seconds = float(
+                payload.get("prefix_training_seconds", 0.0)
+            )
             torch.set_rng_state(payload["rng"]["torch"])
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
 
@@ -228,7 +242,14 @@ class Trainer:
         )
         if payload is not None and payload.get("voronoi_adaptation") is not None:
             self.voronoi_adaptation.load_state_dict(payload["voronoi_adaptation"])
-        self.last_voronoi_adaptation = {"densify": 0, "prune": 0}
+        self.disentanglement = DisentanglementRegularizer(
+            config.disentanglement
+        )
+        if payload is not None and payload.get("disentanglement") is not None:
+            self.disentanglement.load_state_dict(payload["disentanglement"])
+        self.last_voronoi_adaptation = {
+            "densify": 0, "prune": 0, "skipped": 0
+        }
         self.last_adaptation = {
             "clone": 0,
             "split": 0,
@@ -309,6 +330,15 @@ class Trainer:
             "renderer/hit_count_p99": 0.0,
             "renderer/hit_buffer_full_fraction": 0.0,
         }
+        # A prefix may consume all four RNG streams. Restore this exact
+        # post-initialization state before main iteration 1 so the main camera
+        # order and later stochastic adaptation match the no-prefix control.
+        self._main_rng_state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all(),
+        }
 
     def _seed_everything(self, seed: int) -> None:
         random.seed(seed)
@@ -332,6 +362,8 @@ class Trainer:
                 self.gaussian_adaptation.state_dict(),
                 self.voronoi_adaptation.state_dict(),
                 self.medium_frozen_until,
+                self.disentanglement.state_dict(),
+                self.prefix_training_seconds,
             ),
         )
 
@@ -349,6 +381,7 @@ class Trainer:
         row = {
             "iteration": iteration,
             "training_seconds": self.training_seconds,
+            "prefix_training_seconds": self.prefix_training_seconds,
             "step_seconds": step_seconds,
             "train/loss": float(loss.total.item()),
             "train/rgb_mse": float(loss.rgb_mse.item()),
@@ -399,6 +432,10 @@ class Trainer:
             "voronoi_adaptation/enabled": int(self.config.voronoi_adaptation.enabled),
             "voronoi_adaptation/densified": self.last_voronoi_adaptation["densify"],
             "voronoi_adaptation/pruned": self.last_voronoi_adaptation["prune"],
+            "voronoi_adaptation/skipped": self.last_voronoi_adaptation["skipped"],
+            "voronoi_adaptation/total_failed_events": (
+                self.voronoi_adaptation.total_failed_events
+            ),
             "voronoi_adaptation/total_densified": self.voronoi_adaptation.total_densified,
             "voronoi_adaptation/total_pruned": self.voronoi_adaptation.total_pruned,
             "voronoi_adaptation/revision": self.voronoi_adaptation.revision,
@@ -430,7 +467,23 @@ class Trainer:
             "opacity_reset/post_psnr": self.last_reset_post_psnr,
             "opacity_reset/psnr_delta": self.last_reset_psnr_delta,
             "gaussian/frozen": int(
-                iteration <= self.config.optimization.gaussian_freeze_until
+                gaussian_is_frozen(
+                    self.config.optimization,
+                    self.config.medium_handoff,
+                    iteration,
+                )
+            ),
+            "gaussian/handoff_frozen": int(
+                handoff_freeze_active(self.config.medium_handoff, iteration)
+            ),
+            "gaussian/handoff_freeze_start": (
+                self.config.medium_handoff.gaussian_freeze_start or -1
+            ),
+            "gaussian/handoff_freeze_end_exclusive": (
+                -1
+                if self.config.medium_handoff.gaussian_freeze_start is None
+                else self.config.medium_handoff.gaussian_freeze_start
+                + self.config.medium_handoff.gaussian_freeze_duration
             ),
             "gaussian/frozen_until": (
                 self.config.optimization.gaussian_freeze_until
@@ -462,6 +515,25 @@ class Trainer:
             "adaptation/opacity_prune_candidates": adaptation_statistics[
                 "opacity_prune"
             ],
+            "adaptation/opacity_prune_raw": adaptation_statistics[
+                "opacity_prune_raw"
+            ],
+            "adaptation/opacity_prune_rejected": adaptation_statistics[
+                "opacity_prune_rejected"
+            ],
+            "adaptation/opacity_threshold": (
+                self.gaussian_adaptation.config.min_opacity
+                if self.gaussian_adaptation.config.policy != "graphdeco"
+                else scheduled_opacity_threshold(
+                    self.gaussian_adaptation.config, iteration
+                )
+            ),
+            "adaptation/densification_due": int(
+                self.gaussian_adaptation.should_densify(iteration)
+            ),
+            "adaptation/opacity_pruning_due": int(
+                self.gaussian_adaptation.should_prune(iteration)
+            ),
             "adaptation/screen_prune_candidates": adaptation_statistics[
                 "screen_prune"
             ],
@@ -517,7 +589,11 @@ class Trainer:
             {
                 "gaussian/opacity_p50": float(torch.quantile(gaussian_opacity, 0.5).item()),
                 "gaussian/opacity_p95": float(torch.quantile(gaussian_opacity, 0.95).item()),
+                "gaussian/opacity_lt_0_01_fraction": float((gaussian_opacity < 0.01).float().mean().item()),
+                "gaussian/opacity_lt_0_1_fraction": float((gaussian_opacity < 0.1).float().mean().item()),
                 "gaussian/opacity_gt_0_1_fraction": float((gaussian_opacity > 0.1).float().mean().item()),
+                "gaussian/opacity_gt_0_5_fraction": float((gaussian_opacity > 0.5).float().mean().item()),
+                "gaussian/opacity_gt_0_9_fraction": float((gaussian_opacity > 0.9).float().mean().item()),
                 "gaussian/scale_p50": float(torch.quantile(gaussian_scale, 0.5).item()),
                 "gaussian/scale_p95": float(torch.quantile(gaussian_scale, 0.95).item()),
                 "gaussian/scale_max": float(gaussian_scale.max().item()),
@@ -536,6 +612,7 @@ class Trainer:
             }
         )
         row.update(self.last_hit_statistics)
+        row.update(self.last_disentanglement.metrics())
         return row
 
     @torch.no_grad()
@@ -582,7 +659,11 @@ class Trainer:
     def _train_step(self, iteration: int):
         gaussian_trainable = (
             self.uses_gaussians
-            and iteration > self.config.optimization.gaussian_freeze_until
+            and not gaussian_is_frozen(
+                self.config.optimization,
+                self.config.medium_handoff,
+                iteration,
+            )
         )
         if self.uses_gaussians:
             self.current_gaussian_means_lr = update_gaussian_learning_rates(
@@ -599,6 +680,13 @@ class Trainer:
             self.current_medium_lrs = update_medium_learning_rates(
                 self.medium_optimizer, self.config.optimization, iteration
             )
+            self.current_medium_lrs = apply_medium_lr_multipliers(
+                self.medium_optimizer,
+                self.current_medium_lrs,
+                medium_lr_multipliers(
+                    self.config.medium_handoff, iteration
+                ),
+            )
         else:
             self.current_medium_lrs = {
                 "medium_sites": 0.0,
@@ -613,8 +701,14 @@ class Trainer:
             gaussian_trainable
             and self.gaussian_adaptation.should_collect(iteration)
         )
-        collect_voronoi = self.uses_voronoi and self.voronoi_adaptation.should_collect(iteration)
-        collect_any = collect_gaussian or collect_voronoi
+        collect_voronoi = (
+            self.uses_voronoi
+            and self.voronoi_adaptation.should_collect(iteration)
+        )
+        collect_regularizer = (
+            self.disentanglement.requires_contribution_diagnostics(iteration)
+        )
+        collect_any = collect_gaussian or collect_voronoi or collect_regularizer
 
         gaussian_scene = None
         screen_points = None
@@ -683,6 +777,31 @@ class Trainer:
                 total=loss.total + scale_regularization,
                 gaussian_scale_regularization=scale_regularization,
             )
+
+        medium_transmittance = None
+        if self.disentanglement.requires_medium_transmittance(iteration):
+            if medium_scene is None:
+                raise RuntimeError(
+                    "optical-thickness regularization requires Voronoi"
+                )
+            medium_only = self.renderer.render(
+                rays,
+                voronoi=medium_scene,
+                background=tuple(self.config.background),
+                collect_diagnostics=False,
+            )
+            medium_transmittance = medium_only.transmittance
+        self.last_disentanglement = self.disentanglement.compute(
+            iteration,
+            self.model,
+            self.topology,
+            diagnostics=render.diagnostics,
+            medium_transmittance=medium_transmittance,
+        )
+        loss = replace(
+            loss,
+            total=loss.total + self.last_disentanglement.total,
+        )
         loss.total.backward()
         if collect_any and render.diagnostics is None:
             raise RuntimeError("adaptation statistics were not returned")
@@ -696,7 +815,9 @@ class Trainer:
         gaussian_gradient_norm = gradient_norm(self.model.gaussians.parameters())
         medium_gradient_norm = gradient_norm(self.model.medium.parameters())
         self.last_adaptation = {"clone": 0, "split": 0, "prune": 0, "budget_skip": 0}
-        self.last_voronoi_adaptation = {"densify": 0, "prune": 0}
+        self.last_voronoi_adaptation = {
+            "densify": 0, "prune": 0, "skipped": 0
+        }
         self.last_opacity_reset = {"applied": 0, "changed": 0}
         self.last_adaptation_pre_psnr = float("nan")
         self.last_adaptation_post_psnr = float("nan")
@@ -719,11 +840,13 @@ class Trainer:
         if self.uses_gaussians and self._independent_medium_freeze_event(iteration):
             self._schedule_medium_freeze(iteration, self.config.gaussian_adaptation.medium_freeze_steps)
         if (
-            gaussian_trainable
-            and self.config.gaussian_adaptation.policy == "graphdeco"
+            self.config.gaussian_adaptation.policy == "graphdeco"
             and self.gaussian_adaptation.should_adapt(iteration)
+            and (gaussian_trainable or self.gaussian_adaptation.should_prune(iteration))
         ):
-            plan = self.gaussian_adaptation.propose_plan(iteration)
+            plan = self.gaussian_adaptation.propose_plan(
+                iteration, allow_densification=gaussian_trainable
+            )
             self.last_adaptation_pre_psnr = float(loss.psnr.item())
             self.last_adaptation = self.gaussian_adaptation.apply_plan(plan)
             self.population_runaway = self._population_exceeds_safety_threshold()
@@ -778,7 +901,10 @@ class Trainer:
             self.last_voronoi_adaptation = (
                 self.voronoi_adaptation.apply_plan(plan)
             )
-            voronoi_changed = not plan.is_noop
+            voronoi_changed = bool(
+                self.last_voronoi_adaptation["densify"]
+                or self.last_voronoi_adaptation["prune"]
+            )
             if voronoi_changed:
                 self.topology.synchronize_renderer(
                     self.renderer, self.model.medium
@@ -795,6 +921,7 @@ class Trainer:
                 f"iteration={iteration} Voronoi adaptation "
                 f"densify={self.last_voronoi_adaptation['densify']} "
                 f"prune={self.last_voronoi_adaptation['prune']} "
+                f"skipped={self.last_voronoi_adaptation['skipped']} "
                 f"count={self.model.medium.point_count} "
                 f"psnr_delta={self.last_voronoi_adaptation_psnr_delta:.6f}",
                 flush=True,
@@ -903,6 +1030,7 @@ class Trainer:
             "final_iteration": iteration,
             "requested_iterations": self.config.optimization.iterations,
             "training_seconds": self.training_seconds,
+            "prefix_training_seconds": self.prefix_training_seconds,
             "best_psnr": self.best_psnr,
             "gaussian_count": self.model.gaussians.point_count,
             "voronoi_count": self.model.medium.point_count,
@@ -910,6 +1038,11 @@ class Trainer:
             "voronoi_adaptation_revision": self.voronoi_adaptation.revision,
             "total_voronoi_densified": self.voronoi_adaptation.total_densified,
             "total_voronoi_pruned": self.voronoi_adaptation.total_pruned,
+            "total_voronoi_failed_events": (
+                self.voronoi_adaptation.total_failed_events
+            ),
+            "prefix_mode": self.config.medium_handoff.prefix_mode,
+            "prefix_iterations": self.config.medium_handoff.prefix_iterations,
             "adaptation_revision": self.gaussian_adaptation.revision,
             "total_cloned": self.gaussian_adaptation.total_cloned,
             "total_split": self.gaussian_adaptation.total_split,
@@ -930,17 +1063,213 @@ class Trainer:
         )
         return summary
 
+    def _new_sampler(self) -> RandomCameraRaySampler:
+        return RandomCameraRaySampler(
+            self.dataset,
+            self.config.optimization.rays_per_batch,
+            tuple(self.config.background),
+            full_image=self.config.optimization.full_image_batch,
+            cameras_without_replacement=(
+                self.config.optimization.cameras_without_replacement
+            ),
+        )
+
+    def _prefix_step(self, iteration: int, mode: str):
+        if mode not in {"medium_only", "joint"}:
+            raise ValueError(f"invalid prefix mode: {mode}")
+        joint = mode == "joint"
+        if joint:
+            self.current_gaussian_means_lr = update_gaussian_learning_rates(
+                self.gaussian_optimizer,
+                self.config.optimization,
+                self.scene_extent,
+                iteration,
+            )
+        self.current_medium_lrs = update_medium_learning_rates(
+            self.medium_optimizer, self.config.optimization, iteration
+        )
+
+        torch.cuda.synchronize()
+        started = time.perf_counter()
+        batch = self.sampler.next()
+        rays = torch.cat(
+            (batch.rays.origins, batch.rays.directions), dim=-1
+        ).contiguous()
+        gaussian_scene = None
+        if joint:
+            gaussian_scene = self.model.gaussians.render_scene(
+                batch.camera_origin
+            )
+            self.renderer.set_gaussian_geometry(gaussian_scene)
+        medium_scene = self.model.medium.render_scene()
+
+        self.gaussian_optimizer.zero_grad(set_to_none=True)
+        self.medium_optimizer.zero_grad(set_to_none=True)
+        render = self.renderer.render(
+            rays,
+            gaussians=gaussian_scene,
+            voronoi=medium_scene,
+            background=tuple(self.config.background),
+            collect_diagnostics=False,
+        )
+        loss = b0_reconstruction_loss(
+            render.image,
+            batch.target,
+            mode=self.config.optimization.reconstruction_loss,
+            dssim_weight=self.config.optimization.dssim_weight,
+            image_size=(batch.camera.height, batch.camera.width),
+        )
+        scale_weight = self.config.optimization.gaussian_scale_regularization
+        if joint and scale_weight > 0.0:
+            scale_regularization = (
+                scale_weight
+                / self.model.gaussians.point_count
+                * torch.linalg.vector_norm(
+                    self.model.gaussians.scales, dim=1
+                ).sum()
+            )
+            loss = replace(
+                loss,
+                total=loss.total + scale_regularization,
+                gaussian_scale_regularization=scale_regularization,
+            )
+        loss.total.backward()
+        gaussian_gradient_norm = (
+            gradient_norm(self.model.gaussians.parameters()) if joint else 0.0
+        )
+        medium_gradient_norm = gradient_norm(self.model.medium.parameters())
+        if joint:
+            self.gaussian_optimizer.step()
+            self._apply_gaussian_scale_guard()
+        self.medium_optimizer.step()
+
+        if iteration % self.config.optimization.topology_update_interval == 0:
+            self.topology.update(
+                self.model.medium,
+                self.medium_optimizer,
+                incremental=self.config.optimization.topology_incremental,
+            )
+            self.topology.synchronize_renderer(
+                self.renderer, self.model.medium
+            )
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        self.training_seconds += elapsed
+        self.prefix_training_seconds += elapsed
+        return loss, gaussian_gradient_norm, medium_gradient_norm, elapsed
+
+    def _reset_after_prefix(self) -> None:
+        handoff = self.config.medium_handoff
+        if handoff.prefix_mode == "joint":
+            new_gaussian, new_medium = build_optimizers(
+                self.model, self.config.optimization, self.scene_extent
+            )
+            self.gaussian_optimizer = new_gaussian
+            if handoff.prefix_reset_medium_optimizer:
+                self.medium_optimizer = new_medium
+        elif handoff.prefix_reset_medium_optimizer:
+            self.medium_optimizer = build_medium_optimizer(
+                self.model, self.config.optimization
+            )
+
+        # Rebuild all controllers so their statistics and revision counters
+        # start at main iteration zero. The learned medium parameters remain.
+        self.topology = VoronoiTopologyController(
+            self.model.medium, self.medium_optimizer
+        )
+        self.gaussian_adaptation = GaussianAdaptationController(
+            self.model.gaussians,
+            self.gaussian_optimizer,
+            self.config.gaussian_adaptation,
+            self.scene_extent,
+        )
+        self.voronoi_adaptation = VoronoiAdaptationController(
+            self.model.medium,
+            self.medium_optimizer,
+            self.topology,
+            self.config.voronoi_adaptation,
+        )
+        self.disentanglement = DisentanglementRegularizer(
+            self.config.disentanglement
+        )
+        self.evaluator.topology = self.topology
+        random.setstate(self._main_rng_state["python"])
+        np.random.set_state(self._main_rng_state["numpy"])
+        torch.set_rng_state(self._main_rng_state["torch"])
+        torch.cuda.set_rng_state_all(self._main_rng_state["cuda"])
+        self.sampler = self._new_sampler()
+        self.topology.synchronize_renderer(self.renderer, self.model.medium)
+
+    def _run_prefix(self) -> None:
+        handoff = self.config.medium_handoff
+        if handoff.prefix_iterations == 0:
+            return
+        progress = trange(
+            1,
+            handoff.prefix_iterations + 1,
+            desc=f"{handoff.prefix_mode} prefix",
+        )
+        for iteration in progress:
+            loss, gaussian_norm, medium_norm, elapsed = self._prefix_step(
+                iteration, handoff.prefix_mode
+            )
+            progress.set_postfix(psnr=f"{loss.psnr.item():.3f}")
+            if (
+                iteration == 1
+                or iteration % self.config.validation.log_interval == 0
+                or iteration == handoff.prefix_iterations
+            ):
+                self.logger.log_warmup(
+                    {
+                        "prefix_iteration": iteration,
+                        "prefix_mode": handoff.prefix_mode,
+                        "training_seconds": self.prefix_training_seconds,
+                        "step_seconds": elapsed,
+                        "train/loss": float(loss.total.item()),
+                        "train/psnr": float(loss.psnr.item()),
+                        "gradient/gaussian_norm": gaussian_norm,
+                        "gradient/medium_norm": medium_norm,
+                        "medium/density_mean": float(
+                            self.model.medium.densities.mean().item()
+                        ),
+                        "medium/density_p95": float(
+                            torch.quantile(
+                                self.model.medium.densities.flatten(), 0.95
+                            ).item()
+                        ),
+                        "model/gaussian_count": (
+                            self.model.gaussians.point_count
+                        ),
+                        "model/voronoi_count": self.model.medium.point_count,
+                    }
+                )
+        self._reset_after_prefix()
+        summary, images, histograms = self.evaluator.evaluate(0)
+        self.logger.log_eval(summary, images, histograms)
+        self._checkpoint(
+            self.output_dir / "checkpoints" / "prefix.pt", 0
+        )
+        print(
+            f"prefix completed mode={handoff.prefix_mode} "
+            f"iterations={handoff.prefix_iterations} "
+            f"hybrid_psnr={summary['eval/primary_psnr']:.4f} "
+            f"voronoi_psnr={summary['eval/voronoi_only_psnr']:.4f}",
+            flush=True,
+        )
+
     def fit(self) -> dict[str, float | int]:
         final_iteration = self.config.optimization.iterations
         if self.start_iteration > final_iteration:
             raise ValueError(
                 "checkpoint iteration already exceeds configured iterations"
             )
-        progress = trange(
-            self.start_iteration, final_iteration + 1
-        )
         last_eval_iteration = 0
         try:
+            if self.resume_path is None:
+                self._run_prefix()
+            progress = trange(
+                self.start_iteration, final_iteration + 1
+            )
             for iteration in progress:
                 (
                     loss,
@@ -955,6 +1284,9 @@ class Trainer:
                 should_evaluate = (
                     iteration % self.config.validation.eval_interval == 0
                     or iteration == final_iteration
+                    or iteration in handoff_boundary_iterations(
+                        self.config.medium_handoff
+                    )
                 )
                 should_log = (
                     iteration == self.start_iteration

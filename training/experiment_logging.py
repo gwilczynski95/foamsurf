@@ -53,6 +53,7 @@ class ExperimentLogger:
         resume: bool,
     ) -> None:
         self.train_csv = CsvTable(output_dir / "metrics" / "train.csv")
+        self.warmup_csv = CsvTable(output_dir / "metrics" / "warmup.csv")
         self.eval_csv = CsvTable(output_dir / "metrics" / "eval.csv")
         self.wandb_run = None
         if config.wandb.mode != "disabled":
@@ -79,6 +80,11 @@ class ExperimentLogger:
             self.wandb_run.log(
                 row, step=int(row["iteration"]), commit=commit
             )
+
+    def log_warmup(self, row: dict[str, Any]) -> None:
+        # Warmup has its own local iteration axis. It is intentionally kept
+        # out of W&B's main iteration axis, which restarts from zero afterward.
+        self.warmup_csv.append(row)
 
     def log_eval(
         self,

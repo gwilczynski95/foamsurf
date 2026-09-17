@@ -127,6 +127,73 @@ class DiagnosticsConfig:
 
 
 @dataclass
+class DisentanglementConfig:
+    """Normalized surface/medium priors used after the B0 baseline."""
+
+    opacity_binarization_weight: float = 0.0
+    opacity_binarization_start: int = 0
+    opacity_binarization_ramp: int = 0
+    opacity_binarization_ramp_shape: str = "linear"
+    opacity_binarization_end: int | None = None
+    opacity_binarization_end_ramp: int = 0
+    opacity_binarization_end_ramp_shape: str = "linear"
+    opacity_binarization_maintenance_scale: float = 1.0
+    opaque_if_used_weight: float = 0.0
+    opaque_if_used_start: int = 0
+    opaque_if_used_ramp: int = 0
+    opaque_if_used_ramp_shape: str = "linear"
+    graph_tv_weight: float = 0.0
+    graph_tv_start: int = 0
+    graph_tv_ramp: int = 0
+    graph_tv_ramp_shape: str = "linear"
+    graph_tv_mode: str = "huber"
+    graph_tv_huber_delta: float = 0.02
+    density_cap_weight: float = 0.0
+    density_cap_start: int = 0
+    density_cap_ramp: int = 0
+    density_cap_ramp_shape: str = "linear"
+    density_cap_policy: str = "fixed"
+    density_cap_fixed_value: float = 1.0
+    density_cap_quantile: float = 0.95
+    density_cap_multiplier: float = 2.0
+    density_cap_minimum: float = 0.005
+    density_cap_update_interval: int = 25
+    density_cap_ema_decay: float = 0.99
+    density_cap_warmup_until: int = 5_000
+    optical_thickness_weight: float = 0.0
+    optical_thickness_start: int = 0
+    optical_thickness_ramp: int = 0
+    optical_thickness_ramp_shape: str = "linear"
+    epsilon: float = 1.0e-8
+
+
+@dataclass
+class MediumHandoffConfig:
+    """Optional phases that give the medium a controlled optimization window."""
+
+    prefix_mode: str = "none"
+    prefix_iterations: int = 0
+    prefix_reset_medium_optimizer: bool = True
+    gaussian_freeze_start: int | None = None
+    gaussian_freeze_duration: int = 0
+    medium_sites_lr_multiplier: float = 1.0
+    medium_density_lr_multiplier: float = 1.0
+    medium_color_lr_multiplier: float = 1.0
+
+
+@dataclass
+class RadFoamPriorConfig:
+    """Optional spatial initialization from a separated RadFoam checkpoint."""
+
+    enabled: bool = False
+    checkpoint_path: str = ""
+    labels_path: str = ""
+    gaussian_count: int = 100_000
+    pca_neighbors: int = 8
+    reset_density: float = 1.0e-8
+
+
+@dataclass
 class GaussianAdaptationConfig:
     enabled: bool = False
     # graphdeco: screen-gradient clone/split/prune (3DGS/current FlaRe)
@@ -139,7 +206,14 @@ class GaussianAdaptationConfig:
     densification_interval: int = 100
     gradient_threshold: float = 2.0e-4
     min_opacity: float = 0.005
+    min_opacity_initial: float | None = None
     opacity_prune_from: int = 500
+    opacity_prune_ramp: int = 0
+    opacity_prune_ramp_shape: str = "linear"
+    opacity_prune_until: int | None = None
+    opacity_prune_interval: int | None = None
+    min_points: int = 1
+    max_opacity_prune_fraction: float = 1.0
     percent_dense: float = 0.01
     size_prune_from: int = 3_000
     # The pinned official 2DGS implementation resets max_radii2D inside
@@ -213,6 +287,15 @@ class ExperimentConfig:
     )
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     diagnostics: DiagnosticsConfig = field(default_factory=DiagnosticsConfig)
+    disentanglement: DisentanglementConfig = field(
+        default_factory=DisentanglementConfig
+    )
+    medium_handoff: MediumHandoffConfig = field(
+        default_factory=MediumHandoffConfig
+    )
+    radfoam_prior: RadFoamPriorConfig = field(
+        default_factory=RadFoamPriorConfig
+    )
     gaussian_adaptation: GaussianAdaptationConfig = field(
         default_factory=GaussianAdaptationConfig
     )
@@ -238,6 +321,9 @@ class ExperimentConfig:
             "optimization",
             "validation",
             "diagnostics",
+            "disentanglement",
+            "medium_handoff",
+            "radfoam_prior",
             "gaussian_adaptation",
             "voronoi_adaptation",
             "wandb",
@@ -265,6 +351,15 @@ class ExperimentConfig:
             ),
             diagnostics=_construct(
                 DiagnosticsConfig, raw.get("diagnostics")
+            ),
+            disentanglement=_construct(
+                DisentanglementConfig, raw.get("disentanglement")
+            ),
+            medium_handoff=_construct(
+                MediumHandoffConfig, raw.get("medium_handoff")
+            ),
+            radfoam_prior=_construct(
+                RadFoamPriorConfig, raw.get("radfoam_prior")
             ),
             gaussian_adaptation=_construct(
                 GaussianAdaptationConfig, raw.get("gaussian_adaptation")
@@ -299,6 +394,40 @@ class ExperimentConfig:
             raise ValueError("standalone training requires both layer ground-truth paths")
         if self.dataset.resolution < 1:
             raise ValueError("dataset.resolution must be positive")
+        prior = self.radfoam_prior
+        if prior.enabled:
+            if self.representation_mode != "hybrid":
+                raise ValueError(
+                    "RadFoam prior initialization requires hybrid mode"
+                )
+            if not prior.checkpoint_path or not prior.labels_path:
+                raise ValueError(
+                    "enabled RadFoam prior requires checkpoint_path and "
+                    "labels_path"
+                )
+            if prior.gaussian_count < 1:
+                raise ValueError(
+                    "radfoam_prior.gaussian_count must be positive"
+                )
+            if prior.gaussian_count != self.model.gaussian_initial_points:
+                raise ValueError(
+                    "radfoam_prior.gaussian_count must equal "
+                    "model.gaussian_initial_points"
+                )
+            if prior.pca_neighbors < 3:
+                raise ValueError(
+                    "radfoam_prior.pca_neighbors must be at least 3"
+                )
+            if prior.reset_density <= 0.0:
+                raise ValueError(
+                    "radfoam_prior.reset_density must be positive"
+                )
+            if self.voronoi_adaptation.enabled:
+                raise ValueError(
+                    "RadFoam prior requires "
+                    "voronoi_adaptation.enabled=false to preserve the "
+                    "imported population"
+                )
         if self.model.appearance not in {"rgb", "sh"}:
             raise ValueError("model.appearance must be rgb or sh")
         if not 0 <= self.model.sh_degree <= 3:
@@ -440,6 +569,162 @@ class ExperimentConfig:
             raise ValueError(
                 "diagnostics.contribution_epsilon must be non-negative"
             )
+        disentanglement = self.disentanglement
+        loss_names = (
+            "opacity_binarization",
+            "opaque_if_used",
+            "graph_tv",
+            "density_cap",
+            "optical_thickness",
+        )
+        for name in loss_names:
+            if getattr(disentanglement, f"{name}_weight") < 0.0:
+                raise ValueError(
+                    f"disentanglement.{name}_weight must be non-negative"
+                )
+            for suffix in ("start", "ramp"):
+                if getattr(disentanglement, f"{name}_{suffix}") < 0:
+                    raise ValueError(
+                        f"disentanglement.{name}_{suffix} must be non-negative"
+                    )
+            if getattr(disentanglement, f"{name}_ramp_shape") not in {
+                "linear", "cosine", "quadratic"
+            }:
+                raise ValueError(
+                    f"invalid disentanglement.{name}_ramp_shape"
+                )
+        if disentanglement.opacity_binarization_end_ramp < 0:
+            raise ValueError(
+                "opacity_binarization_end_ramp must be non-negative"
+            )
+        if disentanglement.opacity_binarization_end_ramp_shape not in {
+            "linear", "cosine", "quadratic"
+        }:
+            raise ValueError(
+                "invalid opacity_binarization_end_ramp_shape"
+            )
+        if not 0.0 <= (
+            disentanglement.opacity_binarization_maintenance_scale
+        ) <= 1.0:
+            raise ValueError(
+                "opacity_binarization_maintenance_scale must be in [0, 1]"
+            )
+        opacity_end = disentanglement.opacity_binarization_end
+        if opacity_end is not None:
+            if opacity_end < (
+                disentanglement.opacity_binarization_start
+                + disentanglement.opacity_binarization_ramp
+            ):
+                raise ValueError(
+                    "opacity_binarization_end must not overlap its ramp-up"
+                )
+            if (
+                opacity_end
+                + disentanglement.opacity_binarization_end_ramp
+                > self.optimization.iterations
+            ):
+                raise ValueError(
+                    "opacity_binarization end schedule exceeds training "
+                    "iterations"
+                )
+        if disentanglement.graph_tv_mode not in {"huber", "l1", "l2"}:
+            raise ValueError(
+                "disentanglement.graph_tv_mode must be huber, l1, or l2"
+            )
+        if disentanglement.graph_tv_huber_delta <= 0.0:
+            raise ValueError(
+                "disentanglement.graph_tv_huber_delta must be positive"
+            )
+        if disentanglement.density_cap_policy not in {
+            "fixed", "rolling", "ema", "warmup_freeze"
+        }:
+            raise ValueError("invalid disentanglement.density_cap_policy")
+        if disentanglement.density_cap_fixed_value <= 0.0:
+            raise ValueError("density_cap_fixed_value must be positive")
+        if not 0.0 < disentanglement.density_cap_quantile < 1.0:
+            raise ValueError("density_cap_quantile must be in (0, 1)")
+        if disentanglement.density_cap_multiplier <= 0.0:
+            raise ValueError("density_cap_multiplier must be positive")
+        if disentanglement.density_cap_minimum <= 0.0:
+            raise ValueError("density_cap_minimum must be positive")
+        if disentanglement.density_cap_update_interval < 1:
+            raise ValueError("density_cap_update_interval must be positive")
+        if not 0.0 <= disentanglement.density_cap_ema_decay < 1.0:
+            raise ValueError("density_cap_ema_decay must be in [0, 1)")
+        if disentanglement.density_cap_warmup_until < 0:
+            raise ValueError("density_cap_warmup_until must be non-negative")
+        if disentanglement.epsilon <= 0.0:
+            raise ValueError("disentanglement.epsilon must be positive")
+        gaussian_losses_enabled = (
+            disentanglement.opacity_binarization_weight > 0.0
+            or disentanglement.opaque_if_used_weight > 0.0
+        )
+        medium_losses_enabled = (
+            disentanglement.graph_tv_weight > 0.0
+            or disentanglement.density_cap_weight > 0.0
+            or disentanglement.optical_thickness_weight > 0.0
+        )
+        if (
+            gaussian_losses_enabled
+            and self.representation_mode == "voronoi_only"
+        ):
+            raise ValueError(
+                "Gaussian disentanglement losses require Gaussians"
+            )
+        if (
+            medium_losses_enabled
+            and self.representation_mode == "gaussian_only"
+        ):
+            raise ValueError(
+                "medium disentanglement losses require Voronoi"
+            )
+        handoff = self.medium_handoff
+        if handoff.prefix_mode not in {"none", "medium_only", "joint"}:
+            raise ValueError(
+                "medium_handoff.prefix_mode must be none, medium_only, or joint"
+            )
+        if handoff.prefix_iterations < 0:
+            raise ValueError(
+                "medium_handoff.prefix_iterations must be non-negative"
+            )
+        if (handoff.prefix_mode == "none") != (handoff.prefix_iterations == 0):
+            raise ValueError(
+                "prefix_mode none requires zero prefix_iterations and "
+                "a nonzero prefix requires medium_only or joint"
+            )
+        if handoff.prefix_iterations and self.representation_mode != "hybrid":
+            raise ValueError("medium handoff prefix requires hybrid mode")
+        if handoff.gaussian_freeze_duration < 0:
+            raise ValueError("gaussian_freeze_duration must be non-negative")
+        if (handoff.gaussian_freeze_start is None) != (
+            handoff.gaussian_freeze_duration == 0
+        ):
+            raise ValueError(
+                "gaussian freeze start and positive duration must be set together"
+            )
+        if handoff.gaussian_freeze_start is not None:
+            if handoff.gaussian_freeze_start < 1:
+                raise ValueError("gaussian_freeze_start must be positive")
+            if (
+                handoff.gaussian_freeze_start
+                + handoff.gaussian_freeze_duration
+                > self.optimization.iterations + 1
+            ):
+                raise ValueError("Gaussian freeze window exceeds training")
+            if self.representation_mode != "hybrid":
+                raise ValueError("Gaussian handoff freeze requires hybrid mode")
+        multipliers = (
+            handoff.medium_sites_lr_multiplier,
+            handoff.medium_density_lr_multiplier,
+            handoff.medium_color_lr_multiplier,
+        )
+        if any(value <= 0.0 for value in multipliers):
+            raise ValueError("medium handoff LR multipliers must be positive")
+        if handoff.gaussian_freeze_start is None and any(
+            value != 1.0 for value in multipliers
+        ):
+            raise ValueError("medium LR boosts require a Gaussian freeze window")
+
         adaptation = self.gaussian_adaptation
         if adaptation.policy not in {"graphdeco", "flare_movement", "fixed"}:
             raise ValueError(
@@ -473,6 +758,53 @@ class ExperimentConfig:
             raise ValueError(
                 "gaussian_adaptation.opacity_prune_from must be non-negative"
             )
+        if adaptation.opacity_prune_ramp < 0:
+            raise ValueError(
+                "gaussian_adaptation.opacity_prune_ramp must be non-negative"
+            )
+        if adaptation.opacity_prune_ramp_shape not in {
+            "linear", "cosine", "quadratic"
+        }:
+            raise ValueError(
+                "invalid gaussian_adaptation.opacity_prune_ramp_shape"
+            )
+        prune_until = adaptation.opacity_prune_until
+        if prune_until is None:
+            prune_until = adaptation.densify_until
+        if prune_until < adaptation.opacity_prune_from:
+            raise ValueError("invalid Gaussian opacity-pruning range")
+        if (
+            adaptation.opacity_prune_until is not None
+            and prune_until > self.optimization.iterations
+        ):
+            raise ValueError(
+                "gaussian_adaptation.opacity_prune_until exceeds training"
+            )
+        prune_interval = (
+            adaptation.densification_interval
+            if adaptation.opacity_prune_interval is None
+            else adaptation.opacity_prune_interval
+        )
+        if prune_interval < 1:
+            raise ValueError(
+                "gaussian_adaptation.opacity_prune_interval must be positive"
+            )
+        if adaptation.min_points < 1:
+            raise ValueError("gaussian_adaptation.min_points must be positive")
+        if adaptation.min_points > self.model.gaussian_initial_points:
+            raise ValueError(
+                "gaussian_adaptation.min_points exceeds initial population"
+            )
+        if not 0.0 < adaptation.max_opacity_prune_fraction <= 1.0:
+            raise ValueError(
+                "max_opacity_prune_fraction must be in (0, 1]"
+            )
+        if adaptation.min_opacity_initial is not None and not (
+            0.0 <= adaptation.min_opacity_initial < 1.0
+        ):
+            raise ValueError(
+                "gaussian_adaptation.min_opacity_initial must be in [0, 1)"
+            )
         for name in (
             "opacity_reset_interval",
             "medium_freeze_after_reset",
@@ -484,6 +816,10 @@ class ExperimentConfig:
                 raise ValueError(
                     f"gaussian_adaptation.{name} must be non-negative"
                 )
+        if adaptation.min_opacity >= 1.0:
+            raise ValueError(
+                "gaussian_adaptation.min_opacity must be smaller than 1"
+            )
         if not 0.0 < adaptation.opacity_reset_value < 1.0:
             raise ValueError(
                 "gaussian_adaptation.opacity_reset_value must be in (0, 1)"

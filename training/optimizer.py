@@ -38,6 +38,15 @@ def build_optimizers(
             model.gaussians.named_primitive_parameters().items()
         )
     ]
+    return (
+        torch.optim.Adam(gaussian_groups, eps=config.gaussian_adam_eps),
+        build_medium_optimizer(model, config),
+    )
+
+
+def build_medium_optimizer(
+    model: HybridSceneModel, config: OptimizationConfig
+) -> torch.optim.Adam:
     medium_groups = [
         {
             "params": [model.medium.sites],
@@ -55,10 +64,7 @@ def build_optimizers(
             "name": "medium_color",
         },
     ]
-    return (
-        torch.optim.Adam(gaussian_groups, eps=config.gaussian_adam_eps),
-        torch.optim.Adam(medium_groups),
-    )
+    return torch.optim.Adam(medium_groups)
 
 
 def _exponential_lr(

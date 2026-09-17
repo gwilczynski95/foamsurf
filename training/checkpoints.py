@@ -22,12 +22,15 @@ def checkpoint_payload(
     gaussian_adaptation_state: dict[str, Any] | None = None,
     voronoi_adaptation_state: dict[str, Any] | None = None,
     medium_frozen_until: int = 0,
+    disentanglement_state: dict[str, Any] | None = None,
+    prefix_training_seconds: float = 0.0,
 ) -> dict[str, Any]:
     return {
         "format_version": 1,
         "baseline": "B0",
         "iteration": int(iteration),
         "training_seconds": float(training_seconds),
+        "prefix_training_seconds": float(prefix_training_seconds),
         "best_psnr": float(best_psnr),
         "topology_revision": int(topology_revision),
         "config": config.as_dict(),
@@ -38,6 +41,7 @@ def checkpoint_payload(
         "gaussian_adaptation": gaussian_adaptation_state,
         "voronoi_adaptation": voronoi_adaptation_state,
         "medium_frozen_until": int(medium_frozen_until),
+        "disentanglement": disentanglement_state,
         "rng": {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all(),
