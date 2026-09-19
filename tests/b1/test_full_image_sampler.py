@@ -82,3 +82,4 @@ def test_full_image_sampler_exhausts_shuffled_camera_stack() -> None:
         torch.testing.assert_close(
             batch.target, torch.full((4, 3), expected)
         )
+        torch.testing.assert_close(batch.alpha, torch.ones((4, 1)))

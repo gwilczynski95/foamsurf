@@ -12,6 +12,7 @@ from foamsurf_data.rays import RayBundle, generate_indexed_rays
 class TrainingBatch:
     rays: RayBundle
     target: torch.Tensor
+    alpha: torch.Tensor
     camera: object
 
     @property
@@ -88,5 +89,6 @@ class RandomCameraRaySampler:
         return TrainingBatch(
             rays=rays,
             target=target,
+            alpha=alpha,
             camera=camera,
         )

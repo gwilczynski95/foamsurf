@@ -1,0 +1,34 @@
+# Consumed only by scripts/run_warmup_radfoam_like.py --config.
+# Existing joint training does not load this file or this profile.
+variant: 7
+iterations: 5000
+profile:
+  density_beta: 10.0
+  activation_scale: 1.0
+  initial_sigma: 0.06931471805599453
+  outer_points: 5000
+  outer_scale: 10.0
+  outer_sigma: 0.0006715348489118068
+  outer_positions_trainable: false
+  outer_density_trainable: true
+  outer_color_trainable: true
+  loss: smooth_l1
+  smooth_l1_beta: 1.0
+  opacity_weight: 1.0
+  schedule: cosine
+  sites_lr: 0.0002
+  sites_final: 0.000005
+  sites_steps: 18000
+  density_lr: 0.1
+  density_final: 0.01
+  density_warmup: 2000
+  density_steps: 20000
+  color_lr: 0.005
+  color_final: 0.0005
+  color_steps: 20000
+  adam_eps: 1.0e-15
+  resolutions: [4, 2, 1]
+  resolution_steps: [0, 150, 500]
+  quantile_weight: 0.0001
+  quantile_start: 0
+  quantile_ramp: 10000

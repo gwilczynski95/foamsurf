@@ -194,6 +194,14 @@ class RadFoamPriorConfig:
 
 
 @dataclass
+class VoronoiWarmupConfig:
+    """Native full-scene Voronoi pretraining before Gaussian spawning."""
+
+    enabled: bool = False
+    milestone_iterations: list[int] = field(default_factory=list)
+
+
+@dataclass
 class GaussianAdaptationConfig:
     enabled: bool = False
     # graphdeco: screen-gradient clone/split/prune (3DGS/current FlaRe)
@@ -296,6 +304,9 @@ class ExperimentConfig:
     radfoam_prior: RadFoamPriorConfig = field(
         default_factory=RadFoamPriorConfig
     )
+    voronoi_warmup: VoronoiWarmupConfig = field(
+        default_factory=VoronoiWarmupConfig
+    )
     gaussian_adaptation: GaussianAdaptationConfig = field(
         default_factory=GaussianAdaptationConfig
     )
@@ -324,6 +335,7 @@ class ExperimentConfig:
             "disentanglement",
             "medium_handoff",
             "radfoam_prior",
+            "voronoi_warmup",
             "gaussian_adaptation",
             "voronoi_adaptation",
             "wandb",
@@ -361,6 +373,9 @@ class ExperimentConfig:
             radfoam_prior=_construct(
                 RadFoamPriorConfig, raw.get("radfoam_prior")
             ),
+            voronoi_warmup=_construct(
+                VoronoiWarmupConfig, raw.get("voronoi_warmup")
+            ),
             gaussian_adaptation=_construct(
                 GaussianAdaptationConfig, raw.get("gaussian_adaptation")
             ),
@@ -379,9 +394,27 @@ class ExperimentConfig:
             raise ValueError("invalid representation_mode")
         if self.dataset.train_target not in {"both", "lego", "clouds"}:
             raise ValueError("dataset.train_target must be both, lego, or clouds")
-        expected_target = {"hybrid": "both", "gaussian_only": "lego", "voronoi_only": "clouds"}[self.representation_mode]
-        if self.dataset.train_target != expected_target:
-            raise ValueError(f"{self.representation_mode} requires dataset.train_target={expected_target}")
+        warmup = self.voronoi_warmup
+        if warmup.enabled:
+            if self.representation_mode != "voronoi_only":
+                raise ValueError(
+                    "Voronoi warmup requires representation_mode=voronoi_only"
+                )
+            if self.dataset.train_target != "both":
+                raise ValueError(
+                    "Voronoi warmup requires dataset.train_target=both"
+                )
+        else:
+            expected_target = {
+                "hybrid": "both",
+                "gaussian_only": "lego",
+                "voronoi_only": "clouds",
+            }[self.representation_mode]
+            if self.dataset.train_target != expected_target:
+                raise ValueError(
+                    f"{self.representation_mode} requires "
+                    f"dataset.train_target={expected_target}"
+                )
         layer_paths = (
             self.dataset.gaussian_ground_truth_path,
             self.dataset.medium_ground_truth_path,
@@ -392,6 +425,39 @@ class ExperimentConfig:
             )
         if self.dataset.train_target != "both" and layer_paths[0] is None:
             raise ValueError("standalone training requires both layer ground-truth paths")
+        if warmup.enabled:
+            # Separated layers are optional diagnostics, never initialization inputs.
+            milestones = warmup.milestone_iterations
+            if not milestones or milestones[0] != 0:
+                raise ValueError(
+                    "voronoi_warmup.milestone_iterations must start at 0"
+                )
+            if milestones != sorted(set(milestones)):
+                raise ValueError(
+                    "voronoi_warmup.milestone_iterations must be sorted and unique"
+                )
+            if milestones[-1] > self.optimization.iterations:
+                raise ValueError(
+                    "Voronoi warmup milestone exceeds training iterations"
+                )
+            if self.model.gaussian_initial_points != 1:
+                raise ValueError(
+                    "Voronoi warmup requires exactly one inactive Gaussian placeholder"
+                )
+            if self.model.medium_guard_points != 0:
+                raise ValueError("Voronoi warmup does not use guard sites")
+            if not self.voronoi_adaptation.enabled:
+                raise ValueError(
+                    "Voronoi warmup requires adaptive Voronoi population"
+                )
+            if self.gaussian_adaptation.enabled:
+                raise ValueError(
+                    "Voronoi warmup cannot enable Gaussian adaptation"
+                )
+            if self.radfoam_prior.enabled:
+                raise ValueError("Voronoi warmup cannot use a RadFoam prior")
+            if self.medium_handoff.prefix_mode != "none":
+                raise ValueError("Voronoi warmup cannot use a handoff prefix")
         if self.dataset.resolution < 1:
             raise ValueError("dataset.resolution must be positive")
         prior = self.radfoam_prior

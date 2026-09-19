@@ -82,7 +82,11 @@ class Trainer:
         self,
         config: ExperimentConfig,
         resume: str | Path | None = None,
+        *,
+        initial_model: HybridSceneModel | None = None,
     ) -> None:
+        if resume is not None and initial_model is not None:
+            raise ValueError("resume and initial_model are mutually exclusive")
         config.validate()
         if not torch.cuda.is_available():
             raise RuntimeError("FoamSurf B0 training requires CUDA")
@@ -127,7 +131,7 @@ class Trainer:
         self.camera_center, self.scene_extent = camera_normalization(
             self.dataset.train
         )
-        self.model = HybridSceneModel.initialize(
+        self.model = initial_model if initial_model is not None else HybridSceneModel.initialize(
             self.dataset, config, self.device
         )
         self.start_iteration = 1
@@ -1022,6 +1026,22 @@ class Trainer:
             flush=True,
         )
 
+    def save_voronoi_warmup_milestone(
+        self, iteration: int
+    ) -> Path | None:
+        """Persist an immutable checkpoint used to inspect native pretraining."""
+
+        warmup = self.config.voronoi_warmup
+        if not warmup.enabled or iteration not in warmup.milestone_iterations:
+            return None
+        path = (
+            self.output_dir
+            / "checkpoints"
+            / f"iter_{iteration:08d}.pt"
+        )
+        self._checkpoint(path, iteration)
+        return path
+
     def _write_summary(
         self, iteration: int, status: str
     ) -> dict[str, float | int | str]:
@@ -1338,6 +1358,7 @@ class Trainer:
                         / "last.pt",
                         iteration,
                     )
+                self.save_voronoi_warmup_milestone(iteration)
 
             if last_eval_iteration != final_iteration:
                 self._evaluate_and_checkpoint(final_iteration)
