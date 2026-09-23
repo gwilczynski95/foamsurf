@@ -1,0 +1,10 @@
+source_checkpoint: outputs/end_to_end/508222/joint/checkpoints/initialization.pt
+interval: 500
+delay: 2000
+split_fraction: 0.02
+prune_fraction: 0.02
+minimum_population_ratio: 0.5
+maximum_population_ratio: 1.5
+binarization_weight: 0.001
+binarization_start: 1000
+binarization_ramp: 3000
