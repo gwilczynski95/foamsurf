@@ -7,6 +7,9 @@ import math
 class WarmupProfile:
     # Opt-in initialization dynamics; defaults preserve the first warmup sweep.
     site_initialization: str = "stratified"
+    spatial_count: int = 25000
+    spatial_colmap_fraction: float = 0.1
+    spatial_extent: float = 1.0
     ray_sampling: str = "single_camera"
     population_policy: str = "foamsurf"
     population_factor: float = 1.15
@@ -63,8 +66,19 @@ class WarmupProfile:
         return result
 
     def validate(self):
-        if self.site_initialization not in ("stratified", "random"):
+        if self.site_initialization not in ("stratified", "random", "pcd", "spatial"):
             raise ValueError("invalid site initialization")
+        if self.site_initialization == "spatial":
+            if not isinstance(self.spatial_count, int) or self.spatial_count < 32:
+                raise ValueError("spatial_count must be >=32")
+            if not math.isfinite(self.spatial_colmap_fraction) or not 0 <= self.spatial_colmap_fraction <= 1:
+                raise ValueError("invalid spatial COLMAP fraction")
+            if not math.isfinite(self.spatial_extent) or self.spatial_extent <= 0:
+                raise ValueError("invalid spatial extent")
+            if self.outer_points != 0 or self.corner_guards:
+                raise ValueError("spatial sites are ordinary medium sites, not guards")
+        if self.site_initialization in ("pcd", "spatial") and (self.corner_guards or self.density_beta != 10 or self.activation_scale != 1):
+            raise ValueError("RadFoam PCD initialization requires beta=10, scale=1, no corner guards")
         if self.ray_sampling not in ("single_camera", "mixed"):
             raise ValueError("invalid ray sampling")
         if self.ray_sampling == "mixed" and self.loss != "smooth_l1":

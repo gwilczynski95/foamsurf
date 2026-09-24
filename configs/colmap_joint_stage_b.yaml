@@ -1,0 +1,50 @@
+# Stage B: same joint training, only Voronoi pretraining duration changes.
+base: end_to_end_iui3.yaml
+warmup_iterations: 1000
+joint_iterations: 30000
+timing:
+  initializations:
+    - {count: 25000, fraction: 0.0, extent: 2.0} # Stage A run 2
+    - {count: 25000, fraction: 0.25, extent: 2.0} # Stage A run 6
+  warmup_lengths: [0, 100, 250, 500, 1000, 2000, 4000]
+warmup_overrides:
+  voronoi_adaptation:
+    densify_from: 500
+joint_overrides:
+  validation:
+    eval_interval: 500
+    checkpoint_interval: 500
+  model:
+    gaussian_initial_points: 1 # bootstrap; replaced by ALL COLMAP points at transfer
+  disentanglement:
+    opacity_binarization_weight: 0.001
+    opacity_binarization_start: 1000
+    opacity_binarization_ramp: 3000
+    opacity_binarization_ramp_shape: cosine
+  gaussian_adaptation:
+    min_opacity_initial: 0.005
+    min_opacity: 0.10
+    opacity_prune_from: 1000
+    opacity_prune_ramp: 3000
+    opacity_prune_ramp_shape: cosine
+    opacity_prune_until: 30000
+    max_opacity_prune_fraction: 0.10
+    min_points: 1000
+    max_points: 500000
+    opacity_reset_interval: 0
+    opacity_reset_at_densify_from: false
+  voronoi_adaptation:
+    enabled: true
+    densify_from: 1000
+    densify_until: 30000
+    interval: 500
+    densify_fraction: 0.05
+    max_prune_fraction: 0.02
+    min_points: 10000
+    max_points: 500000
+    child_jitter_fraction: 0.025
+    freeze_at_capacity: false
+  wandb:
+    mode: online
+    project: foamsurf_iui3
+profile_overrides: {}

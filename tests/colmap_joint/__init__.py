@@ -1,0 +1,1 @@
+"""COLMAP joint initialization tests."""

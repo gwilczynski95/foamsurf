@@ -160,6 +160,8 @@ class VoronoiMediumModel(nn.Module):
 
     @property
     def colors(self) -> torch.Tensor:
+        if getattr(self, "color_activation", "sigmoid") == "dc":
+            return (0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0)
         return torch.sigmoid(self.raw_color)
 
     def render_scene(self) -> VoronoiScene:
@@ -188,7 +190,8 @@ class VoronoiMediumModel(nn.Module):
             )
 
     def checkpoint_metadata(self) -> dict[str, object]:
-        return {"point_count": self.point_count, "guard_count": int(self.guard_mask.sum().item())}
+        return {"point_count": self.point_count, "guard_count": int(self.guard_mask.sum().item()),
+                "color_activation": getattr(self, "color_activation", "sigmoid")}
 
     @classmethod
     def from_checkpoint(
@@ -202,6 +205,9 @@ class VoronoiMediumModel(nn.Module):
         instance = cls.__new__(cls)
         nn.Module.__init__(instance)
         instance.device = torch.device(device)
+        instance.color_activation = metadata.get("color_activation", "sigmoid")
+        if instance.color_activation not in ("sigmoid", "dc"):
+            raise ValueError("Unknown medium color activation")
         instance.register_buffer(
             "bbox_min", bbox_min.to(instance.device)
         )

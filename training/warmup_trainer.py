@@ -38,6 +38,12 @@ class WarmupMedium(VoronoiMediumModel):
         return self.warmup_scale * F.softplus(self.raw_density, beta=self.warmup_beta)
 
     @property
+    def colors(self):
+        if getattr(self, "radfoam_dc", False):
+            return (0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0)
+        return super().colors
+
+    @property
     def outer_mask(self):
         # Outer provenance (protected only under the original population policy).
         # Reuse the established permutation-safe mask; no new buffers in hybrid.
@@ -128,19 +134,35 @@ class WarmupTrainer(Trainer):
             raise ValueError("resume requires a warmup checkpoint")
         if payload is not None and WarmupProfile.from_dict(payload.get("warmup", {}).get("profile", {})).as_dict() != profile.as_dict():
             raise ValueError("resume requires the identical warmup profile")
+        if profile.site_initialization == "spatial":
+            config.model.medium_points = profile.spatial_count
+        if profile.site_initialization == "pcd":
+            from .warmup_pcd import pcd_initial_count
+            if config.model.medium_bbox_min is not None or config.model.medium_bbox_max is not None:
+                raise ValueError("PCD warmup requires automatic metadata bounds, not a manual box")
+            config.model.medium_points = (int(payload["config"]["model"]["medium_points"])
+                if payload is not None else pcd_initial_count(config.dataset.source_path))
         super().__init__(config, resume=resume)
         medium = self.model.medium
         medium.__class__ = WarmupMedium
         medium.warmup_beta = profile.density_beta
         medium.warmup_scale = profile.activation_scale
+        medium.radfoam_dc = profile.site_initialization in ('pcd', 'spatial')
         if payload is None:
             with torch.no_grad():
+                if profile.site_initialization == "pcd":
+                    from .warmup_pcd import initialize_pcd_medium
+                    initialize_pcd_medium(medium, self.dataset, config, profile)
                 if profile.site_initialization == "random":
                     medium.sites.copy_(medium.bbox_min + torch.rand_like(medium.sites) *
                                        (medium.bbox_max - medium.bbox_min))
-                medium.raw_density.fill_(float(inverse_density(torch.tensor(profile.initial_sigma, dtype=torch.float64),
-                    profile.density_beta, profile.activation_scale)))
-                n = profile.outer_points
+                if profile.site_initialization == "spatial":
+                    from .colmap_initialization import initialize_spatial_medium
+                    initialize_spatial_medium(medium, self.dataset, config, profile)
+                if profile.site_initialization not in ("pcd", "spatial"):
+                    medium.raw_density.fill_(float(inverse_density(torch.tensor(profile.initial_sigma, dtype=torch.float64),
+                        profile.density_beta, profile.activation_scale)))
+                n = 0 if profile.site_initialization in ("pcd", "spatial") else profile.outer_points
                 if n:
                     center = (medium.bbox_min + medium.bbox_max) / 2
                     if profile.corner_guards:
@@ -172,6 +194,8 @@ class WarmupTrainer(Trainer):
             # moments. Apply exactly the same permutation to the raw beta!=1 state.
             with torch.no_grad():
                 medium.raw_density.copy_(payload["warmup"]["raw_density"].to(self.device)[self.topology.last_permutation])
+                if medium.radfoam_dc:
+                    medium.raw_color.copy_(payload["warmup"]["raw_color"].to(self.device)[self.topology.last_permutation])
             self.topology.__class__ = WarmupTopology
             # Base controller restored statistics before our profile was active;
             # topology's initial resume permutation must also apply to statistics.
@@ -199,6 +223,7 @@ class WarmupTrainer(Trainer):
             np.random.set_state(state["numpy_rng"])
             torch.set_rng_state(payload["rng"]["torch"])
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
+        config.save(self.output_dir / "config.yaml")
         (self.output_dir / "warmup_profile.json").write_text(json.dumps(profile.as_dict(), indent=2)+"\n")
 
     def _select_resolution(self, step):
@@ -235,6 +260,10 @@ class WarmupTrainer(Trainer):
                 for name in ("contribution", "visibility", "path_length", "weighted_path_length", "max_error", "gradient")}}
         # Legacy analysis and scene initialization see canonical beta=1 tensors.
         payload["model"]["medium.raw_density"] = inverse_density(medium.densities.detach()).cpu()
+        if medium.radfoam_dc:
+            payload["warmup"]["raw_color"] = medium.raw_color.detach().cpu()
+            payload["warmup"]["color_clipped_values"] = int((medium.colors.detach() > 1).sum())
+            payload["model"]["medium.raw_color"] = torch.logit(medium.colors.detach().clamp(1e-6, 1-1e-6)).cpu()
         save_checkpoint(Path(path), payload)
 
     def _train_step(self, iteration):
@@ -411,7 +440,7 @@ class WarmupTrainer(Trainer):
                     continue
                 bundle = generate_indexed_rays(part + ci * camera.width * camera.height,
                     data["origins"], data["rights"], data["downs"], data["forwards"],
-                    data["fov_x"], data["fov_y"], camera.width, camera.height)
+                    data["fov_x"], data["fov_y"], camera.width, camera.height, intrinsics=data.get("intrinsics"))
                 rays = torch.cat((bundle.origins, bundle.directions), -1).contiguous()
                 target = camera.foreground.reshape(-1, 3)[part] + self.sampler.background * (
                     1 - camera.alpha.reshape(-1, 1)[part])
