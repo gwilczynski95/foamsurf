@@ -1,0 +1,14 @@
+base_sweep: ../../configs/colmap_rgb_medium.yaml
+base_variant: 3
+project: foamsurf_iui3_rgb_smooth
+seeds: [42, 43, 44]
+ramp_steps: 250
+coefficient_delta: 0.1
+color_delta: 0.05
+epsilon: 0.000001
+variants:
+  - {name: control, attenuation: 0.0, backscatter: 0.0, color: 0.0}
+  - {name: color_moderate, attenuation: 0.0, backscatter: 0.0, color: 0.1}
+  - {name: color_strong, attenuation: 0.0, backscatter: 0.0, color: 1.0}
+  - {name: all_moderate, attenuation: 0.01, backscatter: 0.01, color: 0.1}
+  - {name: all_strong, attenuation: 0.1, backscatter: 0.1, color: 1.0}
