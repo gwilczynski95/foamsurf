@@ -35,6 +35,10 @@ def variants(settings):
                                    mode='spatial',**init,warmup_steps=steps))
         if not result or len({v['name'] for v in result})!=len(result):
             raise ValueError('Timing initializations must be nonempty and unique')
+        if settings.get('medium_experiment', False):
+            result=[dict(v,medium_type=kind,seed=seed,
+                         name=f'{v["name"]}_{kind}_seed{seed}')
+                    for v,kind,seed in itertools.product(result,('scalar','rgb_backscatter'),settings['seeds'])]
         return result
     return [dict(name='radfoam_control',mode='pcd')] + [
         dict(name=f'spatial_n{n}_f{f:g}_e{e:g}',mode='spatial',count=n,fraction=f,extent=e)
@@ -45,7 +49,7 @@ def resolve(path,index,output):
     path=Path(path).resolve()
     s=yaml.safe_load(path.read_text())
     allowed={'base','warmup_iterations','joint_iterations','counts','colmap_fractions','extents',
-             'warmup_overrides','joint_overrides','profile_overrides','timing'}
+             'warmup_overrides','joint_overrides','profile_overrides','timing','medium_experiment','seeds'}
     if set(s)-allowed: raise ValueError('Unknown COLMAP sweep setting')
     choices=variants(s)
     if not 0 <= index < len(choices): raise ValueError('Variant out of range')
@@ -64,6 +68,8 @@ def resolve(path,index,output):
         w.model.medium_points=v['count']
     for stage,overrides in [(w,s.get('warmup_overrides',{})),(j,s.get('joint_overrides',{}))]:
         update_config(stage,overrides)
+        if 'medium_type' in v:
+            stage.model.medium_type=v['medium_type'];stage.seed=v['seed']
     p=WarmupProfile.from_dict(dict(p.as_dict(),**s.get('profile_overrides',{})))
     from foamsurf_data.colmap import _read_points_binary, _read_points_text
     sparse=Path(j.dataset.source_path)/'sparse/0'
@@ -72,7 +78,7 @@ def resolve(path,index,output):
     j.model.gaussian_initial_points=len(points)
     for name,stage in [('warmup',w),('joint',j)]:
         stage.output_dir=str(Path(output)/name)
-        family='B' if 'timing' in s else 'A'
+        family='C' if s.get('medium_experiment') else ('B' if 'timing' in s else 'A')
         stage.experiment_name=f'iui3-{family}{index:02d}-{v["name"]}-{name}'
         stage.wandb.name=stage.experiment_name
         stage.wandb.project=j.wandb.project
@@ -81,6 +87,8 @@ def resolve(path,index,output):
         stage.validate()
     if w.model.medium_bbox_min is not None or j.model.medium_bbox_min is not None:
         raise ValueError('COLMAP joint forbids manual bounds')
+    if w.model.medium_type != j.model.medium_type:
+        raise ValueError('Warmup and joint must use the same medium model')
     if w.dataset != j.dataset: raise ValueError('Stages must use identical datasets')
     if w.dataset.train_target!='both' or j.radfoam_prior.enabled:
         raise ValueError('Only full RGB, no external RadFoam prior')

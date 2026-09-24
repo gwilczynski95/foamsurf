@@ -35,6 +35,11 @@ from foamsurf_data.rays import generate_indexed_rays
 class WarmupMedium(VoronoiMediumModel):
     @property
     def densities(self):
+        values = self.optical_coefficients
+        return values[:, :3].mean(-1, keepdim=True) if self.is_rgb else values
+
+    @property
+    def optical_coefficients(self):
         return self.warmup_scale * F.softplus(self.raw_density, beta=self.warmup_beta)
 
     @property
@@ -159,6 +164,11 @@ class WarmupTrainer(Trainer):
                 if profile.site_initialization == "spatial":
                     from .colmap_initialization import initialize_spatial_medium
                     initialize_spatial_medium(medium, self.dataset, config, profile)
+                if medium.is_rgb:
+                    if profile.site_initialization != "spatial":
+                        raise ValueError("RGB warmup currently requires spatial initialization")
+                    # Matched scalar initialization, independent parameters thereafter.
+                    medium.raw_density = nn.Parameter(medium.raw_density.expand(-1, 6).clone())
                 if profile.site_initialization not in ("pcd", "spatial"):
                     medium.raw_density.fill_(float(inverse_density(torch.tensor(profile.initial_sigma, dtype=torch.float64),
                         profile.density_beta, profile.activation_scale)))
@@ -259,7 +269,7 @@ class WarmupTrainer(Trainer):
             "adaptation_accumulators": {name: getattr(self.voronoi_adaptation, name).detach().cpu()
                 for name in ("contribution", "visibility", "path_length", "weighted_path_length", "max_error", "gradient")}}
         # Legacy analysis and scene initialization see canonical beta=1 tensors.
-        payload["model"]["medium.raw_density"] = inverse_density(medium.densities.detach()).cpu()
+        payload["model"]["medium.raw_density"] = inverse_density(medium.optical_coefficients.detach()).cpu()
         if medium.radfoam_dc:
             payload["warmup"]["raw_color"] = medium.raw_color.detach().cpu()
             payload["warmup"]["color_clipped_values"] = int((medium.colors.detach() > 1).sum())
@@ -461,8 +471,8 @@ class WarmupTrainer(Trainer):
         row.update(self.warmup_metrics)
         medium = self.model.medium
         for name, mask in (("inner", ~medium.outer_mask), ("outer", medium.outer_mask)):
-            for field, values in (("sigma", medium.densities.flatten()), ("raw", medium.raw_density.flatten())):
-                selected = values.detach()[mask]
+            for field, values in (("sigma", medium.densities), ("raw", medium.raw_density)):
+                selected = values.detach()[mask].flatten()
                 for q in (.01, .05, .5, .95, .99):
                     row[f"warmup/{name}_{field}_p{round(100*q)}"] = float(torch.quantile(selected, q)) if selected.numel() else 0.0
         return row

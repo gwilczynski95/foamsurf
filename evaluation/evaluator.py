@@ -401,6 +401,12 @@ class Evaluator:
                         ),
                         dim=1,
                     )
+                if self.model.medium.is_rgb:
+                    row = {k.replace("responsibility/", "proxy_responsibility/"): v for k,v in row.items()}
+                    if hybrid.direct is not None:
+                        row["medium_rgb/direct_mean"] = float(hybrid.direct.mean())
+                        row["medium_rgb/backscatter_mean"] = float(hybrid.backscatter.mean())
+                        row["medium_rgb/mean_direct_transmittance"] = float(hybrid.direct_transmittance.mean())
                 rows.append(row)
 
                 if index < self.config.validation.image_views:
@@ -417,6 +423,10 @@ class Evaluator:
                     )
                     prefix = f"{index:04d}_{camera.name}"
                     _save(directory / f"{prefix}_panel.png", panel)
+                    if hybrid.direct is not None:
+                        _save(directory / f"{prefix}_direct_with_background.png", hybrid.direct)
+                        _save(directory / f"{prefix}_backscatter.png", hybrid.backscatter)
+                        _save(directory / f"{prefix}_direct_transmittance_rgb.png", hybrid.direct_transmittance)
                     _save(
                         directory / f"{prefix}_hybrid.png",
                         hybrid_image,
@@ -443,7 +453,7 @@ class Evaluator:
                     if contribution_panel is not None:
                         _save(
                             directory
-                            / f"{prefix}_responsibility.png",
+                            / f"{prefix}_{'proxy_responsibility' if self.model.medium.is_rgb else 'responsibility'}.png",
                             contribution_panel,
                         )
                         wandb_images[
@@ -653,4 +663,9 @@ class Evaluator:
                         "max_ray_error",
                     ),
                 )
+        if self.model.medium.is_rgb:
+            summary = {(k if "proxy_responsibility/" in k else k.replace("responsibility/", "proxy_responsibility/")): v for k,v in summary.items()}
+            histograms["medium_attenuation_rgb"] = self.model.medium.optical_coefficients[:, :3]
+            histograms["medium_backscatter_rgb"] = self.model.medium.optical_coefficients[:, 3:]
+            wandb_images = {k.replace("responsibility/", "proxy_responsibility/"): v for k,v in wandb_images.items()}
         return summary, wandb_images, histograms

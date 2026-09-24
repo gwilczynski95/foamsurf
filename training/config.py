@@ -30,6 +30,7 @@ class DatasetConfig:
 
 @dataclass
 class ModelConfig:
+    medium_type: str = "scalar"
     appearance: str = "rgb"
     sh_degree: int = 3
     gaussian_initial_points: int = 100_000
@@ -388,6 +389,14 @@ class ExperimentConfig:
         return config
 
     def validate(self) -> None:
+        if self.model.medium_type not in ("scalar", "rgb_backscatter"):
+            raise ValueError("Unknown medium_type")
+        if self.model.medium_type == "rgb_backscatter":
+            if self.radfoam_prior.enabled:
+                raise ValueError("RGB medium does not support scalar RadFoam priors")
+            if any(getattr(self.disentanglement, n) > 0 for n in
+                   ("graph_tv_weight", "density_cap_weight", "optical_thickness_weight", "opaque_if_used_weight")):
+                raise ValueError("Scalar medium regularizers are not calibrated for RGB medium")
         if not self.dataset.source_path:
             raise ValueError("dataset.source_path is required")
         if self.representation_mode not in {"hybrid", "gaussian_only", "voronoi_only"}:
