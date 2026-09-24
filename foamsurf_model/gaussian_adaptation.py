@@ -429,6 +429,10 @@ class GaussianAdaptationController:
         )
         center_x = z.new_tensor(0.5 * (camera.width - 1))
         center_y = z.new_tensor(0.5 * (camera.height - 1))
+        if getattr(camera, 'intrinsics', None) is not None:
+            fx, fy, cx, cy = camera.intrinsics
+            focal_x, focal_y = z.new_tensor(fx), z.new_tensor(fy)
+            center_x, center_y = z.new_tensor(cx - 0.5), z.new_tensor(cy - 0.5)
 
         rotation = _quaternion_rotation(self.model.quaternions)
         tangents = rotation[:, :, :2] * self.model.scales[:, None, :]

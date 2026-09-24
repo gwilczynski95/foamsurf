@@ -29,6 +29,7 @@ def generate_camera_rays(
     height: int,
     fov_x: float,
     fov_y: float,
+    intrinsics=None,
 ) -> RayBundle:
     device = origin.device
     dtype = origin.dtype
@@ -43,6 +44,10 @@ def generate_camera_rays(
     dy = (-0.5 + (y + 0.5) / height) * (2.0 * torch.tan(
         torch.tensor(0.5 * fov_y, device=device, dtype=dtype)
     ))
+    if intrinsics is not None:
+        fx, fy, cx, cy = intrinsics
+        dx = (x + 0.5 - cx) / fx
+        dy = (y + 0.5 - cy) / fy
     directions = (
         right.reshape(1, 1, 3) * dx[..., None]
         + down.reshape(1, 1, 3) * dy[..., None]
@@ -63,6 +68,7 @@ def generate_indexed_rays(
     fov_y: torch.Tensor,
     width: int,
     height: int,
+    intrinsics=None,
 ) -> RayBundle:
     flat_indices = flat_indices.to(torch.int64)
     pixels_per_camera = width * height
@@ -81,6 +87,10 @@ def generate_indexed_rays(
     dx = (-0.5 + (x + 0.5) / width) * (2.0 * tan_x)
     dy = (-0.5 + (y + 0.5) / height) * (2.0 * tan_y)
 
+    if intrinsics is not None:
+        fx, fy, cx, cy = intrinsics[camera_indices].unbind(-1)
+        dx = (x + 0.5 - cx) / fx
+        dy = (y + 0.5 - cy) / fy
     ray_origins = origins[camera_indices]
     directions = (
         rights[camera_indices] * dx[:, None]

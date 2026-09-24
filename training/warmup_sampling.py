@@ -35,7 +35,7 @@ class MixedRaySampler:
         data = self.data
         rays = generate_indexed_rays(
             indices, data["origins"], data["rights"], data["downs"],
-            data["forwards"], data["fov_x"], data["fov_y"], self.width, self.height)
+            data["forwards"], data["fov_x"], data["fov_y"], self.width, self.height, intrinsics=data.get("intrinsics"))
         alpha = data["alpha"][indices]
         target = data["foreground"][indices] + self.background * (1 - alpha)
         return MixedBatch(rays, target, alpha)

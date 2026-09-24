@@ -23,6 +23,7 @@ class Camera:
     fov_y: float
     foreground: torch.Tensor
     alpha: torch.Tensor
+    intrinsics: tuple[float, float, float, float] | None = None
 
     @property
     def height(self) -> int:
@@ -42,6 +43,7 @@ class Camera:
             self.height,
             self.fov_x,
             self.fov_y,
+            intrinsics=self.intrinsics,
         )
 
     def ground_truth(

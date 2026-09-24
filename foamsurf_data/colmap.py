@@ -260,6 +260,10 @@ class ColmapDataset:
             fov_x = 2.0 * math.atan(calibration.width / (2.0 * fx))
             fov_y = 2.0 * math.atan(calibration.height / (2.0 * fy))
             alpha = pixels[..., 3:4]
+            if calibration.model not in {'PINHOLE', 'SIMPLE_PINHOLE'}:
+                raise ValueError('Undistort COLMAP images before training (PINHOLE required)')
+            cx, cy = calibration.params[-2:]
+            sx, sy = pixels.shape[1] / calibration.width, pixels.shape[0] / calibration.height
             cameras.append(
                 Camera(
                     name=Path(record.name).stem,
@@ -269,6 +273,7 @@ class ColmapDataset:
                     right=basis[0],
                     down=basis[1],
                     forward=basis[2],
+                    intrinsics=(fx * sx, fy * sy, float(cx) * sx, float(cy) * sy),
                     fov_x=fov_x,
                     fov_y=fov_y,
                     foreground=pixels[..., :3] * alpha,
@@ -294,6 +299,7 @@ class ColmapDataset:
 
     def stacked_training_data(self) -> dict[str, torch.Tensor]:
         return {
+            "intrinsics": torch.tensor([c.intrinsics for c in self.train], dtype=torch.float32, device=self.device),
             "origins": torch.stack([camera.origin for camera in self.train]),
             "rights": torch.stack([camera.right for camera in self.train]),
             "downs": torch.stack([camera.down for camera in self.train]),

@@ -82,6 +82,8 @@ class RandomCameraRaySampler:
             self.data["fov_y"][camera_index : camera_index + 1],
             camera.width,
             camera.height,
+            intrinsics=(self.data['intrinsics'][camera_index:camera_index+1]
+                        if 'intrinsics' in self.data else None),
         )
         foreground = camera.foreground.reshape(-1, 3)[pixel_indices]
         alpha = camera.alpha.reshape(-1, 1)[pixel_indices]
