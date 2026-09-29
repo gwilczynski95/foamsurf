@@ -1,0 +1,26 @@
+base_smoothing: ../rgb_smooth/sweep.yaml
+project: foamsurf_iui3_rgb_conflict
+seeds: [42, 43, 44]
+strengths: [0.3, 1.0, 3.0]
+conflict:
+  overlap_weight: 0.1
+  opacity_weight: 0.01
+  overlap_start: 1000
+  opacity_start: 1000
+  overlap_ramp: 1000
+  opacity_ramp: 1000
+  opacity_threshold: 0.1
+  rays: 128
+  samples: 1024
+  range_multiplier: 8.0
+  band_fraction: 0.02
+  strength_scale: 0.05
+  nearest_workers: 4
+smoothing:
+  attenuation: 0.01
+  backscatter: 0.01
+  color: 0.1
+  coefficient_delta: 0.1
+  color_delta: 0.05
+  epsilon: 0.000001
+  ramp_steps: 250
