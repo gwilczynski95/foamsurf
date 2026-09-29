@@ -1,0 +1,22 @@
+base_smoothing: ../rgb_smooth/sweep.yaml
+project: foamsurf_iui3_rgb_surface
+seeds: [42, 43, 44]
+backgrounds: [white, black]
+overlap_weights: [0.0, 0.03, 0.1]
+# Unit TV is the PREVIOUS strongest TV: (a,b,B)=(.1,.1,1), not (.01,.01,.1).
+tv_multipliers: [0.0, 1.0, 3.0, 10.0]
+overlap:
+  start: 1000
+  ramp_steps: 1000
+  rays: 128
+  range_multiplier: 8.0
+  band_fraction: 0.02
+  optical_scale: 1.0
+smoothing:
+  attenuation: 0.1
+  backscatter: 0.1
+  color: 1.0
+  coefficient_delta: 0.1
+  color_delta: 0.05
+  epsilon: 0.000001
+  ramp_steps: 250
