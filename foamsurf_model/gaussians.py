@@ -40,6 +40,7 @@ class SurfaceGaussianModel(nn.Module):
     ) -> None:
         super().__init__()
         self.appearance_mode = config.appearance
+        self.rgb_activation = config.gaussian_rgb_activation
         self.sh_degree = config.sh_degree
         self.active_sh_degree = config.sh_degree
         self.device = torch.device(device)
@@ -84,7 +85,8 @@ class SurfaceGaussianModel(nn.Module):
         )
 
         if self.appearance_mode == "rgb":
-            appearance_dc = rgb
+            appearance_dc = (torch.logit(rgb.clamp(1.0e-5, 1.0 - 1.0e-5))
+                             if self.rgb_activation == "sigmoid" else rgb)
             appearance_rest = torch.empty(
                 points.shape[0], 3, 0, device=self.device
             )
@@ -155,7 +157,8 @@ class SurfaceGaussianModel(nn.Module):
         self, camera_origin: torch.Tensor | None
     ) -> torch.Tensor:
         if self.appearance_mode == "rgb":
-            return self.appearance
+            return (torch.sigmoid(self.appearance) if self.rgb_activation == "sigmoid"
+                    else self.appearance)
         if camera_origin is None:
             raise ValueError("SH appearance requires a camera origin")
         directions = F.normalize(
@@ -220,6 +223,7 @@ class SurfaceGaussianModel(nn.Module):
     def checkpoint_metadata(self) -> dict[str, object]:
         return {
             "appearance_mode": self.appearance_mode,
+            "rgb_activation": self.rgb_activation,
             "sh_degree": self.sh_degree,
             "active_sh_degree": self.active_sh_degree,
             "point_count": self.point_count,
@@ -245,6 +249,7 @@ class SurfaceGaussianModel(nn.Module):
         instance = cls.__new__(cls)
         nn.Module.__init__(instance)
         instance.appearance_mode = str(metadata["appearance_mode"])
+        instance.rgb_activation = str(metadata.get("rgb_activation", "identity"))
         instance.sh_degree = int(metadata["sh_degree"])
         instance.active_sh_degree = int(
             metadata.get("active_sh_degree", instance.sh_degree)

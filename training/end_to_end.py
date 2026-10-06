@@ -57,10 +57,16 @@ class EndToEndConfig:
         stages = []
         for name in ['warmup', 'joint']:
             section = raw[name]
-            allowed = {'config', 'overrides', 'profile'} if name == 'warmup' else {'config', 'overrides'}
+            allowed = {'config', 'inline', 'overrides', 'profile'} if name == 'warmup' else {'config', 'inline', 'overrides'}
             if set(section)-allowed:
                 raise ValueError(f'Unknown {name} field')
-            config = ExperimentConfig.load(path.parent / section['config'])
+            if ('config' in section) == ('inline' in section):
+                raise ValueError(f'{name} needs exactly one of config or inline')
+            if 'inline' in section:
+                config = ExperimentConfig()
+                update_config(config, section['inline'])
+            else:
+                config = ExperimentConfig.load(path.parent / section['config'])
             update_config(config, raw.get('common', {}))
             update_config(config, section.get('overrides', {}))
             stages.append(config)
@@ -143,7 +149,7 @@ class EndToEndTrainer:
                 if not Path(done['artifact']).is_file():
                     raise FileNotFoundError(f'Missing completed-stage artifact: {done["artifact"]}')
                 continue
-            command = [sys.executable, str(ROOT/'scripts/train_end_to_end.py'),
+            command = [sys.executable, str(ROOT/'train.py'),
                        '--stage', stage, '--output-dir', str(root)]
             print(f'FOAMSURF_STAGE={stage}', flush=True)
             subprocess.run(command, cwd=ROOT, check=True)

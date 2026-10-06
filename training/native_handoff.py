@@ -2,10 +2,16 @@
 from pathlib import Path
 import numpy as np
 import torch
+from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw
+from foamsurf import VoronoiScene
 
 from evaluation.surface_partition import classify, variants, checkpoint_order
 from training.end_to_end import atomic_json
-from training.radfoam_handoff import _surface_orientations, _cells_touching_surface, _inverse_softplus
 
 
 def local_tv(sigma, adjacency, offsets, outer):
@@ -47,8 +53,6 @@ def partition_warmup(root, manifest):
     from training.config import ExperimentConfig
     from training.trainer import Trainer
     from training.checkpoints import save_checkpoint
-    from scripts.analyze_voronoi_warmup import _rays
-    from scripts.compare_surface_partitions import plot_partition
     config = ExperimentConfig.load(root/'warmup.yaml')
     config.output_dir = str(root/'partition/context')
     config.wandb.mode = 'disabled'
@@ -102,7 +106,6 @@ def partition_warmup(root, manifest):
 
 @torch.no_grad()
 def _render_partition(trainer, surface, output, settings):
-    from scripts.analyze_voronoi_warmup import _rays, _masked_scene, _label_scene, _grid, _to_image
     labels = torch.where(torch.as_tensor(surface, device=trainer.device),1,2)
     for i,camera in enumerate(trainer.dataset.test[:settings['image_views']]):
         scenes = [('full warmup',trainer.model.medium.render_scene()),
@@ -179,7 +182,6 @@ def initialize_native_hybrid(root, config, options):
 
 @torch.no_grad()
 def render_transition(trainer, output, settings):
-    from scripts.analyze_voronoi_warmup import _rays, _to_image, _grid
     output.mkdir(exist_ok=True)
     trainer.topology.synchronize_renderer(trainer.renderer,trainer.model.medium)
     medium = trainer.model.medium.render_scene()
@@ -191,3 +193,155 @@ def render_transition(trainer, output, settings):
                              ('Gaussians',dict(gaussians=gaussian)),('retained Voronoi',dict(voronoi=medium))]:
             row.append((title,_to_image(_chunk_image(trainer,rays,settings['batch_size'],**scenes))))
         _grid([row[:2],row[2:]]).save(output/f'view_{i:02d}_initialization.png')
+
+
+
+def _inverse_softplus(value: float) -> float:
+    tensor = torch.tensor(float(value), dtype=torch.float64)
+    return float((tensor + torch.log(-torch.expm1(-tensor))).item())
+
+def _surface_orientations(
+    surface_sites: np.ndarray,
+    selected_sites: np.ndarray,
+    neighbor_count: int,
+) -> np.ndarray:
+    """Estimate a tangent frame with local PCA and return wxyz quaternions."""
+    if surface_sites.shape[0] < 3:
+        result = np.zeros((selected_sites.shape[0], 4), dtype=np.float32)
+        result[:, 0] = 1.0
+        return result
+    count = min(max(3, int(neighbor_count)), surface_sites.shape[0])
+    tree = cKDTree(surface_sites)
+    _, indices = tree.query(selected_sites, k=count, workers=-1)
+    if indices.ndim == 1:
+        indices = indices[:, None]
+    neighbors = surface_sites[indices]
+    centered = neighbors - neighbors.mean(axis=1, keepdims=True)
+    covariance = np.einsum("nki,nkj->nij", centered, centered)
+    _, eigenvectors = np.linalg.eigh(covariance)
+
+    # eigh columns are ordered from the smallest eigenvalue.  The smallest
+    # direction is the surface normal; the two others span the Gaussian disc.
+    normal = eigenvectors[:, :, 0]
+    tangent_x = eigenvectors[:, :, 1]
+    tangent_y = np.cross(normal, tangent_x)
+    tangent_y /= np.linalg.norm(tangent_y, axis=1, keepdims=True).clip(1.0e-12)
+    rotation = np.stack((tangent_x, tangent_y, normal), axis=-1)
+    quaternion_xyzw = Rotation.from_matrix(rotation).as_quat()
+    quaternion_wxyz = quaternion_xyzw[:, [3, 0, 1, 2]]
+    return quaternion_wxyz.astype(np.float32)
+
+def _cells_touching_surface(
+    surface_mask: torch.Tensor,
+    adjacency: torch.Tensor,
+    offsets: torch.Tensor,
+) -> torch.Tensor:
+    """Return retained cells whose original Delaunay star touched SURFACE."""
+    surface_mask = surface_mask.to(device="cpu", dtype=torch.bool)
+    adjacency = adjacency.to(device="cpu", dtype=torch.int64)
+    offsets = offsets.to(device="cpu", dtype=torch.int64)
+    degrees = offsets[1:] - offsets[:-1]
+    rows = torch.repeat_interleave(
+        torch.arange(surface_mask.numel(), dtype=torch.int64), degrees
+    )
+    affected = torch.zeros_like(surface_mask)
+    boundary_edges = surface_mask[adjacency] & ~surface_mask[rows]
+    affected[rows[boundary_edges]] = True
+    return affected
+
+
+def _rays(camera):
+    bundle = camera.rays()
+    return torch.cat((bundle.origins, bundle.directions), dim=-1).contiguous()
+
+def _to_image(tensor):
+    array = (tensor.detach().float().cpu().clamp(0, 1).numpy() * 255).round().astype(np.uint8)
+    return Image.fromarray(array, mode="RGB")
+
+def _titled(image, title, height=32):
+    result = Image.new("RGB", (image.width, image.height + height), "black")
+    result.paste(image, (0, height))
+    draw = ImageDraw.Draw(result)
+    box = draw.textbbox((0, 0), title)
+    draw.text(((image.width - box[2]) // 2, 9), title, fill="white")
+    return result
+
+def _grid(rows):
+    titled = [[_titled(image, title) for title, image in row] for row in rows]
+    width = max(sum(image.width for image in row) for row in titled)
+    height = sum(max(image.height for image in row) for row in titled)
+    result = Image.new("RGB", (width, height), "black")
+    y = 0
+    for row in titled:
+        x = 0
+        row_height = max(image.height for image in row)
+        for image in row:
+            result.paste(image, (x, y))
+            x += image.width
+        y += row_height
+    return result
+
+def _masked_scene(model, labels, label):
+    mask = (labels == label).to(model.medium.densities.dtype)[:, None]
+    return VoronoiScene(model.medium.sites, model.medium.densities * mask,
+                        model.medium.colors)
+
+def _label_scene(model, labels):
+    colors = torch.zeros_like(model.medium.colors)
+    colors[labels == 1] = colors.new_tensor((1.0, 0.05, 0.05))
+    colors[labels == 2] = colors.new_tensor((0.05, 0.25, 1.0))
+    colors[labels == 0] = colors.new_tensor((0.15, 0.15, 0.15))
+    return VoronoiScene(model.medium.sites, model.medium.densities, colors)
+
+def plot_partition(data, result, output):
+    sigma = np.log10(np.maximum(data["sigma"], 1e-12))
+    tv = np.log10(np.maximum(data["local_tv"], 1e-12))
+    active = (~data["outer_mask"]) & (data["contribution"] > 0)
+    fig, axes = plt.subplots(1, 3, figsize=(17, 4.5), constrained_layout=True)
+    for ax, values, title in zip(axes[:2], [sigma, tv],
+                                 ["log10 sigma", "log10 local TV"]):
+        edges = np.histogram_bin_edges(values[active], bins=128)
+        for mask, label, color in [
+            (active & ~result.surface, "NON-SURFACE", "royalblue"),
+            (result.surface, "SURFACE", "tomato"),
+        ]:
+            ax.hist(values[mask], bins=edges, color=color, alpha=.65, label=label)
+        ax.set(xlabel=title, ylabel="Number of active inner cells")
+        ax.legend()
+    threshold = result.info["threshold_log10_tv"]
+    if threshold is not None:
+        axes[1].axvline(threshold, color="black", ls="--", label=f"cut={threshold:.3f}")
+        axes[1].legend()
+    centers = (result.edges[1:] + result.edges[:-1]) / 2
+    axes[2].plot(centers, result.histogram, label="Fit histogram", alpha=.5)
+    axes[2].plot(centers, result.smooth, label="Smoothed histogram")
+    if threshold is not None:
+        axes[2].axvline(threshold, color="black", ls="--")
+    axes[2].set(xlabel="log10 local TV",
+                ylabel=f'Weight (contribution power {result.info["power"]})')
+    axes[2].legend()
+    fig.suptitle(f'{result.info["name"]}: {result.info["status"]} | {result.info["reason"]}')
+    fig.savefig(output / "histograms.png", dpi=140)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
+    ids = np.flatnonzero(active)
+    ids = np.random.default_rng(0).choice(ids, min(len(ids), 20000), replace=False)
+    ax.scatter(sigma[ids], tv[ids], s=1,
+               c=np.where(result.surface[ids], "tomato", "royalblue"), alpha=.3)
+    if result.model is not None:
+        xs = np.linspace(sigma[active].min(), sigma[active].max(), 200)
+        ys = np.linspace(tv[active].min(), tv[active].max(), 200)
+        xx, yy = np.meshgrid(xs, ys)
+        z = np.column_stack((xx.ravel(), yy.ravel()))
+        p = result.model.predict_proba(
+            (z - result.center) / result.scale)[:, result.component].reshape(xx.shape)
+        if p.min() < .5 < p.max():
+            ax.contour(xx, yy, p, levels=[.5], colors="black", linewidths=2)
+        ax.set_title("GMM: black contour = P(SURFACE)=0.5; no scalar cutoff")
+    elif threshold is not None:
+        ax.axhline(threshold, color="black", ls="--")
+        ax.set_title("Black line = TV cutoff")
+    ax.set(xlabel="log10 sigma", ylabel="log10 local TV")
+    fig.savefig(output / "decision_boundary.png", dpi=140)
+    plt.close(fig)

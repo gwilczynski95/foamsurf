@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+import math
+import torch.nn.functional as F
 
 import torch
 from torchmetrics.functional.image import (
@@ -25,7 +27,7 @@ def b0_reconstruction_loss(
     dssim_weight: float = 0.2,
     image_size: tuple[int, int] | None = None,
 ) -> B0Loss:
-    """Unregularized image objective used by B0/B1 ablations."""
+    """Image objective; reg variants use detached prediction weights."""
     rgb_mse = torch.mean((prediction - target) ** 2)
     rgb_l1 = torch.mean(torch.abs(prediction - target))
     psnr = -10.0 * torch.log10(rgb_mse.clamp_min(1.0e-12))
@@ -35,7 +37,8 @@ def b0_reconstruction_loss(
     elif mode == "l1":
         total = rgb_l1
         ssim = rgb_mse.new_tensor(float("nan"))
-    elif mode == "l1_dssim":
+    elif mode in {"l1_dssim", "reg_l1_dssim", "l1_reg_dssim",
+                  "reg_l2_dssim", "reg_l1_reg_dssim", "reg_l2_reg_dssim"}:
         if prediction.ndim == 2 and image_size is not None:
             height, width = image_size
             prediction_image = prediction.reshape(height, width, 3)
@@ -49,12 +52,18 @@ def b0_reconstruction_loss(
             )
         prediction_nchw = prediction_image.permute(2, 0, 1).unsqueeze(0)
         target_nchw = target_image.permute(2, 0, 1).unsqueeze(0)
-        ssim = structural_similarity_index_measure(
-            prediction_nchw, target_nchw, data_range=1.0
-        )
-        total = (1.0 - dssim_weight) * rgb_l1 + dssim_weight * (
-            1.0 - ssim
-        )
+        if mode.endswith("reg_dssim"):
+            weight = (prediction_image.detach() + 1.0e-3).reciprocal()
+            prediction_nchw = (prediction_image * weight).permute(2, 0, 1).unsqueeze(0)
+            target_nchw = (target_image * weight).permute(2, 0, 1).unsqueeze(0)
+        ssim = structural_similarity_index_measure(prediction_nchw, target_nchw, data_range=1.0)
+        if mode.startswith("reg_l1"):
+            pixel = (torch.abs(prediction - target) / (prediction.detach() + 1.0e-3)).mean()
+        elif mode.startswith("reg_l2"):
+            pixel = (((prediction - target) / (prediction.detach() + 1.0e-3)) ** 2).mean()
+        else:
+            pixel = rgb_l1
+        total = (1.0 - dssim_weight) * pixel + dssim_weight * (1.0 - ssim)
     else:
         raise ValueError(f"unknown reconstruction loss: {mode}")
     return B0Loss(
@@ -65,3 +74,195 @@ def b0_reconstruction_loss(
         ssim=ssim,
         gaussian_scale_regularization=rgb_mse.new_zeros(()),
     )
+
+
+
+@dataclass(frozen=True)
+class SmoothConfig:
+    attenuation: float = 0.
+    backscatter: float = 0.
+    color: float = 0.
+    coefficient_delta: float = .1
+    color_delta: float = .05
+    epsilon: float = 1e-6
+    ramp_steps: int = 250
+
+    def __post_init__(self):
+        for name in ('attenuation','backscatter','color'):
+            value=getattr(self,name)
+            if not math.isfinite(value) or value<0:raise ValueError('Invalid smoothing weight')
+        for name in ('coefficient_delta','color_delta','epsilon'):
+            value=getattr(self,name)
+            if not math.isfinite(value) or value<=0:raise ValueError('Invalid smoothing scale')
+        if type(self.ramp_steps) is not int or self.ramp_steps<0:
+            raise ValueError('Invalid smoothing ramp')
+
+    def as_dict(self):return asdict(self)
+
+def smooth_loss(coefficients, colors, first, second, settings, iteration):
+    """Mean over undirected edges AND RGB, all edge weights exactly one.
+
+    No gradient through discrete topology. Actual activated physical coefficients
+    and color are differentiable. Do not smooth raw softplus/DC parameters.
+    """
+    if coefficients.ndim!=2 or coefficients.shape[1]!=6 or colors.shape!=(len(coefficients),3):
+        raise ValueError('Expected activated coefficients [N,6] and colors [N,3]')
+    if first.shape!=second.shape or first.ndim!=1:raise ValueError('Invalid graph edges')
+    zero=coefficients.sum()*0+colors.sum()*0
+    a=b=c=zero
+    if first.numel():
+        def huber(values,delta):
+            difference=values[first]-values[second]
+            return F.huber_loss(difference,torch.zeros_like(difference),delta=delta,reduction='mean')
+        av=coefficients[:,:3] if settings.attenuation else coefficients[:,:3].detach()
+        bv=coefficients[:,3:] if settings.backscatter else coefficients[:,3:].detach()
+        cv=colors if settings.color else colors.detach()
+        a=huber(torch.log(av+settings.epsilon),settings.coefficient_delta)
+        b=huber(torch.log(bv+settings.epsilon),settings.coefficient_delta)
+        c=huber(cv,settings.color_delta)
+    ramp=1. if settings.ramp_steps==0 else min(max(iteration/settings.ramp_steps,0.),1.)
+    total=zero+ramp*(settings.attenuation*a+settings.backscatter*b+settings.color*c)
+    return total,dict(attenuation=a,backscatter=b,color=c,ramp=ramp,edge_count=first.numel())
+
+
+def ramp(iteration, start, duration):
+    if iteration < start: return 0.0
+    if duration == 0: return 1.0
+    return min(max((iteration - start) / duration, 0.0), 1.0)
+
+@dataclass(frozen=True)
+class SurfaceConfig:
+    weight: float = 0.0
+    start: int = 1000
+    ramp_steps: int = 1000
+    rays: int = 128
+    range_multiplier: float = 8.0
+    band_fraction: float = 0.02
+    optical_scale: float = 1.0
+
+    def __post_init__(self):
+        if not math.isfinite(self.weight) or self.weight < 0:
+            raise ValueError('Invalid overlap weight')
+        for name in ('start', 'ramp_steps', 'rays'):
+            if type(getattr(self, name)) is not int or getattr(self, name) < (1 if name == 'rays' else 0):
+                raise ValueError(f'Invalid {name}')
+        for name in ('range_multiplier', 'band_fraction', 'optical_scale'):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f'Invalid {name}')
+        if self.band_fraction > 0.5:
+            raise ValueError('Band must fit inside the ray interval')
+
+    def as_dict(self):
+        return asdict(self)
+
+    def weight_at(self, iteration):
+        return self.weight * ramp(iteration, self.start, self.ramp_steps)
+
+def optical_density(coefficients, colors, scale=1.0):
+    """k = mean_RGB(a + b + b*B) / (3*scale), in inverse scene units.
+
+    Independent a and b terms prevent reducing B alone from removing the loss.
+    This is an auxiliary occupancy field, NOT a new physical renderer model.
+    """
+    if coefficients.ndim != 2 or coefficients.shape[1] != 6 or colors.shape != (len(coefficients), 3):
+        raise ValueError('Expected [N,6] optical coefficients and [N,3] colors')
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError('Invalid optical scale')
+    a, b = coefficients.split(3, dim=-1)
+    return ((a + b + b * colors).mean(-1, keepdim=True) / (3 * scale)).contiguous()
+
+@torch.no_grad()
+def event_moments(depth, alpha, valid, band):
+    """Front-to-back Gaussian weights; exact event depths, no depth bins."""
+    depth = torch.where(valid, depth, torch.full_like(depth, float('inf')))
+    depth, order = depth.sort(dim=-1)
+    alpha = torch.where(valid, alpha, torch.zeros_like(alpha)).gather(-1, order).clamp(0, 1 - 1e-7)
+    depth = torch.where(torch.isfinite(depth), depth, torch.zeros_like(depth))
+    survival = torch.cumprod(1 - alpha, dim=-1)
+    incoming = torch.cat((torch.ones_like(survival[:, :1]), survival[:, :-1]), dim=-1)
+    weights = incoming * alpha
+    opacity = weights.sum(-1)
+    mean = (weights * depth).sum(-1) / opacity.clamp_min(1e-20)
+    variance = (weights * (depth - mean[:, None]).square()).sum(-1) / opacity.clamp_min(1e-20)
+    confidence = opacity * torch.exp(-variance / (band * band))
+    return mean, confidence, opacity
+
+@torch.no_grad()
+def local_rays(rays, depth, band, length):
+    """Constant-length window translated at near/far limits to stay in [0,L]."""
+    direction = torch.nn.functional.normalize(rays[:, 3:], dim=-1)
+    center = depth.clamp(min=band, max=length - band)
+    origin = rays[:, :3] + (center - band)[:, None] * direction
+    return torch.cat((origin, direction), dim=-1).contiguous()
+
+def occupancy_loss(alpha, confidence):
+    # Mean over ALL sampled pixels, including empty Gaussian rays.
+    return (alpha.reshape(-1) * confidence.detach()).mean()
+
+
+@dataclass(frozen=True)
+class CapacityLossConfig:
+    repulsion_weight: float = 0.0
+    repulsion_fraction: float = 0.5
+    repulsion_start: int = 1000
+    repulsion_ramp: int = 3000
+    direct_weight: float = 0.0
+    direct_start: int = 5000
+    direct_ramp: int = 5000
+    alpha_threshold: float = 0.9
+
+    def __post_init__(self):
+        for name in ("repulsion_weight", "direct_weight"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"Invalid {name}")
+        if not 0 < self.repulsion_fraction <= 1:
+            raise ValueError("repulsion_fraction must be in (0, 1]")
+        if not 0 < self.alpha_threshold < 1:
+            raise ValueError("alpha_threshold must be in (0, 1)")
+        for name in ("repulsion_start", "repulsion_ramp", "direct_start", "direct_ramp"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"Invalid {name}")
+
+    def as_dict(self):
+        return asdict(self)
+
+def ramp_weight(weight, iteration, start, duration):
+    if iteration < start:
+        return 0.0
+    return weight * (1.0 if duration == 0 else min((iteration - start) / duration, 1.0))
+
+def repulsion_loss(sites, guard_mask, first, second, bbox_min, bbox_max, fraction):
+    """Penalize only abnormally close non-guard Delaunay neighbors.
+
+    Reference spacing follows volume^(1/3) / N^(1/3), not the current
+    nearest-neighbor median, so a collapsed population cannot shrink its
+    own penalty scale.
+    """
+    if first.numel() == 0:
+        return sites.sum() * 0, sites.new_zeros(())
+    active = ~(guard_mask[first] | guard_mask[second])
+    if not bool(active.any()):
+        return sites.sum() * 0, sites.new_zeros(())
+    count = int((~guard_mask).sum().item())
+    volume = (bbox_max - bbox_min).clamp_min(1.0e-8).prod()
+    spacing = (volume / max(count, 1)).pow(1.0 / 3.0).detach()
+    distances = (sites[first[active]] - sites[second[active]]).norm(dim=-1)
+    normalized = distances / spacing.clamp_min(1.0e-8)
+    short = (normalized < fraction).float().mean().detach()
+    return F.relu(fraction - normalized).square().mean(), short
+
+def masked_direct_consistency(gaussian_image, direct_image, gaussian_alpha, threshold):
+    """Direct is a detached teacher; alpha is a detached selector.
+
+    The caller must detach Gaussian geometry/opacity in the auxiliary render,
+    otherwise the model can evade this appearance-only loss by deleting
+    Gaussians. No selected rays gives exact zero with a valid backward path.
+    """
+    if gaussian_image.shape != direct_image.shape or gaussian_alpha.shape != gaussian_image.shape[:-1] + (1,):
+        raise ValueError("Incompatible direct-consistency shapes")
+    selected = (gaussian_alpha.detach() >= threshold).to(gaussian_image.dtype)
+    difference = F.smooth_l1_loss(gaussian_image, direct_image.detach(), reduction="none")
+    loss = (difference * selected).sum() / (3 * selected.sum().clamp_min(1))
+    return loss, selected.mean().detach()

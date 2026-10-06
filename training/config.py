@@ -32,6 +32,7 @@ class DatasetConfig:
 class ModelConfig:
     medium_type: str = "scalar"
     appearance: str = "rgb"
+    gaussian_rgb_activation: str = "identity"
     sh_degree: int = 3
     gaussian_initial_points: int = 100_000
     gaussian_initial_opacity: float = 0.1
@@ -505,6 +506,10 @@ class ExperimentConfig:
                 )
         if self.model.appearance not in {"rgb", "sh"}:
             raise ValueError("model.appearance must be rgb or sh")
+        if self.model.gaussian_rgb_activation not in {"identity", "sigmoid"}:
+            raise ValueError("model.gaussian_rgb_activation must be identity or sigmoid")
+        if self.model.gaussian_rgb_activation == "sigmoid" and self.model.appearance != "rgb":
+            raise ValueError("sigmoid Gaussian RGB requires model.appearance=rgb")
         if not 0 <= self.model.sh_degree <= 3:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:
@@ -554,9 +559,11 @@ class ExperimentConfig:
             raise ValueError("optimization.iterations must be positive")
         if self.optimization.rays_per_batch < 1:
             raise ValueError("rays_per_batch must be positive")
-        if self.optimization.reconstruction_loss not in {"mse", "l1", "l1_dssim"}:
+        if self.optimization.reconstruction_loss not in {"mse", "l1", "l1_dssim",
+                "reg_l1_dssim", "l1_reg_dssim", "reg_l2_dssim",
+                "reg_l1_reg_dssim", "reg_l2_reg_dssim"}:
             raise ValueError(
-                "optimization.reconstruction_loss must be mse, l1, or l1_dssim"
+                "unknown optimization.reconstruction_loss"
             )
         if not 0.0 <= self.optimization.dssim_weight <= 1.0:
             raise ValueError("optimization.dssim_weight must be in [0, 1]")
