@@ -194,6 +194,8 @@ class Trainer:
                 payload["model"]["medium.bbox_max"],
                 self.device,
             )
+            if self.model.medium.medium_type != config.model.medium_type:
+                raise ValueError("Cannot resume with a different medium_type")
             self.model.load_state_dict(payload["model"], strict=True)
             (
                 self.gaussian_optimizer,

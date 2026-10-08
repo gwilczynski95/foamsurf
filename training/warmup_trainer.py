@@ -4,7 +4,8 @@ Inference/checkpoint model tensors use the original beta=1 format. The exact
 warmup parameterization and optimizer state live in a separate payload field.
 This also gives the existing evaluation/handoff code unchanged physical sigma.
 """
-from dataclasses import replace
+from dataclasses import replace, dataclass
+from functools import lru_cache
 import itertools
 import json
 from pathlib import Path
@@ -26,8 +27,6 @@ from .optimizer import build_medium_optimizer, gradient_norm
 from .sampler import RandomCameraRaySampler
 from .trainer import Trainer
 from .warmup_profile import WarmupProfile, inverse_density, opacity_loss, quantile_loss
-from .warmup_quantiles import render_quantiles
-from .warmup_sampling import MixedRaySampler
 from .warmup_population import WarmupPopulation
 from foamsurf_data.rays import generate_indexed_rays
 
@@ -35,6 +34,11 @@ from foamsurf_data.rays import generate_indexed_rays
 class WarmupMedium(VoronoiMediumModel):
     @property
     def densities(self):
+        values = self.optical_coefficients
+        return values[:, :3].mean(-1, keepdim=True) if self.is_rgb else values
+
+    @property
+    def optical_coefficients(self):
         return self.warmup_scale * F.softplus(self.raw_density, beta=self.warmup_beta)
 
     @property
@@ -137,11 +141,7 @@ class WarmupTrainer(Trainer):
         if profile.site_initialization == "spatial":
             config.model.medium_points = profile.spatial_count
         if profile.site_initialization == "pcd":
-            from .warmup_pcd import pcd_initial_count
-            if config.model.medium_bbox_min is not None or config.model.medium_bbox_max is not None:
-                raise ValueError("PCD warmup requires automatic metadata bounds, not a manual box")
-            config.model.medium_points = (int(payload["config"]["model"]["medium_points"])
-                if payload is not None else pcd_initial_count(config.dataset.source_path))
+            raise ValueError("PCD initialization is not part of the two supported configurations")
         super().__init__(config, resume=resume)
         medium = self.model.medium
         medium.__class__ = WarmupMedium
@@ -150,15 +150,16 @@ class WarmupTrainer(Trainer):
         medium.radfoam_dc = profile.site_initialization in ('pcd', 'spatial')
         if payload is None:
             with torch.no_grad():
-                if profile.site_initialization == "pcd":
-                    from .warmup_pcd import initialize_pcd_medium
-                    initialize_pcd_medium(medium, self.dataset, config, profile)
                 if profile.site_initialization == "random":
                     medium.sites.copy_(medium.bbox_min + torch.rand_like(medium.sites) *
                                        (medium.bbox_max - medium.bbox_min))
                 if profile.site_initialization == "spatial":
-                    from .colmap_initialization import initialize_spatial_medium
                     initialize_spatial_medium(medium, self.dataset, config, profile)
+                if medium.is_rgb:
+                    if profile.site_initialization != "spatial":
+                        raise ValueError("RGB warmup currently requires spatial initialization")
+                    # Matched scalar initialization, independent parameters thereafter.
+                    medium.raw_density = nn.Parameter(medium.raw_density.expand(-1, 6).clone())
                 if profile.site_initialization not in ("pcd", "spatial"):
                     medium.raw_density.fill_(float(inverse_density(torch.tensor(profile.initial_sigma, dtype=torch.float64),
                         profile.density_beta, profile.activation_scale)))
@@ -259,7 +260,7 @@ class WarmupTrainer(Trainer):
             "adaptation_accumulators": {name: getattr(self.voronoi_adaptation, name).detach().cpu()
                 for name in ("contribution", "visibility", "path_length", "weighted_path_length", "max_error", "gradient")}}
         # Legacy analysis and scene initialization see canonical beta=1 tensors.
-        payload["model"]["medium.raw_density"] = inverse_density(medium.densities.detach()).cpu()
+        payload["model"]["medium.raw_density"] = inverse_density(medium.optical_coefficients.detach()).cpu()
         if medium.radfoam_dc:
             payload["warmup"]["raw_color"] = medium.raw_color.detach().cpu()
             payload["warmup"]["color_clipped_values"] = int((medium.colors.detach() > 1).sum())
@@ -461,8 +462,147 @@ class WarmupTrainer(Trainer):
         row.update(self.warmup_metrics)
         medium = self.model.medium
         for name, mask in (("inner", ~medium.outer_mask), ("outer", medium.outer_mask)):
-            for field, values in (("sigma", medium.densities.flatten()), ("raw", medium.raw_density.flatten())):
-                selected = values.detach()[mask]
+            for field, values in (("sigma", medium.densities), ("raw", medium.raw_density)):
+                selected = values.detach()[mask].flatten()
                 for q in (.01, .05, .5, .95, .99):
                     row[f"warmup/{name}_{field}_p{round(100*q)}"] = float(torch.quantile(selected, q)) if selected.numel() else 0.0
         return row
+
+
+
+@lru_cache(maxsize=1)
+def bindings():
+    from torch.utils.cpp_extension import load
+    source = Path(__file__).resolve().parents[1] / "renderer/native/warmup_quantiles.cu"
+    return load(name="foamsurf_warmup_quantiles", sources=[str(source)],
+                extra_cuda_cflags=["-O3", "-lineinfo"], extra_cflags=["-O3"], verbose=True)
+
+class _Quantiles(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, points, sigma, adjacency, offsets, rays, starts, q, settings):
+        tensors = tuple(t.contiguous() for t in (points, sigma, adjacency, offsets, rays, starts, q))
+        depth, owner = bindings().forward(list(tensors), *settings)
+        ctx.save_for_backward(*tensors, depth, owner)
+        ctx.settings = settings
+        ctx.mark_non_differentiable(owner)
+        return depth, owner
+
+    @staticmethod
+    def backward(ctx, grad_depth, grad_owner):
+        *tensors, depth, owner = ctx.saved_tensors
+        pg, dg = bindings().backward(tensors, depth, owner, grad_depth.contiguous(), *ctx.settings)
+        return pg, dg, None, None, None, None, None, None
+
+def render_quantiles(renderer, scene, rays, q, *, gaussians=None):
+    if gaussians is not None:
+        raise ValueError("depth quantiles support Voronoi-only initialization")
+    if rays.requires_grad:
+        raise ValueError("warmup requires fixed camera rays")
+    if q.ndim != 2 or q.shape[0] != rays.reshape(-1, 6).shape[0] or q.shape[1] == 0:
+        raise ValueError("quantiles must have shape [R,Q>0]")
+    if not bool(torch.isfinite(q).all()) or bool(((q <= 0) | (q >= 1)).any()) or bool((q[:, 1:] > q[:, :-1]).any()):
+        raise ValueError("quantiles must be descending and strictly inside (0,1)")
+    if not rays.is_cuda or rays.dtype != torch.float32 or q.device != rays.device or q.dtype != torch.float32:
+        raise ValueError("rays/quantiles must be CUDA float32 on the same device")
+    scene.validate()
+    topology = renderer._voronoi_topology
+    if topology is None or topology.site_data_ptr != scene.sites.data_ptr():
+        raise ValueError("synchronize Voronoi topology first")
+    rays = rays.reshape(-1, 6).contiguous()
+    if rays.shape[0] > renderer.max_batch_size:
+        raise ValueError("too many rays")
+    with torch.no_grad():
+        origins, inverse = torch.unique(rays[:, :3], dim=0, return_inverse=True)
+        starts = renderer._nearest_sites(scene.sites, origins)[inverse].to(torch.uint32)
+    return _Quantiles.apply(scene.sites, scene.densities, topology.adjacency,
+        topology.offsets, rays, starts, q,
+        (renderer.near, renderer.far, renderer.transmittance_threshold, renderer.max_intersections))
+
+
+@dataclass(frozen=True)
+class MixedBatch:
+    rays: object
+    target: torch.Tensor
+    alpha: torch.Tensor
+    camera: object = None
+
+class MixedRaySampler:
+    """Uniform pixels with replacement across all TRAIN views.
+
+    A single index tensor selects ray, RGB and alpha. Uses the checkpointed
+    Torch RNG; no prefetch RNG state or independently shuffled target buffers.
+    """
+    def __init__(self, dataset, rays_per_batch, background):
+        if rays_per_batch < 1 or not dataset.train:
+            raise ValueError("mixed sampler requires rays and train cameras")
+        self.dataset = dataset
+        self.rays_per_batch = int(rays_per_batch)
+        camera = dataset.train[0]
+        self.width, self.height = camera.width, camera.height
+        if any((c.width, c.height) != (self.width, self.height) for c in dataset.train):
+            raise ValueError("mixed sampler requires equal image sizes")
+        self.data = dataset.stacked_training_data()
+        self.background = torch.as_tensor(background, device=dataset.device, dtype=torch.float32)
+        self._camera_stack = []  # checkpoint compatibility; no stack used
+
+    def batch_from_indices(self, indices):
+        data = self.data
+        rays = generate_indexed_rays(
+            indices, data["origins"], data["rights"], data["downs"],
+            data["forwards"], data["fov_x"], data["fov_y"], self.width, self.height, intrinsics=data.get("intrinsics"))
+        alpha = data["alpha"][indices]
+        target = data["foreground"][indices] + self.background * (1 - alpha)
+        return MixedBatch(rays, target, alpha)
+
+    def next(self):
+        count = len(self.dataset.train) * self.width * self.height
+        indices = torch.randint(count, (self.rays_per_batch,), device=self.dataset.device)
+        return self.batch_from_indices(indices)
+
+
+def sample_spatial(points, cameras, count, fraction, extent):
+    points = np.asarray(points, dtype=np.float32)
+    cameras = np.asarray(cameras, dtype=np.float32)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 5:
+        raise ValueError('Need at least five COLMAP points')
+    if cameras.ndim != 2 or cameras.shape[1] != 3 or len(cameras) == 0:
+        raise ValueError('Need camera centers')
+    if not np.isfinite(points).all() or not np.isfinite(cameras).all():
+        raise ValueError('Nonfinite geometry')
+    if count < 32 or not 0 <= fraction <= 1 or not np.isfinite(extent) or extent <= 0:
+        raise ValueError('Invalid spatial initialization')
+    lo = np.minimum(np.percentile(points,1,axis=0),cameras.min(axis=0))
+    hi = np.maximum(np.percentile(points,99,axis=0),cameras.max(axis=0))
+    center = (lo+hi)/2
+    # Axis-aligned Gaussian: one standard deviation is half the robust extent.
+    # extent=1 and 2 give moderate/wide coverage, without clipping to this box.
+    scale = np.maximum((hi-lo)/2,1e-3)*extent
+    n = int(count*fraction)
+    selected = np.random.randint(len(points),size=n)
+    jitter = max(float(np.linalg.norm(hi-lo))*1e-3,1e-5)
+    near = points[selected] + np.random.normal(size=(n,3))*jitter
+    spatial = center + np.random.normal(size=(count-n,3))*scale
+    sites = np.concatenate((near,spatial)).astype(np.float32)
+    return sites, dict(center=center.tolist(),std=scale.tolist(),colmap_count=n,
+                       spatial_count=count-n,jitter=jitter,robust_lower=lo.tolist(),robust_upper=hi.tolist())
+
+@torch.no_grad()
+def initialize_spatial_medium(medium,dataset,config,profile):
+    if dataset.__class__.__name__ != 'ColmapDataset':
+        raise ValueError('Spatial initialization requires COLMAP')
+    if config.model.medium_bbox_min is not None or config.model.medium_bbox_max is not None:
+        raise ValueError('Spatial initialization must not have manual bounds')
+    points,_ = dataset.initial_point_cloud()
+    cameras = torch.stack([c.origin for c in dataset.train]).cpu().numpy()
+    sites, report = sample_spatial(points,cameras,profile.spatial_count,
+                                  profile.spatial_colmap_fraction,profile.spatial_extent)
+    device=medium.sites.device
+    medium.sites=nn.Parameter(torch.as_tensor(sites,device=device))
+    # All are ordinary learnable medium cells, with identical density law.
+    medium.raw_density=nn.Parameter(torch.rand(len(sites),1,device=device))
+    medium.raw_color=nn.Parameter(torch.zeros(len(sites),3,device=device))
+    medium.guard_mask=torch.zeros(len(sites),dtype=torch.bool,device=device)
+    medium.bbox_min=medium.sites.detach().amin(0)
+    medium.bbox_max=medium.sites.detach().amax(0)
+    config.model.medium_points=len(sites)
+    medium.initialization_report=report

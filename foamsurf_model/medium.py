@@ -109,6 +109,9 @@ class VoronoiMediumModel(nn.Module):
     ) -> None:
         super().__init__()
         self.device = torch.device(device)
+        self.medium_type = config.medium_type
+        if self.medium_type not in ("scalar", "rgb_backscatter"):
+            raise ValueError("Unknown medium_type")
         self.register_buffer("bbox_min", lower.to(self.device))
         self.register_buffer("bbox_max", upper.to(self.device))
         guard_mask = torch.zeros(config.medium_points, dtype=torch.bool, device=self.device)
@@ -134,7 +137,7 @@ class VoronoiMediumModel(nn.Module):
             )
 
         raw_density = torch.full(
-            (config.medium_points, 1),
+            (config.medium_points, 6 if self.medium_type == "rgb_backscatter" else 1),
             _inverse_softplus(config.medium_initial_density),
             dtype=torch.float32,
             device=self.device,
@@ -156,6 +159,15 @@ class VoronoiMediumModel(nn.Module):
 
     @property
     def densities(self) -> torch.Tensor:
+        values = self.optical_coefficients
+        return values[:, :3].mean(-1, keepdim=True) if self.is_rgb else values
+
+    @property
+    def is_rgb(self) -> bool:
+        return getattr(self, "medium_type", "scalar") == "rgb_backscatter"
+
+    @property
+    def optical_coefficients(self) -> torch.Tensor:
         return F.softplus(self.raw_density)
 
     @property
@@ -165,6 +177,11 @@ class VoronoiMediumModel(nn.Module):
         return torch.sigmoid(self.raw_color)
 
     def render_scene(self) -> VoronoiScene:
+        if self.is_rgb:
+            from foamsurf.types import RGBVoronoiScene
+            values = self.optical_coefficients
+            return RGBVoronoiScene(self.sites, self.densities, self.colors,
+                                   values[:, :3].contiguous(), values[:, 3:].contiguous())
         return VoronoiScene(
             sites=self.sites,
             densities=self.densities,
@@ -191,7 +208,8 @@ class VoronoiMediumModel(nn.Module):
 
     def checkpoint_metadata(self) -> dict[str, object]:
         return {"point_count": self.point_count, "guard_count": int(self.guard_mask.sum().item()),
-                "color_activation": getattr(self, "color_activation", "sigmoid")}
+                "color_activation": getattr(self, "color_activation", "sigmoid"),
+                "medium_type": getattr(self, "medium_type", "scalar")}
 
     @classmethod
     def from_checkpoint(
@@ -205,6 +223,12 @@ class VoronoiMediumModel(nn.Module):
         instance = cls.__new__(cls)
         nn.Module.__init__(instance)
         instance.device = torch.device(device)
+        instance.medium_type = metadata.get("medium_type", "scalar")
+        if instance.medium_type not in ("scalar", "rgb_backscatter"):
+            raise ValueError("Unknown medium_type in checkpoint")
+        expected = 6 if instance.medium_type == "rgb_backscatter" else 1
+        if state["raw_density"].shape != (int(metadata["point_count"]), expected):
+            raise ValueError("medium coefficient shape disagrees with checkpoint type")
         instance.color_activation = metadata.get("color_activation", "sigmoid")
         if instance.color_activation not in ("sigmoid", "dc"):
             raise ValueError("Unknown medium color activation")

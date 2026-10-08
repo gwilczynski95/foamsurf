@@ -30,7 +30,9 @@ class DatasetConfig:
 
 @dataclass
 class ModelConfig:
+    medium_type: str = "scalar"
     appearance: str = "rgb"
+    gaussian_rgb_activation: str = "identity"
     sh_degree: int = 3
     gaussian_initial_points: int = 100_000
     gaussian_initial_opacity: float = 0.1
@@ -388,6 +390,14 @@ class ExperimentConfig:
         return config
 
     def validate(self) -> None:
+        if self.model.medium_type not in ("scalar", "rgb_backscatter"):
+            raise ValueError("Unknown medium_type")
+        if self.model.medium_type == "rgb_backscatter":
+            if self.radfoam_prior.enabled:
+                raise ValueError("RGB medium does not support scalar RadFoam priors")
+            if any(getattr(self.disentanglement, n) > 0 for n in
+                   ("graph_tv_weight", "density_cap_weight", "optical_thickness_weight", "opaque_if_used_weight")):
+                raise ValueError("Scalar medium regularizers are not calibrated for RGB medium")
         if not self.dataset.source_path:
             raise ValueError("dataset.source_path is required")
         if self.representation_mode not in {"hybrid", "gaussian_only", "voronoi_only"}:
@@ -496,6 +506,10 @@ class ExperimentConfig:
                 )
         if self.model.appearance not in {"rgb", "sh"}:
             raise ValueError("model.appearance must be rgb or sh")
+        if self.model.gaussian_rgb_activation not in {"identity", "sigmoid"}:
+            raise ValueError("model.gaussian_rgb_activation must be identity or sigmoid")
+        if self.model.gaussian_rgb_activation == "sigmoid" and self.model.appearance != "rgb":
+            raise ValueError("sigmoid Gaussian RGB requires model.appearance=rgb")
         if not 0 <= self.model.sh_degree <= 3:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:
@@ -545,9 +559,11 @@ class ExperimentConfig:
             raise ValueError("optimization.iterations must be positive")
         if self.optimization.rays_per_batch < 1:
             raise ValueError("rays_per_batch must be positive")
-        if self.optimization.reconstruction_loss not in {"mse", "l1", "l1_dssim"}:
+        if self.optimization.reconstruction_loss not in {"mse", "l1", "l1_dssim",
+                "reg_l1_dssim", "l1_reg_dssim", "reg_l2_dssim",
+                "reg_l1_reg_dssim", "reg_l2_reg_dssim"}:
             raise ValueError(
-                "optimization.reconstruction_loss must be mse, l1, or l1_dssim"
+                "unknown optimization.reconstruction_loss"
             )
         if not 0.0 <= self.optimization.dssim_weight <= 1.0:
             raise ValueError("optimization.dssim_weight must be in [0, 1]")

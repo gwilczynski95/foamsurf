@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from .types import GaussianScene, HybridRender, VoronoiScene
+from .types import GaussianScene, HybridRender, VoronoiScene, RGBVoronoiScene
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class NativeDiagnostics:
     ray: torch.Tensor
     gaussian: torch.Tensor
     medium: torch.Tensor
+    semantics: str = "scalar_compositing_weights"
 
     @property
     def gaussian_weight(self) -> torch.Tensor:
@@ -69,6 +70,9 @@ class NativeHybridRender:
     hit_indices: torch.Tensor
     num_intersections: torch.Tensor
     diagnostics: NativeDiagnostics | None = None
+    direct: torch.Tensor | None = None
+    backscatter: torch.Tensor | None = None
+    direct_transmittance: torch.Tensor | None = None
 
     def as_common(self) -> HybridRender:
         return HybridRender(
@@ -471,7 +475,17 @@ class NativeHybridRenderer:
                 ray_count,
             )
 
-        rgba, num_intersections = _HybridCudaFunction.apply(
+        compositor = _HybridCudaFunction.apply
+        rgb_parts = None
+        if isinstance(voronoi, RGBVoronoiScene):
+            from .rgb_medium import compose_cuda
+            def compositor(*args):
+                nonlocal rgb_parts
+                rgba_out, counts, rgb_parts = compose_cuda(
+                    _HybridCudaFunction.apply, args, voronoi.attenuation, voronoi.backscatter)
+                return rgba_out, counts
+
+        rgba, num_intersections = compositor(
             self._bindings,
             points,
             densities,
@@ -514,7 +528,8 @@ class NativeHybridRenderer:
                 ray_stats, gaussian_stats, medium_stats = (
                     self._bindings.hybrid_diagnostics(
                         [
-                            points, densities, medium_colors, adjacency, offsets,
+                            points, (torch.maximum(voronoi.attenuation, voronoi.backscatter).mean(-1, keepdim=True).contiguous()
+                                     if rgb_parts is not None else densities), medium_colors, adjacency, offsets,
                             rays, start_points, hit_depths, hit_indices, means,
                             log_scales, quaternions, colors, opacity, kappa,
                             background_tensor,
@@ -526,10 +541,14 @@ class NativeHybridRenderer:
                         self.max_intersections,
                     )
                 )
+            if rgb_parts is not None:
+                ray_stats[:, 7] = torch.maximum(ray_stats[:, 7],
+                    (num_intersections.reshape(-1).to(torch.int64) >= self.max_intersections).float())
             diagnostics = NativeDiagnostics(
                 ray=ray_stats.reshape(*leading_shape, 8),
                 gaussian=gaussian_stats.reshape(-1, 4),
                 medium=medium_stats.reshape(-1, 5),
+                semantics=("max_rgb_coefficient_proxy" if rgb_parts is not None else "scalar_compositing_weights"),
             )
 
         if hit_depths.size(0):
@@ -567,6 +586,9 @@ class NativeHybridRenderer:
             hit_indices=hit_indices,
             num_intersections=num_intersections.reshape(*leading_shape, 1),
             diagnostics=diagnostics,
+            direct=None if rgb_parts is None else rgb_parts[0].reshape(*leading_shape, 3),
+            backscatter=None if rgb_parts is None else rgb_parts[1].reshape(*leading_shape, 3),
+            direct_transmittance=None if rgb_parts is None else rgb_parts[2].reshape(*leading_shape, 3),
         )
 
     def render_gaussians(

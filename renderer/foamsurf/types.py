@@ -96,10 +96,26 @@ class VoronoiScene:
 
 
 @dataclass(frozen=True)
+class RGBVoronoiScene(VoronoiScene):
+    """densities is mean attenuation, an auxiliary population/quantile proxy."""
+    attenuation: torch.Tensor
+    backscatter: torch.Tensor
+
+    def validate(self) -> None:
+        super().validate()
+        for name, value in (("attenuation", self.attenuation), ("backscatter", self.backscatter)):
+            _require_matrix(name, value, 3)
+            _require_finite(name, value)
+            if value.shape != self.colors.shape or value.device != self.sites.device or value.dtype != self.sites.dtype:
+                raise ValueError(f"{name} shape/device/dtype mismatch")
+            if bool((value < 0).any()):
+                raise ValueError(f"{name} must be nonnegative")
+
+
+@dataclass(frozen=True)
 class HybridRender:
     image: torch.Tensor
     alpha: torch.Tensor
     transmittance: torch.Tensor
     surface_depth: torch.Tensor
     surface_index: torch.Tensor
-
