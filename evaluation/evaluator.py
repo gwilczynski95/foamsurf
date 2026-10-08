@@ -236,6 +236,18 @@ class Evaluator:
                     "gaussian_only_ssim": float(
                         ssim(gaussian_image, target).item()
                     ),
+                    "gaussian_raw_over_1_fraction": float(
+                        (gaussian.image > 1.0).any(dim=-1).float().mean().item()
+                    ),
+                    "gaussian_raw_max": float(gaussian.image.max().item()),
+                    "gaussian_near_white_on_covered": float(
+                        (
+                            (gaussian_image >= 0.95).all(dim=-1)
+                            & (gaussian.alpha[..., 0] > 0.5)
+                        ).float().sum().div(
+                            (gaussian.alpha[..., 0] > 0.5).float().sum().clamp_min(1)
+                        ).item()
+                    ),
                     "voronoi_only_psnr": medium_psnr,
                     "voronoi_only_ssim": float(
                         ssim(medium_image, target).item()
@@ -574,6 +586,12 @@ class Evaluator:
                 / summary["eval/voronoi_render_seconds"],
                 "model/gaussian_count": self.model.gaussians.point_count,
                 "model/voronoi_count": self.model.medium.point_count,
+                "model/medium_color_max": float(
+                    self.model.medium.colors.max().item()
+                ),
+                "model/medium_color_over_1_fraction": float(
+                    (self.model.medium.colors > 1.0).any(dim=-1).float().mean().item()
+                ),
             }
         )
 

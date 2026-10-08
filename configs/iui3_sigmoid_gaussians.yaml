@@ -1,0 +1,7 @@
+# IUI3 A4 with bounded Gaussian RGB and the original DC Voronoi color.
+# Override --output-dir for each new experiment to avoid reusing outputs.
+base_config: iui3_5k.yaml
+output_dir: outputs/iui3_sigmoid/gaussian_sigmoid
+gaussian_rgb_activation: sigmoid
+medium_color_activation: dc
+wandb_project: foamsurf_iui3_sigmoid

@@ -18,11 +18,60 @@ from training.end_to_end import EndToEndConfig, EndToEndTrainer, atomic_json, up
 ROOT = Path(__file__).resolve().parent
 
 
-def resolve_iui3(config_path, output_dir):
+def load_iui3_source(config_path):
+    """Load the full IUI3 YAML or a small, explicit variant of it."""
+    path = Path(config_path)
+    raw = yaml.safe_load(path.read_text())
+    if "base_config" not in raw:
+        return raw, {}
+    allowed = {"base_config", "output_dir", "gaussian_rgb_activation",
+               "medium_color_activation", "wandb_project"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported IUI3 variant fields: {sorted(unknown)}")
+    base = yaml.safe_load((path.parent / raw["base_config"]).read_text())
+    if "capacity_loss" not in base or "base_config" in base:
+        raise ValueError("IUI3 variant must reference a full IUI3 configuration")
+    return base, raw
+
+
+def resolve_iui3(
+    config_path,
+    output_dir,
+    gaussian_rgb_activation=None,
+    medium_color_activation=None,
+    wandb_project=None,
+):
     """Resolve a standalone IUI3 manifest without importing any experiment package."""
-    source = yaml.safe_load(Path(config_path).read_text())
+    source, variant = load_iui3_source(config_path)
+    gaussian_rgb_activation = (gaussian_rgb_activation if gaussian_rgb_activation is not None
+                               else variant.get("gaussian_rgb_activation"))
+    medium_color_activation = (medium_color_activation if medium_color_activation is not None
+                               else variant.get("medium_color_activation"))
+    wandb_project = wandb_project if wandb_project is not None else variant.get("wandb_project")
     if source.get("warmup_steps") != 0:
         raise ValueError("IUI3 joint training currently requires zero warmup")
+    if gaussian_rgb_activation not in (None, "identity", "sigmoid"):
+        raise ValueError("Gaussian RGB activation must be identity or sigmoid")
+    if medium_color_activation not in (None, "dc", "sigmoid"):
+        raise ValueError("medium color activation must be dc or sigmoid")
+    if gaussian_rgb_activation is not None:
+        source["joint"]["model"]["gaussian_rgb_activation"] = gaussian_rgb_activation
+        source["variant"]["gaussian_rgb_activation"] = gaussian_rgb_activation
+    if medium_color_activation is not None:
+        source["medium_color_activation"] = medium_color_activation
+    if gaussian_rgb_activation is not None or medium_color_activation is not None:
+        gaussian = source["joint"]["model"]["gaussian_rgb_activation"]
+        medium = source.get("medium_color_activation", "dc")
+        suffix = f"-g_{gaussian}-m_{medium}"
+        source["joint"]["experiment_name"] += suffix
+        source["joint"]["wandb"]["name"] += suffix
+        # The zero-step initialization has no metrics worth publishing.
+        source["warmup"]["wandb"]["mode"] = "disabled"
+    if wandb_project is not None:
+        if not wandb_project:
+            raise ValueError("W&B project must not be empty")
+        source["joint"]["wandb"]["project"] = wandb_project
     root = Path(output_dir).resolve()
     source["output_dir"] = str(root)
     for stage in ("warmup", "joint"):
@@ -79,6 +128,9 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--stage", choices=("warmup", "partition", "joint"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--gaussian-rgb-activation", choices=("identity", "sigmoid"))
+    parser.add_argument("--medium-color-activation", choices=("dc", "sigmoid"))
+    parser.add_argument("--wandb-project")
     args = parser.parse_args()
     if args.stage:
         if not args.output_dir:
@@ -97,13 +149,21 @@ def main():
         parser.error("--config is required")
     raw = yaml.safe_load(args.config.read_text())
     output = args.output_dir or Path(raw["output_dir"])
-    if "capacity_loss" in raw:
-        manifest = resolve_iui3(args.config, output)
+    if "capacity_loss" in raw or "base_config" in raw:
+        manifest = resolve_iui3(
+            args.config,
+            output,
+            gaussian_rgb_activation=args.gaussian_rgb_activation,
+            medium_color_activation=args.medium_color_activation,
+            wandb_project=args.wandb_project,
+        )
         if args.dry_run:
             print(json.dumps(manifest, indent=2))
         else:
             fit_iui3(manifest, resume=args.resume)
     else:
+        if any((args.gaussian_rgb_activation, args.medium_color_activation, args.wandb_project)):
+            parser.error("color activation overrides are supported only for IUI3")
         config = EndToEndConfig.load(args.config, output_dir=output)
         if args.dry_run:
             print(json.dumps(config.manifest(), indent=2))
