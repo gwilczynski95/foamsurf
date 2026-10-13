@@ -23,6 +23,9 @@
 # Backscatter chroma prior and stronger cell-color smoothing for B0, BLACK background (11 runs):
 #   smoke=$(sbatch --parsable scripts/smoke_tests.sbatch)
 #   FS_VARIANT_SET=chroma sbatch --dependency=afterok:$smoke --array=0-10%7 scripts/sweep_medium_fix.sbatch
+# Seabed coverage from the default B0_chroma100_bk, BLACK background (22 runs):
+#   smoke=$(sbatch --parsable scripts/smoke_tests.sbatch)
+#   FS_VARIANT_SET=seabed sbatch --dependency=afterok:$smoke --array=0-21%7 scripts/sweep_medium_fix.sbatch
 # Both stage A and prox in one array (30 runs):
 #   FS_VARIANT_SET=stageA_prox sbatch --array=0-29%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
@@ -70,7 +73,15 @@ for setting in chroma001 chroma010 chroma100 csmooth10 csmooth100; do
   CHROMA_VARIANTS+=("B0_${setting}_bk" "B0_${setting}_bk_seed43")
 done
 CHROMA_VARIANTS+=(B0_in50r_chroma010_bk)
-ALL_VARIANTS=("${VARIANTS[@]}" "${BOX_VARIANTS[@]}" "${STAGEA_VARIANTS[@]}" "${PROX_VARIANTS[@]}" "${CHROMA_VARIANTS[@]}")
+# On top of the default B0_chroma100_bk: _kappa<N> initial Gaussian edge sharpness N;
+# _scov<NNN> one-sided seabed coverage weight NNN/100; _under<NNN> under-seabed medium
+# penalty weight NNN/100; _scale0dens2 no Gaussian size penalty + densify threshold 2e-4.
+SEABED_VARIANTS=()
+for setting in kappa2 kappa4 scov001 scov010 scov100 scov200 under001 under010 under100 under200 scale0dens2; do
+  SEABED_VARIANTS+=("B0_chroma100_${setting}_bk" "B0_chroma100_${setting}_bk_seed43")
+done
+ALL_VARIANTS=("${VARIANTS[@]}" "${BOX_VARIANTS[@]}" "${STAGEA_VARIANTS[@]}" "${PROX_VARIANTS[@]}"
+              "${CHROMA_VARIANTS[@]}" "${SEABED_VARIANTS[@]}")
 case "${FS_VARIANT_SET:-main}" in
   main) ;;
   box) VARIANTS=("${BOX_VARIANTS[@]}") ;;
@@ -78,6 +89,7 @@ case "${FS_VARIANT_SET:-main}" in
   prox) VARIANTS=("${PROX_VARIANTS[@]}") ;;
   stageA_prox) VARIANTS=("${STAGEA_VARIANTS[@]}" "${PROX_VARIANTS[@]}") ;;
   chroma) VARIANTS=("${CHROMA_VARIANTS[@]}") ;;
+  seabed) VARIANTS=("${SEABED_VARIANTS[@]}") ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 
@@ -101,6 +113,25 @@ variant_overrides() {
   if [[ "$name" =~ ^(.+)_ring$ ]]; then
     variant_overrides "${BASH_REMATCH[1]}" || return
     echo "medium_fix.proximity_neighbors=true"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_kappa([0-9]+)$ ]]; then
+    local value=${BASH_REMATCH[2]}
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "joint.model.gaussian_initial_kappa=$value.0"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_(scov|under)([0-9]{3})$ ]]; then
+    local value=$(( 10#${BASH_REMATCH[3]} )) key=surface_coverage_weight
+    [[ "${BASH_REMATCH[2]}" == under ]] && key=under_surface_weight
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    printf 'medium_fix.%s=%d.%02d\n' "$key" $(( value / 100 )) $(( value % 100 ))
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_scale0dens2$ ]]; then
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "joint.optimization.gaussian_scale_regularization=0.0"
+    echo "joint.gaussian_adaptation.gradient_threshold=0.0002"
     return 0
   fi
   if [[ "$name" =~ ^(.+)_chroma([0-9]{3})$ ]]; then

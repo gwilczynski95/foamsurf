@@ -540,3 +540,79 @@ def test_default_config_equals_sweep_run_b0_chroma100_bk(tmp_path):
     assert default["profile"].get("spatial_distribution", "normal") == "normal"
     later = resolve_iui3(ROOT / "configs/iui3_default.yaml", output, overrides=["medium_fix.chroma_weight=3.0"])
     assert later["medium_fix"]["chroma_weight"] == 3.0  # command line wins over the file
+
+
+def test_surface_coverage_loss_is_one_sided():
+    from training.losses import surface_coverage_loss
+
+    alpha = torch.tensor([0.0, 0.3, 0.6, 0.9, 1.0], requires_grad=True)
+    loss, fraction = surface_coverage_loss(alpha, 0.5)
+    assert float(loss) == pytest.approx((0.4 + 0.1 + 0.0) / 3)
+    assert fraction == pytest.approx(3 / 5)
+    loss.backward()
+    # Only rays above the threshold are pushed, and only upward (gradient of loss < 0).
+    assert alpha.grad[:2].abs().max() == 0
+    assert bool((alpha.grad[2:] < 0).all())
+    empty, empty_fraction = surface_coverage_loss(torch.tensor([0.1, 0.2]), 0.5)
+    assert float(empty) == 0 and empty_fraction == 0
+
+
+def test_under_surface_loss_and_opaque_depth():
+    from training.losses import under_surface_loss
+    from training.surface_depth import opaque_depth
+
+    backscatter = torch.tensor([[0.3, 0.3, 0.3], [0.0, 0.0, 0.0]], requires_grad=True)
+    loss = under_surface_loss(backscatter)
+    assert float(loss) == pytest.approx(0.15)
+    loss.backward()
+    assert bool((backscatter.grad > 0).all())
+    assert float(under_surface_loss(torch.zeros(0, 3))) == 0
+    inf = float("inf")
+    # Ray 0: two 0.4 hits -> T = 0.6 then 0.36 -> opaque at the 2nd hit (depth 3).
+    # Ray 1: single 0.9 hit at depth 5. Ray 2: never opaque.
+    depth = torch.tensor([[2.0, 5.0, 1.0], [3.0, inf, inf], [inf, inf, inf]])
+    alpha = torch.tensor([[0.4, 0.9, 0.2], [0.4, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    surface, found = opaque_depth(depth, alpha, 0.5)
+    assert found.tolist() == [True, True, False]
+    assert surface[:2].tolist() == [3.0, 5.0] and surface[2] == inf
+
+
+def test_seabed_config_validation(tmp_path):
+    from training.losses import MediumFixConfig
+
+    config = MediumFixConfig(surface_coverage_weight=2.0, under_surface_weight=1.0)
+    assert config.surface_coverage_weight_at(500) == 0
+    assert config.under_surface_weight_at(1500) == pytest.approx(0.5)
+    for bad in (dict(surface_coverage_weight=-1), dict(under_surface_threshold=1.0),
+                dict(surface_coverage_ramp=-1), dict(under_surface_offset=-0.1)):
+        with pytest.raises(ValueError):
+            MediumFixConfig(**bad)
+    m = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "s",
+                     overrides=["joint.model.gaussian_initial_kappa=4.0", "medium_fix.under_surface_weight=0.1"])
+    assert m["joint"]["model"]["gaussian_initial_kappa"] == 4.0
+    assert m["medium_fix"]["under_surface_weight"] == pytest.approx(0.1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+def test_seabed_priors_short_real_training(tmp_path):
+    m = _short_manifest(tmp_path, "seabed", [
+        "medium_fix.chroma_weight=1.0", "medium_fix.chroma_start=0", "medium_fix.chroma_ramp=0",
+        "medium_fix.coverage_rays=64",
+        "medium_fix.surface_coverage_weight=1.0", "medium_fix.surface_coverage_start=0",
+        "medium_fix.surface_coverage_ramp=0", "medium_fix.surface_coverage_threshold=0.01",
+        "medium_fix.under_surface_weight=1.0", "medium_fix.under_surface_start=0",
+        "medium_fix.under_surface_ramp=0", "medium_fix.under_surface_threshold=0.99",
+        "joint.model.gaussian_initial_kappa=4.0",
+        "warmup.background=[0.0, 0.0, 0.0]", "joint.background=[0.0, 0.0, 0.0]",
+    ])
+    fit_iui3(m)
+    fit_iui3(m, resume=True)
+    root = tmp_path / "seabed"
+    rows = list(csv.DictReader((root / "joint/metrics/train.csv").open()))
+    assert len(rows) == 4
+    assert all(float(row["medium_fix/surface_coverage_weight"]) == 1.0 for row in rows)
+    assert all(float(row["medium_fix/under_surface_weight"]) == 1.0 for row in rows)
+    assert all(0 <= float(row["medium_fix/under_surface_ray_fraction"]) <= 1 for row in rows)
+    checkpoint = torch.load(root / "joint/checkpoints/initialization.pt", map_location="cpu", weights_only=False)
+    kappa = 1 + torch.nn.functional.softplus(checkpoint["model"]["gaussians.raw_kappa"])
+    assert torch.allclose(kappa, torch.full_like(kappa, 4.0), atol=1e-4)

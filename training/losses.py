@@ -293,6 +293,19 @@ class MediumFixConfig:
     chroma_alpha_threshold: float = 0.5
     chroma_water_alpha: float = 0.01
     chroma_ema: float = 0.99
+    # One-sided coverage: on rays already covered more than surface_coverage_threshold
+    # by Gaussians, penalize the uncovered rest (1 - alpha). Open-water rays are untouched.
+    surface_coverage_weight: float = 0.0
+    surface_coverage_start: int = 1000
+    surface_coverage_ramp: int = 1000
+    surface_coverage_threshold: float = 0.5
+    # Medium under the seabed: render the medium alone from just behind the depth
+    # where Gaussians become opaque and penalize any backscatter produced there.
+    under_surface_weight: float = 0.0
+    under_surface_start: int = 1000
+    under_surface_ramp: int = 1000
+    under_surface_threshold: float = 0.5
+    under_surface_offset: float = 0.01
 
     def __post_init__(self):
         if self.color_mode not in ('per_cell', 'global'):
@@ -319,6 +332,17 @@ class MediumFixConfig:
             raise ValueError('medium_fix needs 0 < chroma_water_alpha < chroma_alpha_threshold < 1')
         if not 0 <= self.chroma_ema < 1:
             raise ValueError('medium_fix.chroma_ema must be in [0, 1)')
+        for prefix in ('surface_coverage', 'under_surface'):
+            weight = getattr(self, f'{prefix}_weight')
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(f'Invalid medium_fix.{prefix}_weight')
+            for name in (f'{prefix}_start', f'{prefix}_ramp'):
+                if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                    raise ValueError(f'Invalid medium_fix.{name}')
+            if not 0 < getattr(self, f'{prefix}_threshold') < 1:
+                raise ValueError(f'medium_fix.{prefix}_threshold must be in (0, 1)')
+        if not math.isfinite(self.under_surface_offset) or self.under_surface_offset < 0:
+            raise ValueError('medium_fix.under_surface_offset must be non-negative')
         if not math.isfinite(self.coverage_weight) or self.coverage_weight < 0:
             raise ValueError('Invalid coverage weight')
         for name in ('coverage_start', 'coverage_ramp', 'coverage_rays'):
@@ -334,6 +358,14 @@ class MediumFixConfig:
 
     def chroma_weight_at(self, iteration):
         return ramp_weight(self.chroma_weight, iteration, self.chroma_start, self.chroma_ramp)
+
+    def surface_coverage_weight_at(self, iteration):
+        return ramp_weight(self.surface_coverage_weight, iteration, self.surface_coverage_start,
+                           self.surface_coverage_ramp)
+
+    def under_surface_weight_at(self, iteration):
+        return ramp_weight(self.under_surface_weight, iteration, self.under_surface_start,
+                           self.under_surface_ramp)
 
 
 def coverage_binarization_loss(alpha):
@@ -381,3 +413,24 @@ def backscatter_chroma_loss(backscatter, gaussian_alpha, water, alpha_threshold=
     weight = weight / weight.mean().clamp_min(1e-8)
     angle = float(torch.rad2deg(torch.acos(cosine.detach())).mul(weight).mean())
     return (weight * excess).mean(), angle
+
+
+def surface_coverage_loss(alpha, threshold=0.5):
+    """Mean (1 - A) over rays whose Gaussian-only alpha A already exceeds ``threshold``.
+
+    Pushes partly covered seabed rays to full coverage; rays below the
+    threshold (open water, silhouettes) get no gradient. Returns (loss, fraction).
+    """
+    alpha = alpha.reshape(-1)
+    selected = alpha.detach() > threshold
+    if not bool(selected.any()):
+        return alpha.sum() * 0, 0.0
+    return (1 - alpha[selected]).mean(), float(selected.float().mean())
+
+
+def under_surface_loss(backscatter):
+    """Mean backscatter intensity produced behind the opaque Gaussian surface."""
+    backscatter = backscatter.reshape(-1, 3)
+    if backscatter.shape[0] == 0:
+        return backscatter.sum() * 0
+    return backscatter.mean()

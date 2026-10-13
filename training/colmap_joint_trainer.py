@@ -12,7 +12,9 @@ from training.end_to_end import atomic_json
 from training.disentanglement import undirected_edges
 from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
     CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency,
-    MediumFixConfig, coverage_binarization_loss, water_direction, backscatter_chroma_loss)
+    MediumFixConfig, coverage_binarization_loss, water_direction, backscatter_chroma_loss,
+    surface_coverage_loss, under_surface_loss)
+from training.surface_depth import opaque_depth, sorted_hit_alphas
 from training.surface import LocalOverlap
 from training.proximity import damp_step, proximity_multiplier, surface_cell_mask
 from training.surface import install_coverage
@@ -277,7 +279,10 @@ MEDIUM_FIX_METRICS = tuple("medium_fix/" + name for name in (
     "global_color_r", "global_color_g", "global_color_b"))
 
 
-# Present only when the chroma prior is enabled, so earlier runs keep their CSV columns.
+# Present only when the matching prior is enabled, so earlier runs keep their CSV columns.
+SURFACE_METRICS = tuple("medium_fix/" + name for name in (
+    "surface_coverage_weight", "surface_coverage_raw", "surface_coverage_ray_fraction",
+    "under_surface_weight", "under_surface_raw", "under_surface_ray_fraction"))
 CHROMA_METRICS = tuple("medium_fix/" + name for name in (
     "chroma_weight", "chroma_raw", "chroma_angle_degrees",
     "water_direction_r", "water_direction_g", "water_direction_b"))
@@ -303,6 +308,10 @@ class MediumFixTrainer(CapacityTrainer):
         self.water_ema = None
         self.chroma_metrics = ({name: float("nan") for name in CHROMA_METRICS}
                                if self.medium_fix.chroma_weight > 0 else {})
+        self.surface_metrics_enabled = (self.medium_fix.surface_coverage_weight > 0
+                                        or self.medium_fix.under_surface_weight > 0)
+        self.seabed_metrics = ({name: float("nan") for name in SURFACE_METRICS}
+                               if self.surface_metrics_enabled else {})
         super().__init__(config, *args, **kwargs)
         if self.medium_fix.chroma_weight > 0 and not self.model.medium.is_rgb:
             raise ValueError("Backscatter chroma prior requires the RGB medium")
@@ -347,7 +356,13 @@ class MediumFixTrainer(CapacityTrainer):
             if self.chroma_metrics:
                 self.chroma_metrics = {name: float("nan") for name in CHROMA_METRICS}
                 self.chroma_metrics["medium_fix/chroma_weight"] = chroma
-            if not (weight or chroma):
+            cover = self.medium_fix.surface_coverage_weight_at(iteration)
+            under = self.medium_fix.under_surface_weight_at(iteration)
+            if self.surface_metrics_enabled:
+                self.seabed_metrics = {name: float("nan") for name in SURFACE_METRICS}
+                self.seabed_metrics.update({"medium_fix/surface_coverage_weight": cover,
+                                            "medium_fix/under_surface_weight": under})
+            if not (weight or chroma or cover or under):
                 return result
             if self._captured_coverage is None:
                 raise RuntimeError("No hybrid training render captured")
@@ -378,6 +393,16 @@ class MediumFixTrainer(CapacityTrainer):
                 if self.water_ema is not None:
                     for channel, value in zip("rgb", self.water_ema.tolist()):
                         self.chroma_metrics[f"medium_fix/water_direction_{channel}"] = value
+            if cover:
+                cover_raw, fraction = surface_coverage_loss(only.alpha, self.medium_fix.surface_coverage_threshold)
+                total = total + cover * cover_raw
+                self.seabed_metrics.update({"medium_fix/surface_coverage_raw": float(cover_raw.detach()),
+                                            "medium_fix/surface_coverage_ray_fraction": fraction})
+            if under:
+                under_raw, fraction = self._under_surface(rays[selected], only, model)
+                total = total + under * under_raw
+                self.seabed_metrics.update({"medium_fix/under_surface_raw": float(under_raw.detach()),
+                                            "medium_fix/under_surface_ray_fraction": fraction})
             if not weight:
                 return replace(result, total=total)
             raw = coverage_binarization_loss(only.alpha)
@@ -414,6 +439,25 @@ class MediumFixTrainer(CapacityTrainer):
             self._surface_mask_key = key
         return self._surface_mask
 
+    def _under_surface(self, rays, only, model):
+        """Backscatter of the medium alone behind the opaque Gaussian surface."""
+        with torch.no_grad():
+            origins = rays[:, :3]
+            directions = torch.nn.functional.normalize(rays[:, 3:], dim=-1)
+            depth, alpha, _ = sorted_hit_alphas(model.gaussians, only.hit_depths, only.hit_indices, origins,
+                                                directions, self.config.renderer.gaussian_radius_squared)
+            surface, found = opaque_depth(depth, alpha, self.medium_fix.under_surface_threshold)
+            start = surface[found] + self.medium_fix.under_surface_offset
+            under_rays = torch.cat((origins[found] + start[:, None] * directions[found], directions[found]),
+                                   dim=-1).contiguous()
+        fraction = float(found.float().mean())
+        if under_rays.shape[0] == 0:
+            return model.medium.raw_density.sum() * 0, fraction
+        behind = self.renderer.render(under_rays, voronoi=model.medium.render_scene(), background=(0.0, 0.0, 0.0))
+        if behind.backscatter is None:
+            raise RuntimeError("Under-surface prior requires the RGB medium")
+        return under_surface_loss(behind.backscatter), fraction
+
     def _install_proximity_damping(self):
         optimizer = self.medium_optimizer
         original_step = optimizer.step
@@ -445,7 +489,7 @@ class MediumFixTrainer(CapacityTrainer):
 
     def _training_row(self, *args):
         return {**super()._training_row(*args), **self.medium_fix_metrics, **self.proximity_metrics,
-                **self.chroma_metrics}
+                **self.chroma_metrics, **self.seabed_metrics}
 
     def _checkpoint(self, path, iteration):
         super()._checkpoint(path, iteration)

@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from training.config import ExperimentConfig  # noqa: E402
 from training.losses import backscatter_chroma_loss, water_direction  # noqa: E402
+from training.surface_depth import sorted_hit_alphas as gaussian_hits  # noqa: E402
 from training.trainer import Trainer  # noqa: E402
 
 BOTTOM_FRACTION = 0.4
@@ -39,31 +40,6 @@ def nearest_cell(points, sites):
     for start in range(0, points.shape[0], 60000):
         out[start:start + 60000] = torch.cdist(points[start:start + 60000], sites).argmin(1)
     return out
-
-
-def gaussian_hits(gaussians, hit_depths, hit_indices, origins, directions, radius_squared):
-    """Planar Gaussian alpha, same formula as renderer/foamsurf/hybrid.py."""
-    valid = hit_indices >= 0
-    index = hit_indices.clamp_min(0).long()
-    q = F.normalize(gaussians.quaternions.detach(), dim=-1)
-    a, b, c, d = q.unbind(-1)
-    rows = torch.stack((1 - 2 * (c * c + d * d), 2 * (b * c + a * d), 2 * (b * d - a * c),
-                        2 * (b * c - a * d), 1 - 2 * (b * b + d * d), 2 * (c * d + a * b)),
-                       -1).reshape(-1, 2, 3)
-    local = origins[None] + hit_depths[..., None] * directions[None] - gaussians.means.detach()[index]
-    inverse = torch.exp(-gaussians.log_scales.detach()[index])
-    r = rows[index]
-    u = (r[..., 0, :] * local).sum(-1) * inverse[..., 0]
-    v = (r[..., 1, :] * local).sum(-1) * inverse[..., 1]
-    r2 = u * u + v * v
-    kappa = 1 + F.softplus(gaussians.raw_kappa.detach()[index, 0])
-    alpha = (torch.sigmoid(gaussians.opacity_logits.detach()[index, 0])
-             * torch.exp(-0.5 * r2.clamp_min(1e-8).pow(kappa) / kappa))
-    ok = valid & (r2 <= radius_squared) & (hit_depths >= 0)
-    alpha = torch.where(ok, alpha, torch.zeros_like(alpha))
-    depth = torch.where(ok, hit_depths, torch.full_like(hit_depths, float("inf")))
-    depth, order = depth.sort(0)
-    return depth, alpha.gather(0, order), index.gather(0, order)
 
 
 def psnr(prediction, target, mask=None):

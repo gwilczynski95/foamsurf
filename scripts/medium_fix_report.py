@@ -53,18 +53,28 @@ PROX = (("", "1 (brak)"), ("_prox50", "0,5"), ("_prox30", "0,3"), ("_prox10", "0
 def parse_variant(variant):
     """Split <base>[_in..][_chroma..][_csmooth..][_prox..][_ring][_bk] into
     (base, layout, prox, black, regularizer)."""
-    match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?(_prox\d\d)?(_ring)?(_bk)?", variant)
-    base, layout, chroma, smooth, prox, ring, black = match.groups()
-    return base, layout or "", (prox or "") + (ring or ""), bool(black), (chroma or "") + (smooth or "")
+    match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
+                         r"(_kappa\d+|_scov\d{3}|_under\d{3}|_scale0dens2)?(_prox\d\d)?(_ring)?(_bk)?", variant)
+    base, layout, chroma, smooth, seabed, prox, ring, black = match.groups()
+    return (base, layout or "", (prox or "") + (ring or ""), bool(black),
+            (chroma or "") + (smooth or "") + (seabed or ""))
 
 
 def regularizer_label(code):
     parts = []
-    for kind, value in re.findall(r"_(chroma|csmooth)(\d+)", code):
+    for kind, value in re.findall(r"_(chroma|csmooth|kappa|scov|under|scale0dens)(\d+)", code):
         if kind == "chroma":
             parts.append("kara barwy backscatteru " + fmt(int(value) / 100, 2))
-        else:
+        elif kind == "csmooth":
             parts.append("wygładzanie koloru komórek " + value)
+        elif kind == "kappa":
+            parts.append("ostrość brzegu Gaussów na starcie " + value)
+        elif kind == "scov":
+            parts.append("jednostronne pokrycie dna " + fmt(int(value) / 100, 2))
+        elif kind == "under":
+            parts.append("kara za medium pod dnem " + fmt(int(value) / 100, 2))
+        else:
+            parts.append("bez kary za duże Gaussy + próg zagęszczania 2e-4")
     return ", ".join(parts)
 
 
@@ -84,8 +94,14 @@ def describe(variant):
     return "; ".join(parts)
 
 
+SEABED_CODES = ("_kappa", "_scov", "_under", "_scale0dens2")
+
+
 def baseline_name(variant):
-    """Runs on a black background are compared with B0_bk, the rest with B0."""
+    """Seabed variants vs the default B0_chroma100_bk, other black-background runs
+    vs B0_bk, the rest vs B0."""
+    if variant.startswith("B0_chroma100_") and any(code in variant for code in SEABED_CODES):
+        return "B0_chroma100_bk"
     return "B0_bk" if parse_variant(variant)[3] else "B0"
 
 
@@ -159,7 +175,7 @@ def thumbnail(path, width=300):
 
 def select_winner(runs, baseline_variant="B0"):
     """Best hybrid PSNR among runs that lose <=0.5 dB to the baseline and disentangle clearly better."""
-    runs = [r for r in runs if baseline_name(r["variant"]) == baseline_variant]
+    runs = [r for r in runs if baseline_name(r["variant"]) == baseline_variant or r["variant"] == baseline_variant]
     baseline = next((r for r in runs if r["variant"] == baseline_variant and r["seed"] is None), None)
     if baseline is None or "best_psnr" not in baseline or not baseline.get("best"):
         return None, f"Brak kompletnego {baseline_variant} – nie da się zastosować reguły wyboru."
@@ -304,7 +320,9 @@ def matrix(title, rows, columns, lookup):
 
 def hue_text(run):
     angle = audit_value(run, "backscatter_hue_angle_bottom")
-    return "" if math.isnan(angle) else f"<br>kąt barwy backscatteru dna {fmt(angle, 1)}°"
+    text = "" if math.isnan(angle) else f"<br>kąt barwy backscatteru dna {fmt(angle, 1)}°"
+    partial = audit_value(run, "bottom_alpha_gt_0.5") - audit_value(run, "bottom_alpha_gt_0.99")
+    return text + ("" if math.isnan(partial) else f"<br>dno półprzezroczyste (α 0,5–0,99) {fmt(partial, 0, percent=True)}")
 
 
 def matrices(runs, all_runs=()):
@@ -322,12 +340,18 @@ def matrices(runs, all_runs=()):
     chroma = matrix("Czarne tło, B0: kara barwy backscatteru i wygładzanie koloru komórek × seed", settings,
                     (("", "seed 42"), ("_seed43", "seed 43")),
                     lambda code, seed: by_full.get(f"B0{code}_bk{seed}"))
-    if not (stage_a or prox or chroma):
+    seabed_rows = [("", "domyślna B0_chroma100_bk")] + [(code, regularizer_label(code)) for code in
+                   ("_kappa2", "_kappa4", "_scov001", "_scov010", "_scov100", "_scov200",
+                    "_under001", "_under010", "_under100", "_under200", "_scale0dens2")]
+    seabed = matrix("Czarne tło, domyślna konfiguracja: pokrycie dna Gaussami × seed", seabed_rows,
+                    (("", "seed 42"), ("_seed43", "seed 43")),
+                    lambda code, seed: by_full.get(f"B0_chroma100{code}_bk{seed}"))
+    if not (stage_a or prox or chroma or seabed):
         return ""
     legend = ("<p class='small'>W komórce: <b>best test PSNR</b>; PSNR wody; ΔPSNR dna po zastąpieniu komórek ≤5 j. "
               "czystą wodą (bliżej 0 = medium mniej podpiera dno); pokrycie dna Gaussami; odsetek pikseli wody bez Gaussów "
               "(spadek = Gaussy wchodzą na wodę). Wiersz „1 (brak)” = run z etapu A.</p>")
-    return "<h2>Macierze porównań</h2>" + legend + chroma + stage_a + prox
+    return "<h2>Macierze porównań</h2>" + legend + seabed + chroma + stage_a + prox
 
 
 def seed_table(runs):
@@ -371,8 +395,9 @@ def main():
     runs.sort(key=family_order)
     main_runs = [r for r in runs if r["seed"] is None]
     winners, rules = [], []
-    for baseline in ("B0", "B0_bk"):
-        if any(r["variant"] == baseline for r in main_runs):
+    for baseline in ("B0", "B0_bk", "B0_chroma100_bk"):
+        compared = [r for r in main_runs if baseline_name(r["variant"]) == baseline and r["variant"] != baseline]
+        if compared and any(r["variant"] == baseline for r in main_runs):
             found, text = select_winner(main_runs, baseline)
             winners.append((baseline, found))
             rules.append(text)
@@ -414,16 +439,23 @@ def main():
         for layout, layout_label in (("", "rozkład normalny"), ("_in50r", "50% pudełko + 50% radialnie")):
             groups.append((f"czarne tło, {label}, {layout_label}: m przy Gaussach",
                            [r for r in black_runs if parse_variant(r["variant"])[1] == layout]))
+    seabed_codes = SEABED_CODES
+    groups.append(("domyślna konfiguracja: ostrość brzegu i jednostronne pokrycie dna",
+                   [r for r in main_runs if r["variant"] == "B0_chroma100_bk"
+                    or any(c in r["variant"] for c in ("_kappa", "_scov", "_scale0dens2"))]))
+    groups.append(("domyślna konfiguracja: kara za medium pod dnem",
+                   [r for r in main_runs if r["variant"] == "B0_chroma100_bk" or "_under" in r["variant"]]))
     groups.append(("czarne tło, B0: kara barwy backscatteru i wygładzanie koloru",
                    [r for r in main_runs if r["variant"] == "B0_bk"
                     or (parse_variant(r["variant"])[4] and parse_variant(r["variant"])[0] == "B0"
-                        and not parse_variant(r["variant"])[1])]))
+                        and not parse_variant(r["variant"])[1]
+                        and not any(c in r["variant"] for c in seabed_codes))]))
     charts = "".join(line_chart(f"curve_{i}", f"Test hybrid PSNR [dB] od 2k iteracji: {title}", members)
                      for i, (title, members) in enumerate(groups)
                      if len(members) >= 2 and any(parse_variant(r["variant"])[0] != "B0" or r["variant"] not in ("B0", "B0_bk")
                                                   for r in members))
     bars = (
-        bar_chart("Best test hybrid PSNR względem bazy (B0, a dla czarnego tła B0_bk) [dB]",
+        bar_chart("Best test hybrid PSNR względem bazy (B0; czarne tło: B0_bk; warianty dna: B0_chroma100_bk) [dB]",
                   [(r["name"], r.get("best_psnr", float("nan")) - psnr_of.get(baseline_name(r["variant"]), float("nan")))
                    for r in main_runs if r["variant"] not in ("B0", "B0_bk")], 3,
                   note="Reguła wyboru dopuszcza spadek do −0,5 dB względem swojej bazy.")
