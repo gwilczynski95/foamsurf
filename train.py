@@ -25,7 +25,7 @@ def load_iui3_source(config_path):
     if "base_config" not in raw:
         return raw, {}
     allowed = {"base_config", "output_dir", "gaussian_rgb_activation",
-               "medium_color_activation", "wandb_project"}
+               "medium_color_activation", "wandb_project", "overrides"}
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"Unsupported IUI3 variant fields: {sorted(unknown)}")
@@ -35,15 +35,46 @@ def load_iui3_source(config_path):
     return base, raw
 
 
+def apply_overrides(manifest, overrides, defaults=None):
+    """Apply ``dotted.path=yaml_value`` overrides to known manifest keys only.
+
+    A key absent from the manifest is accepted when ``defaults`` (same shape)
+    has it, e.g. a stage config field added after the YAML was written.
+    """
+    for item in overrides or ():
+        path, separator, text = item.partition("=")
+        if not separator or not path:
+            raise ValueError(f"Override must look like key.path=value: {item!r}")
+        keys = path.split(".")
+        node, known = manifest, defaults
+        for key in keys[:-1]:
+            known = known.get(key) if isinstance(known, dict) else None
+            if not isinstance(node, dict) or key not in node:
+                raise KeyError(f"Unknown override path: {path}")
+            node = node[key]
+        if not isinstance(node, dict) or (
+            keys[-1] not in node and not (isinstance(known, dict) and keys[-1] in known)
+        ):
+            raise KeyError(f"Unknown override path: {path}")
+        node[keys[-1]] = yaml.safe_load(text)
+    return manifest
+
+
 def resolve_iui3(
     config_path,
     output_dir,
     gaussian_rgb_activation=None,
     medium_color_activation=None,
     wandb_project=None,
+    overrides=None,
+    run_suffix=None,
 ):
     """Resolve a standalone IUI3 manifest without importing any experiment package."""
+    from training.losses import MediumFixConfig
+
     source, variant = load_iui3_source(config_path)
+    # Older configs predate medium_fix; defaults reproduce their behavior.
+    source.setdefault("medium_fix", MediumFixConfig().as_dict())
     gaussian_rgb_activation = (gaussian_rgb_activation if gaussian_rgb_activation is not None
                                else variant.get("gaussian_rgb_activation"))
     medium_color_activation = (medium_color_activation if medium_color_activation is not None
@@ -72,6 +103,18 @@ def resolve_iui3(
         if not wandb_project:
             raise ValueError("W&B project must not be empty")
         source["joint"]["wandb"]["project"] = wandb_project
+    from training.warmup_profile import WarmupProfile
+
+    stage_defaults = ExperimentConfig().as_dict()
+    # Variant-file overrides first, so command-line --set can still change them.
+    overrides = list(variant.get("overrides", [])) + list(overrides or [])
+    apply_overrides(source, overrides, {"warmup": stage_defaults, "joint": stage_defaults,
+                                        "profile": WarmupProfile().as_dict()})
+    WarmupProfile.from_dict(source["profile"])
+    MediumFixConfig(**source["medium_fix"])
+    if run_suffix:
+        source["joint"]["experiment_name"] += "-" + run_suffix
+        source["joint"]["wandb"]["name"] += "-" + run_suffix
     root = Path(output_dir).resolve()
     source["output_dir"] = str(root)
     for stage in ("warmup", "joint"):
@@ -87,7 +130,12 @@ def fit_iui3(manifest, resume=False):
     root = Path(manifest["output_dir"])
     path = root / "pipeline_config.json"
     if root.exists() and any(root.iterdir()):
-        if not resume or not path.is_file() or json.loads(path.read_text()) != manifest:
+        saved = json.loads(path.read_text()) if path.is_file() else None
+        if saved is not None:
+            # Manifests written before medium_fix (or a newer field) used the defaults.
+            from training.losses import MediumFixConfig
+            saved["medium_fix"] = {**MediumFixConfig().as_dict(), **saved.get("medium_fix", {})}
+        if not resume or saved != manifest:
             raise ValueError("Nonempty output requires --resume with the identical configuration")
     else:
         root.mkdir(parents=True, exist_ok=True)
@@ -111,10 +159,10 @@ def run_iui3_stage(output_dir, stage):
     from training.colmap_joint import run_stage
     if stage == "joint":
         import training.colmap_joint_trainer as module
-        from training.colmap_joint_trainer import CapacityTrainer
+        from training.colmap_joint_trainer import MediumFixTrainer
         original = module.ColmapJointTrainer
         try:
-            module.ColmapJointTrainer = CapacityTrainer
+            module.ColmapJointTrainer = MediumFixTrainer
             return run_stage(output_dir, stage)
         finally:
             module.ColmapJointTrainer = original
@@ -131,6 +179,10 @@ def main():
     parser.add_argument("--gaussian-rgb-activation", choices=("identity", "sigmoid"))
     parser.add_argument("--medium-color-activation", choices=("dc", "sigmoid"))
     parser.add_argument("--wandb-project")
+    parser.add_argument("--set", dest="overrides", action="append", default=[],
+                        metavar="KEY.PATH=VALUE",
+                        help="IUI3 only: override an existing manifest key (repeatable)")
+    parser.add_argument("--run-suffix", help="IUI3 only: appended to joint run names")
     args = parser.parse_args()
     if args.stage:
         if not args.output_dir:
@@ -156,14 +208,17 @@ def main():
             gaussian_rgb_activation=args.gaussian_rgb_activation,
             medium_color_activation=args.medium_color_activation,
             wandb_project=args.wandb_project,
+            overrides=args.overrides,
+            run_suffix=args.run_suffix,
         )
         if args.dry_run:
             print(json.dumps(manifest, indent=2))
         else:
             fit_iui3(manifest, resume=args.resume)
     else:
-        if any((args.gaussian_rgb_activation, args.medium_color_activation, args.wandb_project)):
-            parser.error("color activation overrides are supported only for IUI3")
+        if any((args.gaussian_rgb_activation, args.medium_color_activation, args.wandb_project,
+                args.overrides, args.run_suffix)):
+            parser.error("color activation and manifest overrides are supported only for IUI3")
         config = EndToEndConfig.load(args.config, output_dir=output)
         if args.dry_run:
             print(json.dumps(config.manifest(), indent=2))

@@ -171,10 +171,42 @@ class VoronoiMediumModel(nn.Module):
         return F.softplus(self.raw_density)
 
     @property
-    def colors(self) -> torch.Tensor:
+    def color_mode(self) -> str:
+        return "global" if hasattr(self, "raw_global_color") else "per_cell"
+
+    def _activate_color(self, raw: torch.Tensor) -> torch.Tensor:
         if getattr(self, "color_activation", "sigmoid") == "dc":
-            return (0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0)
-        return torch.sigmoid(self.raw_color)
+            return (0.5 + 0.28209479177387814 * raw).clamp_min(0)
+        return torch.sigmoid(raw)
+
+    def _inverse_color(self, color: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "color_activation", "sigmoid") == "dc":
+            return (color - 0.5) / 0.28209479177387814
+        return _logit(color)
+
+    @property
+    def global_color(self) -> torch.Tensor:
+        """One scene-wide backscatter color; only densities stay per cell."""
+        return self._activate_color(self.raw_global_color)
+
+    def enable_global_color(self, color: torch.Tensor) -> None:
+        """Replace per-cell backscatter colors by one shared RGB parameter.
+
+        ``raw_color`` stays registered so topology permutations and Voronoi
+        adaptation are unchanged, but it no longer reaches the renderer.
+        """
+        color = torch.as_tensor(color, dtype=torch.float32, device=self.device)
+        if color.shape != (3,):
+            raise ValueError("global medium color must contain RGB")
+        self.raw_global_color = nn.Parameter(self._inverse_color(color).clone())
+
+    @property
+    def colors(self) -> torch.Tensor:
+        if self.color_mode == "global":
+            # Broadcast, so the renderer sees ordinary per-cell colors and its
+            # gradients sum into the single shared parameter.
+            return self.global_color.expand(self.point_count, 3).contiguous()
+        return self._activate_color(self.raw_color)
 
     def render_scene(self) -> VoronoiScene:
         if self.is_rgb:
@@ -209,6 +241,7 @@ class VoronoiMediumModel(nn.Module):
     def checkpoint_metadata(self) -> dict[str, object]:
         return {"point_count": self.point_count, "guard_count": int(self.guard_mask.sum().item()),
                 "color_activation": getattr(self, "color_activation", "sigmoid"),
+                "color_mode": self.color_mode,
                 "medium_type": getattr(self, "medium_type", "scalar")}
 
     @classmethod
@@ -251,4 +284,13 @@ class VoronoiMediumModel(nn.Module):
             )
         if instance.point_count != int(metadata["point_count"]):
             raise ValueError("medium checkpoint point count mismatch")
+        color_mode = metadata.get("color_mode", "per_cell")
+        if color_mode == "global":
+            # The value is restored by load_state_dict when it is not supplied.
+            raw = state.get("raw_global_color", torch.zeros(3))
+            instance.raw_global_color = nn.Parameter(
+                torch.as_tensor(raw, dtype=torch.float32).to(instance.device).clone()
+            )
+        elif color_mode != "per_cell":
+            raise ValueError("Unknown medium color mode in checkpoint")
         return instance

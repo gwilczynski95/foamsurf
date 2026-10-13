@@ -134,6 +134,7 @@ class GaussianAdaptationController:
         self.total_budget_skips = 0
         self.total_opacity_resets = 0
         self.last_opacity_reset_changed = 0
+        self.last_opacity_reset_iteration: int | None = None
         self.revision = 0
         self.last_plan_statistics = {
             "gradient_p50": 0.0,
@@ -236,8 +237,23 @@ class GaussianAdaptationController:
         )
         return periodic or white_background_start
 
+    def opacity_threshold(self, iteration: int) -> float:
+        """Scheduled threshold, raised to min_opacity_densify while densifying.
+
+        The raised threshold is suspended for opacity_reset_prune_grace
+        iterations after a reset (Water-Splatting culls only after recovery).
+        """
+        threshold = scheduled_opacity_threshold(self.config, iteration)
+        densify_threshold = self.config.min_opacity_densify
+        if densify_threshold is None or iteration >= self.config.densify_until:
+            return threshold
+        last = self.last_opacity_reset_iteration
+        if last is not None and iteration - last < self.config.opacity_reset_prune_grace:
+            return threshold
+        return max(threshold, float(densify_threshold))
+
     @torch.no_grad()
-    def reset_opacity(self) -> int:
+    def reset_opacity(self, iteration: int | None = None) -> int:
         """Clamp Gaussian opacity and optionally clear its Adam moments."""
         parameter = self.model.opacity_logits
         opacity = parameter.sigmoid()
@@ -254,6 +270,8 @@ class GaussianAdaptationController:
                     value.zero_()
         self.total_opacity_resets += 1
         self.last_opacity_reset_changed = changed
+        if iteration is not None:
+            self.last_opacity_reset_iteration = int(iteration)
         return changed
 
     @torch.no_grad()
@@ -561,9 +579,7 @@ class GaussianAdaptationController:
             allow_densification and self.should_densify(iteration)
         )
         opacity_pruning_active = self.should_prune(iteration)
-        opacity_threshold = scheduled_opacity_threshold(
-            self.config, iteration
-        )
+        opacity_threshold = self.opacity_threshold(iteration)
         raw_opacity_prune = torch.zeros_like(opacities, dtype=torch.bool)
         if opacity_pruning_active:
             raw_opacity_prune = opacities < opacity_threshold
@@ -912,6 +928,7 @@ class GaussianAdaptationController:
             "total_budget_skips": self.total_budget_skips,
             "total_opacity_resets": self.total_opacity_resets,
             "last_opacity_reset_changed": self.last_opacity_reset_changed,
+            "last_opacity_reset_iteration": self.last_opacity_reset_iteration,
             "revision": self.revision,
         }
 
@@ -933,4 +950,6 @@ class GaussianAdaptationController:
         self.last_opacity_reset_changed = int(
             state.get("last_opacity_reset_changed", 0)
         )
+        last_reset = state.get("last_opacity_reset_iteration")
+        self.last_opacity_reset_iteration = None if last_reset is None else int(last_reset)
         self.revision = int(state["revision"])

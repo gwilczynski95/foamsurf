@@ -11,8 +11,10 @@ from pathlib import Path
 from training.end_to_end import atomic_json
 from training.disentanglement import undirected_edges
 from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
-    CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency)
+    CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency,
+    MediumFixConfig, coverage_binarization_loss, water_direction, backscatter_chroma_loss)
 from training.surface import LocalOverlap
+from training.proximity import damp_step, proximity_multiplier, surface_cell_mask
 from training.surface import install_coverage
 
 ACCUMULATORS=('contribution','visibility','path_length','weighted_path_length','max_error','gradient')
@@ -267,3 +269,186 @@ class CapacityTrainer(SurfaceTrainer):
     def _checkpoint(self, path, iteration):
         super()._checkpoint(path, iteration)
         atomic_json(Path(path).with_suffix(".capacity.json"), self.capacity.as_dict())
+
+
+MEDIUM_FIX_METRICS = tuple("medium_fix/" + name for name in (
+    "coverage_weight", "coverage_raw", "coverage_weighted", "coverage_alpha_gt_0_99",
+    "coverage_alpha_lt_0_01", "coverage_alpha_partial",
+    "global_color_r", "global_color_g", "global_color_b"))
+
+
+# Present only when the chroma prior is enabled, so earlier runs keep their CSV columns.
+CHROMA_METRICS = tuple("medium_fix/" + name for name in (
+    "chroma_weight", "chroma_raw", "chroma_angle_degrees",
+    "water_direction_r", "water_direction_g", "water_direction_b"))
+
+
+class MediumFixTrainer(CapacityTrainer):
+    """Adds the per-ray Gaussian coverage prior; color_mode is set at transfer."""
+
+    def __init__(self, config, *args, medium_fix=None, **kwargs):
+        if medium_fix is None:
+            manifest = json.loads((Path(config.output_dir).parent / "pipeline_config.json").read_text())
+            medium_fix = manifest.get("medium_fix", {})
+        self.medium_fix = MediumFixConfig(**medium_fix)
+        self.medium_fix_metrics = {name: float("nan") for name in MEDIUM_FIX_METRICS}
+        self._captured_coverage = None
+        self._surface_mask = None
+        self._surface_mask_key = None
+        self._eligible = None
+        self._eligible_key = None
+        # Present only when enabled, so earlier runs keep their CSV columns.
+        self.proximity_metrics = ({"medium_fix/proximity_multiplier": 1.0, "medium_fix/proximity_cell_fraction": 0.0}
+                                  if self.medium_fix.proximity_multiplier < 1 else {})
+        self.water_ema = None
+        self.chroma_metrics = ({name: float("nan") for name in CHROMA_METRICS}
+                               if self.medium_fix.chroma_weight > 0 else {})
+        super().__init__(config, *args, **kwargs)
+        if self.medium_fix.chroma_weight > 0 and not self.model.medium.is_rgb:
+            raise ValueError("Backscatter chroma prior requires the RGB medium")
+        if self.model.medium.color_mode != self.medium_fix.color_mode:
+            raise ValueError("Medium color mode disagrees with medium_fix.color_mode")
+        if self.resume_path is not None:
+            sidecar = Path(self.resume_path).with_suffix(".medium_fix.json")
+            # Checkpoints written before medium_fix (or a newer field) existed used the defaults.
+            saved = {**MediumFixConfig().as_dict(),
+                     **(json.loads(sidecar.read_text()) if sidecar.is_file() else {})}
+            if saved != self.medium_fix.as_dict():
+                raise ValueError("Resume medium_fix settings mismatch")
+            state = Path(self.resume_path).with_suffix(".medium_fix_state.json")
+            if state.is_file():
+                water = json.loads(state.read_text()).get("water_ema")
+                self.water_ema = None if water is None else torch.tensor(water, device=self.device)
+
+        previous_render = self.renderer.render
+
+        def capture(rays, *args, **kwargs):
+            result = previous_render(rays, *args, **kwargs)
+            if (self._capture_surface and self._captured_coverage is None
+                    and kwargs.get("gaussians") is not None
+                    and kwargs.get("voronoi") is not None):
+                self._captured_coverage = (rays, kwargs["gaussians"], result)
+            return result
+
+        self.renderer.render = capture
+        previous_compute = self.disentanglement.compute
+
+        def compute(iteration, model, topology, *args, **kwargs):
+            result = previous_compute(iteration, model, topology, *args, **kwargs)
+            weight = self.medium_fix.coverage_weight_at(iteration)
+            # The CSV logger requires an identical column set on every row.
+            self.medium_fix_metrics = {name: float("nan") for name in MEDIUM_FIX_METRICS}
+            self.medium_fix_metrics["medium_fix/coverage_weight"] = weight
+            if model.medium.color_mode == "global":
+                color = model.medium.global_color.detach().cpu().tolist()
+                for channel, value in zip("rgb", color):
+                    self.medium_fix_metrics[f"medium_fix/global_color_{channel}"] = value
+            chroma = self.medium_fix.chroma_weight_at(iteration)
+            if self.chroma_metrics:
+                self.chroma_metrics = {name: float("nan") for name in CHROMA_METRICS}
+                self.chroma_metrics["medium_fix/chroma_weight"] = chroma
+            if not (weight or chroma):
+                return result
+            if self._captured_coverage is None:
+                raise RuntimeError("No hybrid training render captured")
+            rays, scene, hybrid = self._captured_coverage
+            rays = rays.reshape(-1, 6)
+            count = min(self.medium_fix.coverage_rays, rays.shape[0])
+            generator = torch.Generator(device=rays.device)
+            generator.manual_seed(self.config.seed * 1_000_003 + iteration)
+            selected = torch.randperm(rays.shape[0], device=rays.device, generator=generator)[:count]
+            only = self.renderer.render_gaussians(
+                rays[selected].contiguous(), scene, background=(0.0, 0.0, 0.0))
+            total = result.total
+            if chroma:
+                if hybrid.backscatter is None:
+                    raise RuntimeError("Backscatter component unavailable")
+                backscatter = hybrid.backscatter.reshape(-1, 3)[selected]
+                current = water_direction(backscatter, only.alpha, self.medium_fix.chroma_water_alpha)
+                if current is not None:
+                    decay = self.medium_fix.chroma_ema
+                    blended = current if self.water_ema is None else decay * self.water_ema + (1 - decay) * current
+                    self.water_ema = blended / blended.norm().clamp_min(1e-8)
+                chroma_raw, angle = backscatter_chroma_loss(
+                    backscatter, only.alpha, self.water_ema,
+                    self.medium_fix.chroma_alpha_threshold, self.medium_fix.chroma_margin_degrees)
+                total = total + chroma * chroma_raw
+                self.chroma_metrics.update({"medium_fix/chroma_raw": float(chroma_raw.detach()),
+                                            "medium_fix/chroma_angle_degrees": angle})
+                if self.water_ema is not None:
+                    for channel, value in zip("rgb", self.water_ema.tolist()):
+                        self.chroma_metrics[f"medium_fix/water_direction_{channel}"] = value
+            if not weight:
+                return replace(result, total=total)
+            raw = coverage_binarization_loss(only.alpha)
+            with torch.no_grad():
+                alpha = only.alpha.reshape(-1)
+                self.medium_fix_metrics.update({
+                    "medium_fix/coverage_raw": float(raw.detach()),
+                    "medium_fix/coverage_weighted": float((weight * raw).detach()),
+                    "medium_fix/coverage_alpha_gt_0_99": float((alpha > 0.99).float().mean()),
+                    "medium_fix/coverage_alpha_lt_0_01": float((alpha < 0.01).float().mean()),
+                    "medium_fix/coverage_alpha_partial": float(((alpha >= 0.01) & (alpha <= 0.99)).float().mean()),
+                })
+            return replace(result, total=total + weight * raw)
+
+        self.disentanglement.compute = compute
+        if self.medium_fix.proximity_multiplier < 1:
+            self._install_proximity_damping()
+
+    @torch.no_grad()
+    def _current_surface_mask(self):
+        g, medium = self.model.gaussians, self.model.medium
+        eligible_key = (g.point_count, self.joint_iteration // 250)
+        if eligible_key != self._eligible_key:
+            distance = torch.as_tensor(self.colmap_tree.query(g.means.detach().cpu().numpy(), workers=4)[0],
+                                       device=g.means.device)
+            self._eligible = ((g.opacities.detach().flatten() > self.medium_fix.proximity_min_opacity)
+                              & (distance <= self.medium_fix.proximity_colmap_distance))
+            self._eligible_key = eligible_key
+        key = (self.topology.revision, medium.point_count, eligible_key)
+        if key != self._surface_mask_key:
+            edges = (undirected_edges(self.topology.adjacency, self.topology.offsets, medium.point_count)
+                     if self.medium_fix.proximity_neighbors else (None, None))
+            self._surface_mask = surface_cell_mask(medium.sites.detach(), g.means.detach(), self._eligible, *edges)
+            self._surface_mask_key = key
+        return self._surface_mask
+
+    def _install_proximity_damping(self):
+        optimizer = self.medium_optimizer
+        original_step = optimizer.step
+
+        def step(*args, **kwargs):
+            multiplier = proximity_multiplier(self.medium_fix, self.joint_iteration)
+            if multiplier >= 1:
+                self.proximity_metrics.update({"medium_fix/proximity_multiplier": 1.0})
+                return original_step(*args, **kwargs)
+            mask = self._current_surface_mask()
+            groups = {group.get("name"): group for group in optimizer.param_groups}
+            parameters = [groups[name]["params"][0] for name in ("medium_sites", "medium_density", "medium_color")]
+            before = [parameter.detach()[mask].clone() for parameter in parameters]
+            result = original_step(*args, **kwargs)
+            for parameter, old in zip(parameters, before):
+                damp_step(parameter, old, mask, multiplier)
+            self.proximity_metrics.update({"medium_fix/proximity_multiplier": multiplier,
+                                           "medium_fix/proximity_cell_fraction": float(mask.float().mean())})
+            return result
+
+        optimizer.step = step
+
+    def _train_step(self, iteration):
+        self._captured_coverage = None
+        try:
+            return super()._train_step(iteration)
+        finally:
+            self._captured_coverage = None
+
+    def _training_row(self, *args):
+        return {**super()._training_row(*args), **self.medium_fix_metrics, **self.proximity_metrics,
+                **self.chroma_metrics}
+
+    def _checkpoint(self, path, iteration):
+        super()._checkpoint(path, iteration)
+        atomic_json(Path(path).with_suffix(".medium_fix.json"), self.medium_fix.as_dict())
+        atomic_json(Path(path).with_suffix(".medium_fix_state.json"),
+                    dict(water_ema=None if self.water_ema is None else self.water_ema.tolist()))

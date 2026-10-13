@@ -1,0 +1,14 @@
+# Current IUI3 default (2026-10-13): run B0_chroma100_bk of sweep 530646.
+# Per-cell medium color, sigmoid RGB for Gaussians and cells, BLACK background,
+# original normal Voronoi layout, and the backscatter chroma prior with weight 1
+# (on rays hitting opaque Gaussians, backscatter must have the water's hue).
+# Override --output-dir for each new experiment to avoid reusing outputs.
+base_config: iui3_5k.yaml
+output_dir: outputs/iui3_default/run
+gaussian_rgb_activation: sigmoid
+medium_color_activation: sigmoid
+wandb_project: foamsurf_iui3_medium_color
+overrides:
+  - medium_fix.chroma_weight=1.0
+  - warmup.background=[0.0, 0.0, 0.0]
+  - joint.background=[0.0, 0.0, 0.0]

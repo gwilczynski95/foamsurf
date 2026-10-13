@@ -233,10 +233,16 @@ class GaussianAdaptationConfig:
     screen_pruning_enabled: bool = False
     max_screen_size: float = 20.0
     max_world_scale_fraction: float = 0.10
+    # Water-Splatting style culling: while densifying, prune below this
+    # opacity (WS: 0.5) instead of the scheduled threshold, if higher.
+    min_opacity_densify: float | None = None
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
     opacity_reset_optimizer_state: bool = True
+    # Iterations after an opacity reset during which min_opacity_densify is
+    # not applied, so clamped Gaussians can recover before being culled.
+    opacity_reset_prune_grace: int = 0
     medium_freeze_after_reset: int = 0
     medium_freeze_interval: int = 0
     medium_freeze_from: int = 0
@@ -887,8 +893,15 @@ class ExperimentConfig:
             raise ValueError(
                 "gaussian_adaptation.min_opacity_initial must be in [0, 1)"
             )
+        if adaptation.min_opacity_densify is not None and not (
+            0.0 <= adaptation.min_opacity_densify < 1.0
+        ):
+            raise ValueError(
+                "gaussian_adaptation.min_opacity_densify must be in [0, 1)"
+            )
         for name in (
             "opacity_reset_interval",
+            "opacity_reset_prune_grace",
             "medium_freeze_after_reset",
             "medium_freeze_interval",
             "medium_freeze_from",

@@ -266,3 +266,118 @@ def masked_direct_consistency(gaussian_image, direct_image, gaussian_alpha, thre
     difference = F.smooth_l1_loss(gaussian_image, direct_image.detach(), reduction="none")
     loss = (difference * selected).sum() / (3 * selected.sum().clamp_min(1))
     return loss, selected.mean().detach()
+
+
+@dataclass(frozen=True)
+class MediumFixConfig:
+    """Medium-color mode and per-ray Gaussian coverage prior (IUI3 joint)."""
+    color_mode: str = 'per_cell'
+    coverage_weight: float = 0.0
+    coverage_start: int = 1000
+    coverage_ramp: int = 2000
+    coverage_rays: int = 131072
+    # Surface cells (containing an eligible Gaussian) keep only this fraction of
+    # each medium step; 1 disables. Ramp from 1 starting at proximity_start.
+    proximity_multiplier: float = 1.0
+    proximity_start: int = 1000
+    proximity_ramp: int = 1000
+    proximity_min_opacity: float = 0.5
+    proximity_colmap_distance: float = 2.0
+    proximity_neighbors: bool = False
+    # Backscatter chroma prior: on rays where Gaussians are opaque, backscatter
+    # should have the water's color (any brightness); see backscatter_chroma_loss.
+    chroma_weight: float = 0.0
+    chroma_start: int = 1000
+    chroma_ramp: int = 1000
+    chroma_margin_degrees: float = 5.0
+    chroma_alpha_threshold: float = 0.5
+    chroma_water_alpha: float = 0.01
+    chroma_ema: float = 0.99
+
+    def __post_init__(self):
+        if self.color_mode not in ('per_cell', 'global'):
+            raise ValueError('medium_fix.color_mode must be per_cell or global')
+        if not math.isfinite(self.proximity_multiplier) or not 0 <= self.proximity_multiplier <= 1:
+            raise ValueError('medium_fix.proximity_multiplier must be in [0, 1]')
+        for name in ('proximity_start', 'proximity_ramp'):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError(f'Invalid medium_fix.{name}')
+        if not 0 <= self.proximity_min_opacity < 1:
+            raise ValueError('medium_fix.proximity_min_opacity must be in [0, 1)')
+        if not math.isfinite(self.proximity_colmap_distance) or self.proximity_colmap_distance <= 0:
+            raise ValueError('medium_fix.proximity_colmap_distance must be positive')
+        if type(self.proximity_neighbors) is not bool:
+            raise ValueError('medium_fix.proximity_neighbors must be a boolean')
+        if not math.isfinite(self.chroma_weight) or self.chroma_weight < 0:
+            raise ValueError('Invalid medium_fix.chroma_weight')
+        for name in ('chroma_start', 'chroma_ramp'):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError(f'Invalid medium_fix.{name}')
+        if not 0 <= self.chroma_margin_degrees < 90:
+            raise ValueError('medium_fix.chroma_margin_degrees must be in [0, 90)')
+        if not 0 < self.chroma_water_alpha < self.chroma_alpha_threshold < 1:
+            raise ValueError('medium_fix needs 0 < chroma_water_alpha < chroma_alpha_threshold < 1')
+        if not 0 <= self.chroma_ema < 1:
+            raise ValueError('medium_fix.chroma_ema must be in [0, 1)')
+        if not math.isfinite(self.coverage_weight) or self.coverage_weight < 0:
+            raise ValueError('Invalid coverage weight')
+        for name in ('coverage_start', 'coverage_ramp', 'coverage_rays'):
+            value = getattr(self, name)
+            if type(value) is not int or value < (1 if name == 'coverage_rays' else 0):
+                raise ValueError(f'Invalid medium_fix.{name}')
+
+    def as_dict(self):
+        return asdict(self)
+
+    def coverage_weight_at(self, iteration):
+        return ramp_weight(self.coverage_weight, iteration, self.coverage_start, self.coverage_ramp)
+
+    def chroma_weight_at(self, iteration):
+        return ramp_weight(self.chroma_weight, iteration, self.chroma_start, self.chroma_ramp)
+
+
+def coverage_binarization_loss(alpha):
+    """Mean A(1-A) of per-ray Gaussian-only alpha A = 1 - T_g.
+
+    Unlike per-Gaussian opacity binarization, this acts on pixel coverage:
+    each ray is pushed to be fully covered by Gaussians or entirely empty.
+    """
+    alpha = alpha.reshape(-1)
+    if alpha.numel() == 0:
+        return alpha.sum() * 0
+    return (alpha * (1 - alpha)).mean()
+
+
+def water_direction(backscatter, gaussian_alpha, water_alpha):
+    """Unit RGB direction of backscatter summed over open-water rays, or None."""
+    water = gaussian_alpha.reshape(-1) < water_alpha
+    if not bool(water.any()):
+        return None
+    total = backscatter.reshape(-1, 3)[water].detach().sum(0)
+    norm = total.norm()
+    return None if float(norm) <= 1e-8 else total / norm
+
+
+def backscatter_chroma_loss(backscatter, gaussian_alpha, water, alpha_threshold=0.5, margin_degrees=5.0):
+    """Hue mismatch between backscatter and water on rays that hit opaque Gaussians.
+
+    Per ray: sin^2 of the angle between the RGB backscatter vector and the
+    water direction, minus the margin, clamped at 0. It is invariant to the
+    backscatter's brightness, so darkening the haze cannot lower it; rays are
+    weighted by their detached brightness so near-black, ill-defined hues do
+    not dominate. Returns (loss, mean angle in degrees over selected rays).
+    """
+    backscatter = backscatter.reshape(-1, 3)
+    selected = gaussian_alpha.reshape(-1).detach() > alpha_threshold
+    zero = backscatter.sum() * 0
+    if water is None or not bool(selected.any()):
+        return zero, float('nan')
+    values = backscatter[selected]
+    norm = values.norm(dim=-1).clamp_min(1e-8)
+    cosine = ((values @ water.to(values)) / norm).clamp(-1, 1)
+    sine2 = (1 - cosine * cosine).clamp_min(0)
+    excess = (sine2 - math.sin(math.radians(margin_degrees)) ** 2).clamp_min(0)
+    weight = norm.detach()
+    weight = weight / weight.mean().clamp_min(1e-8)
+    angle = float(torch.rad2deg(torch.acos(cosine.detach())).mul(weight).mean())
+    return (weight * excess).mean(), angle

@@ -64,7 +64,25 @@ def build_medium_optimizer(
             "name": "medium_color",
         },
     ]
+    if model.medium.color_mode == "global":
+        # A separate group keeps topology permutations limited to per-cell
+        # tensors; it follows the medium_color schedule.
+        medium_groups.append(
+            {
+                "params": [model.medium.raw_global_color],
+                "lr": config.medium_color_lr,
+                "name": MEDIUM_GLOBAL_COLOR_GROUP,
+            }
+        )
     return torch.optim.Adam(medium_groups)
+
+
+MEDIUM_GLOBAL_COLOR_GROUP = "medium_global_color"
+
+
+def medium_schedule_name(group_name: str | None) -> str | None:
+    """Map a medium optimizer group to the LR schedule it follows."""
+    return "medium_color" if group_name == MEDIUM_GLOBAL_COLOR_GROUP else group_name
 
 
 def _exponential_lr(
@@ -225,7 +243,7 @@ def update_medium_learning_rates(
         rates[group_name] = rate
 
     for group in optimizer.param_groups:
-        name = group.get("name")
+        name = medium_schedule_name(group.get("name"))
         if name in rates:
             group["lr"] = rates[name]
     return rates

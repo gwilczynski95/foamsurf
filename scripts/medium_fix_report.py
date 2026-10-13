@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""Self-contained HTML report for a medium-fix sweep.
+
+Usage: python scripts/medium_fix_report.py --sweep outputs/iui3_medium_fix/<job> [--sweep <seed job> ...]
+       [--output report.html]
+
+Each run directory must contain joint/metrics/eval.csv; audit/best.json and
+audit/last.json (scripts/medium_audit.py) are used when present.
+"""
+import argparse
+import base64
+import csv
+import html
+import io
+import json
+import math
+import re
+from pathlib import Path
+
+from PIL import Image
+
+VIEW_NAMES = ("MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928")
+IMAGE_KINDS = (("hybrid", "hybrid"), ("backscatter", "backscatter (≈ rgb_medium WS)"),
+               ("voronoi_only", "voronoi_only"), ("gaussian_only_black", "Gaussy na czarnym"))
+DESCRIPTIONS = {
+    "B0": "baseline both_sigmoid (kolor per komórka), ten sam kod",
+    "E1a_lr1_s01": "globalne c; lr medium 1×; wygładzanie σ 0,1",
+    "E1a_lr1_s1": "globalne c; lr medium 1×; wygładzanie σ 1,0",
+    "E1a_lr03_s01": "globalne c; lr gęstości/sites 0,3×; wygładzanie σ 0,1",
+    "E1a_lr03_s1": "globalne c; lr gęstości/sites 0,3×; wygładzanie σ 1,0",
+    "E1b_w001": "E1a + culling 0,5 + pokrycie w=0,01",
+    "E1b_w005": "E1a + culling 0,5 + pokrycie w=0,05",
+    "E1b_w02": "E1a + culling 0,5 + pokrycie w=0,2",
+    "E1b_w001_reset": "E1b w=0,01 + reset opacity→0,5 co 3k, zamrożenie medium 200",
+    "E1b_w005_reset": "E1b w=0,05 + reset opacity→0,5 co 3k, zamrożenie medium 200",
+    "E1b_w02_reset": "E1b w=0,2 + reset opacity→0,5 co 3k, zamrożenie medium 200",
+    "B0_box5k": "B0 + równomierna siatka Voronoi w pudełku sceny, 5000 komórek",
+    "B0_box20k": "B0 + równomierna siatka Voronoi w pudełku sceny, 20000 komórek",
+    "E1a_lr1_s1_box5k": "E1a_lr1_s1 + równomierna siatka Voronoi, 5000 komórek",
+    "E1a_lr1_s1_box20k": "E1a_lr1_s1 + równomierna siatka Voronoi, 20000 komórek",
+}
+CURVE_FROM = 2000  # early iterations span ~15 dB and would flatten the comparison
+SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
+SERIES_DARK = ("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767")
+
+
+LAYOUTS = (("", "normalny"), ("_in75r", "75% pudełko + 25% radialnie"), ("_in50r", "50% pudełko + 50% radialnie"),
+           ("_in25r", "25% pudełko + 75% radialnie"), ("_in50n", "50% pudełko + 50% normalnie (odrzucenie)"))
+PROX = (("", "1 (brak)"), ("_prox50", "0,5"), ("_prox30", "0,3"), ("_prox10", "0,1"), ("_prox00", "0 (zamrożone)"),
+        ("_prox10_ring", "0,1 + sąsiedzi"))
+
+
+def parse_variant(variant):
+    """Split <base>[_in..][_chroma..][_csmooth..][_prox..][_ring][_bk] into
+    (base, layout, prox, black, regularizer)."""
+    match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?(_prox\d\d)?(_ring)?(_bk)?", variant)
+    base, layout, chroma, smooth, prox, ring, black = match.groups()
+    return base, layout or "", (prox or "") + (ring or ""), bool(black), (chroma or "") + (smooth or "")
+
+
+def regularizer_label(code):
+    parts = []
+    for kind, value in re.findall(r"_(chroma|csmooth)(\d+)", code):
+        if kind == "chroma":
+            parts.append("kara barwy backscatteru " + fmt(int(value) / 100, 2))
+        else:
+            parts.append("wygładzanie koloru komórek " + value)
+    return ", ".join(parts)
+
+
+def describe(variant):
+    if variant in DESCRIPTIONS:
+        return DESCRIPTIONS[variant]
+    base, layout, prox, black, regularizer = parse_variant(variant)
+    parts = [DESCRIPTIONS.get(base, base)]
+    if regularizer:
+        parts.append(regularizer_label(regularizer))
+    if layout:
+        parts.append("komórki: " + dict(LAYOUTS)[layout])
+    if prox:
+        parts.append("m przy Gaussach = " + dict(PROX).get(prox, prox))
+    if black:
+        parts.append("czarne tło")
+    return "; ".join(parts)
+
+
+def baseline_name(variant):
+    """Runs on a black background are compared with B0_bk, the rest with B0."""
+    return "B0_bk" if parse_variant(variant)[3] else "B0"
+
+
+def family_order(run):
+    base, layout, prox, black, regularizer = parse_variant(run["variant"])
+    known = list(DESCRIPTIONS)
+    return (black, base != "B0", known.index(run["variant"]) if run["variant"] in known else 99, regularizer,
+            [l for l, _ in LAYOUTS].index(layout) if layout in dict(LAYOUTS) else 9,
+            [p for p, _ in PROX].index(prox) if prox in dict(PROX) else 9, run["seed"] or "")
+
+
+def read_csv(path):
+    with open(path) as file:
+        return list(csv.DictReader(file))
+
+
+def number(value):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return result
+
+
+def fmt(value, digits=2, signed=False, percent=False):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "–"
+    if percent:
+        value *= 100
+    text = f"{value:+.{digits}f}" if signed else f"{value:.{digits}f}"
+    text = text.replace(".", ",").replace("-", "−")
+    return text + ("%" if percent else "")
+
+
+def load_run(path):
+    run = dict(name=path.name, path=path)
+    base = path.name.split("_seed")[0]
+    run["variant"] = base
+    run["seed"] = path.name.split("_seed")[1] if "_seed" in path.name else None
+    rows = read_csv(path / "joint/metrics/eval.csv")
+    curve = [(int(number(r["iteration"])), number(r["eval/hybrid_psnr"])) for r in rows
+             if not math.isnan(number(r.get("eval/hybrid_psnr")))]
+    run["curve"] = curve
+    if curve:
+        best = max(curve, key=lambda item: item[1])
+        run["best_iteration"], run["best_psnr"] = best
+        run["final_iteration"], run["final_psnr"] = curve[-1]
+    for checkpoint in ("best", "last"):
+        audit = path / "audit" / f"{checkpoint}.json"
+        run[checkpoint] = json.loads(audit.read_text()) if audit.is_file() else None
+    run["complete"] = (path / "joint_done.json").is_file()
+    return run
+
+
+def audit_value(run, key, checkpoint="best"):
+    audit = run.get(checkpoint)
+    if not audit:
+        return float("nan")
+    return audit["mean"].get(key, float("nan"))
+
+
+def thumbnail(path, width=300):
+    if not path.is_file():
+        return None
+    image = Image.open(path).convert("RGB")
+    image = image.resize((width, round(image.height * width / image.width)), Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, "JPEG", quality=80)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def select_winner(runs, baseline_variant="B0"):
+    """Best hybrid PSNR among runs that lose <=0.5 dB to the baseline and disentangle clearly better."""
+    runs = [r for r in runs if baseline_name(r["variant"]) == baseline_variant]
+    baseline = next((r for r in runs if r["variant"] == baseline_variant and r["seed"] is None), None)
+    if baseline is None or "best_psnr" not in baseline or not baseline.get("best"):
+        return None, f"Brak kompletnego {baseline_variant} – nie da się zastosować reguły wyboru."
+    b_drop = abs(audit_value(baseline, "clean_near/delta_psnr_bottom"))
+    b_cover = audit_value(baseline, "bottom_alpha_gt_0.99")
+    eligible = []
+    for run in runs:
+        if run is baseline or run["seed"] is not None or "best_psnr" not in run or not run.get("best"):
+            continue
+        drop = abs(audit_value(run, "clean_near/delta_psnr_bottom"))
+        cover = audit_value(run, "bottom_alpha_gt_0.99")
+        if (run["best_psnr"] >= baseline["best_psnr"] - 0.5 and drop <= 0.5 * b_drop and cover >= b_cover):
+            eligible.append(run)
+    b = baseline_variant
+    rule = (f"Reguła ({b}): best PSNR ≥ {b} − 0,5 dB ({fmt(baseline['best_psnr'] - 0.5)} dB), "
+            f"|ΔPSNR dna po czyszczeniu komórek ≤5 j.| ≤ połowa {b} ({fmt(0.5 * b_drop)} dB) "
+            f"oraz pokrycie dna α>0,99 ≥ {b} ({fmt(b_cover, 1, percent=True)}).")
+    if not eligible:
+        return None, rule + " Żaden run nie spełnia wszystkich warunków."
+    winner = max(eligible, key=lambda r: r["best_psnr"])
+    names = ", ".join(r["name"] for r in sorted(eligible, key=lambda r: -r["best_psnr"]))
+    return winner, rule + f" Spełniają: {names}."
+
+
+def line_chart(chart_id, title, runs):
+    width, height, left, right, top, bottom = 760, 300, 52, 16, 16, 34
+    series = [(dict(run, curve=[p for p in run["curve"] if p[0] >= CURVE_FROM]), i + 1)
+              for i, run in enumerate(runs) if run["curve"]][:len(SERIES)]
+    if not series:
+        return ""
+    xs = [x for run, _ in series for x, _ in run["curve"]]
+    ys = [y for run, _ in series for _, y in run["curve"]]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = math.floor(min(ys) * 2) / 2, math.ceil(max(ys) * 2) / 2
+    sx = lambda x: left + (x - x0) / max(x1 - x0, 1) * (width - left - right)  # noqa: E731
+    sy = lambda y: top + (y1 - min(max(y, y0), y1)) / max(y1 - y0, 1e-6) * (height - top - bottom)  # noqa: E731
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" role="img" aria-label="{html.escape(title)}">']
+    tick = 0.5 if y1 - y0 <= 4 else 1.0
+    y = y0
+    while y <= y1 + 1e-9:
+        parts.append(f'<line class="grid" x1="{left}" x2="{width - right}" y1="{sy(y):.1f}" y2="{sy(y):.1f}"/>'
+                     f'<text class="tick" x="{left - 6}" y="{sy(y) + 4:.1f}" text-anchor="end">{fmt(y, 1)}</text>')
+        y += tick
+    for x in range(math.ceil(x0 / 5000) * 5000, x1 + 1, 5000):
+        parts.append(f'<text class="tick" x="{sx(x):.1f}" y="{height - 12}" text-anchor="middle">{x // 1000}k</text>')
+    parts.append(f'<text class="tick" x="{width - right}" y="{height - 0}" text-anchor="end">iteracja</text>')
+    for run, slot in series:
+        points = " ".join(f"{sx(x):.1f},{sy(y):.1f}" for x, y in run["curve"])
+        parts.append(f'<polyline class="series s{slot}" points="{points}"/>')
+    parts.append(f'<line class="crosshair" x1="0" x2="0" y1="{top}" y2="{height - bottom}" visibility="hidden"/>')
+    parts.append(f'<rect class="hit" x="{left}" y="{top}" width="{width - left - right}" '
+                 f'height="{height - top - bottom}" fill="transparent"/></svg>')
+    data = dict(left=left, right=right, width=width, x0=x0, x1=x1,
+                series=[dict(name=run["name"], slot=slot, curve=run["curve"]) for run, slot in series])
+    legend = "".join(f'<span class="key"><i class="sw s{slot}"></i>{html.escape(run["name"])}</span>'
+                     for run, slot in series)
+    return (f'<figure class="viz" id="{chart_id}" data-chart=\'{html.escape(json.dumps(data))}\'>'
+            f'<figcaption>{html.escape(title)}</figcaption><div class="legend">{legend}</div>'
+            f'{"".join(parts)}<div class="tooltip" hidden></div></figure>')
+
+
+def bar_chart(title, rows, digits=2, percent=False, note=""):
+    """Horizontal single-series bars; rows = [(label, value)]. Values may be negative."""
+    rows = [(label, value) for label, value in rows if not math.isnan(value)]
+    if not rows:
+        return ""
+    label_width, width, bar_h, gap = 150, 760, 18, 8
+    height = len(rows) * (bar_h + gap) + 8
+    low, high = min(0.0, min(v for _, v in rows)), max(0.0, max(v for _, v in rows))
+    span = (high - low) or 1.0
+    plot = width - label_width - 70
+    sx = lambda v: label_width + (v - low) / span * plot  # noqa: E731
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" role="img" aria-label="{html.escape(title)}">']
+    zero = sx(0.0)
+    for index, (label, value) in enumerate(rows):
+        y = 4 + index * (bar_h + gap)
+        start, end = sorted((zero, sx(value)))
+        length = max(end - start, 1.0)
+        r = min(4.0, length / 2)
+        if value >= 0:  # rounded data end on the right, square at the baseline
+            path = (f"M{start:.1f},{y} H{start + length - r:.1f} Q{start + length:.1f},{y} {start + length:.1f},{y + r} "
+                    f"V{y + bar_h - r} Q{start + length:.1f},{y + bar_h} {start + length - r:.1f},{y + bar_h} H{start:.1f} Z")
+            text_x, anchor = start + length + 6, "start"
+        else:
+            path = (f"M{end:.1f},{y} H{start + r:.1f} Q{start:.1f},{y} {start:.1f},{y + r} V{y + bar_h - r} "
+                    f"Q{start:.1f},{y + bar_h} {start + r:.1f},{y + bar_h} H{end:.1f} Z")
+            text_x, anchor = zero + 6, "start"
+        shown = fmt(value, digits, percent=percent, signed=low < 0)
+        parts.append(f'<text class="label" x="{label_width - 8}" y="{y + 13}" text-anchor="end">{html.escape(label)}</text>'
+                     f'<path class="bar" d="{path}"><title>{html.escape(label)}: {shown}</title></path>'
+                     f'<text class="value" x="{text_x:.1f}" y="{y + 13}" text-anchor="{anchor}">{shown}</text>')
+    parts.append(f'<line class="axis" x1="{zero:.1f}" x2="{zero:.1f}" y1="0" y2="{height}"/></svg>')
+    note_html = f'<p class="small">{note}</p>' if note else ""
+    return f'<figure class="viz"><figcaption>{html.escape(title)}</figcaption>{"".join(parts)}{note_html}</figure>'
+
+
+def image_grid(runs):
+    tabs, panels = [], []
+    for view_index, view in enumerate(VIEW_NAMES):
+        tabs.append(f'<button class="tab" data-view="{view_index}" aria-pressed="{str(view_index == 2).lower()}">{view}</button>')
+        rows = []
+        for run in runs:
+            if "best_iteration" not in run:
+                continue
+            folder = run["path"] / "joint/evaluation" / f"iteration_{run['best_iteration']:06d}"
+            cells = []
+            for kind, _ in IMAGE_KINDS:
+                source = thumbnail(folder / f"{view_index:04d}_{view}_{kind}.png")
+                cells.append(f'<td><img loading="lazy" src="{source}" alt="{kind}"></td>' if source else "<td>–</td>")
+            rows.append(f'<tr><th>{html.escape(run["name"])}<br><span class="small">it. {run["best_iteration"]}</span></th>'
+                        f'{"".join(cells)}</tr>')
+        header = "".join(f"<th>{label}</th>" for _, label in IMAGE_KINDS)
+        panels.append(f'<div class="panel" data-view="{view_index}" {"" if view_index == 2 else "hidden"}>'
+                      f'<div class="tw"><table class="images"><tr><th></th>{header}</tr>{"".join(rows)}</table></div></div>')
+    return f'<div class="tabs">{"".join(tabs)}</div>{"".join(panels)}'
+
+
+def matrix(title, rows, columns, lookup):
+    """rows/columns: [(key, label)]; lookup(row, column) -> run or None."""
+    header = "".join(f"<th class='num'>{html.escape(label)}</th>" for _, label in columns)
+    body, filled = [], False
+    for row, row_label in rows:
+        cells = []
+        for column, _ in columns:
+            run = lookup(row, column)
+            if run is None or "best_psnr" not in run:
+                cells.append("<td class='num'>–</td>")
+                continue
+            filled = True
+            cells.append(
+                f"<td class='num' title='{html.escape(run['name'])}'><b>{fmt(run['best_psnr'], 2)}</b><br>"
+                f"<span class='small'>woda {fmt(audit_value(run, 'original/psnr_water'), 1)} · "
+                f"ΔPSNR dna {fmt(audit_value(run, 'clean_near/delta_psnr_bottom'), 1, signed=True)}<br>"
+                f"dno α&gt;0,99 {fmt(audit_value(run, 'bottom_alpha_gt_0.99'), 0, percent=True)} · "
+                f"woda bez G {fmt(audit_value(run, 'water_alpha_lt_0.01'), 0, percent=True)}"
+                f"{hue_text(run)}</span></td>")
+        body.append(f"<tr><th>{html.escape(row_label)}</th>{''.join(cells)}</tr>")
+    if not filled:
+        return ""
+    return (f"<h3>{html.escape(title)}</h3><div class='tw'><table><tr><th></th>{header}</tr>{''.join(body)}</table></div>")
+
+
+def hue_text(run):
+    angle = audit_value(run, "backscatter_hue_angle_bottom")
+    return "" if math.isnan(angle) else f"<br>kąt barwy backscatteru dna {fmt(angle, 1)}°"
+
+
+def matrices(runs, all_runs=()):
+    by_name = {r["variant"]: r for r in runs}
+    bases = (("B0", "B0 (kolor per komórka)"), ("E1a_lr1_s1", "lider (globalne c)"))
+    stage_a = matrix("Etap A (czarne tło): rozkład komórek × tryb koloru", LAYOUTS, bases,
+                     lambda layout, base: by_name.get(f"{base}{layout}_bk"))
+    columns = [((base, layout), f"{label}, {name}") for base, label in bases
+               for layout, name in (("", "normalny"), ("_in50r", "50/50 radialnie"))]
+    prox = matrix("Czarne tło: m (krok medium w komórkach z Gaussami) × tryb koloru × rozkład", PROX, columns,
+                  lambda p, key: by_name.get(f"{key[0]}{key[1]}{p}_bk"))
+    by_full = {r["name"]: r for r in all_runs}
+    settings = [("", "B0_bk (bez dodatków)")] + [(code, regularizer_label(code)) for code in
+                ("_chroma001", "_chroma010", "_chroma100", "_csmooth10", "_csmooth100")]
+    chroma = matrix("Czarne tło, B0: kara barwy backscatteru i wygładzanie koloru komórek × seed", settings,
+                    (("", "seed 42"), ("_seed43", "seed 43")),
+                    lambda code, seed: by_full.get(f"B0{code}_bk{seed}"))
+    if not (stage_a or prox or chroma):
+        return ""
+    legend = ("<p class='small'>W komórce: <b>best test PSNR</b>; PSNR wody; ΔPSNR dna po zastąpieniu komórek ≤5 j. "
+              "czystą wodą (bliżej 0 = medium mniej podpiera dno); pokrycie dna Gaussami; odsetek pikseli wody bez Gaussów "
+              "(spadek = Gaussy wchodzą na wodę). Wiersz „1 (brak)” = run z etapu A.</p>")
+    return "<h2>Macierze porównań</h2>" + legend + chroma + stage_a + prox
+
+
+def seed_table(runs):
+    groups = {}
+    for run in runs:
+        groups.setdefault(run["variant"], []).append(run)
+    rows = []
+    for variant, members in groups.items():
+        if len(members) < 2:
+            continue
+        def stats(values):
+            values = [v for v in values if not math.isnan(v)]
+            if not values:
+                return "–"
+            mean = sum(values) / len(values)
+            std = (sum((v - mean) ** 2 for v in values) / max(len(values) - 1, 1)) ** 0.5
+            return f"{fmt(mean)} ± {fmt(std)} (n={len(values)})"
+        rows.append(f"<tr><td>{html.escape(variant)}</td>"
+                    f"<td class='num'>{stats([m.get('best_psnr', float('nan')) for m in members])}</td>"
+                    f"<td class='num'>{stats([m.get('final_psnr', float('nan')) for m in members])}</td>"
+                    f"<td class='num'>{stats([audit_value(m, 'clean_near/delta_psnr_bottom') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_alpha_gt_0.99') for m in members])}</td></tr>")
+    if not rows:
+        return "<p>Brak wariantów z więcej niż jednym seedem.</p>"
+    return ("<div class='tw'><table><tr><th>Wariant</th><th class='num'>best PSNR</th><th class='num'>final PSNR</th>"
+            "<th class='num'>ΔPSNR dna (czyszczenie ≤5 j.)</th><th class='num'>dno α&gt;0,99 [%]</th></tr>"
+            + "".join(rows) + "</table></div>")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sweep", type=Path, action="append", required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--note", action="append", default=[], help="extra remark shown in the summary (repeatable)")
+    args = parser.parse_args()
+    runs = []
+    for sweep in args.sweep:
+        for path in sorted(sweep.iterdir()):
+            if (path / "joint/metrics/eval.csv").is_file():
+                runs.append(load_run(path))
+    runs.sort(key=family_order)
+    main_runs = [r for r in runs if r["seed"] is None]
+    winners, rules = [], []
+    for baseline in ("B0", "B0_bk"):
+        if any(r["variant"] == baseline for r in main_runs):
+            found, text = select_winner(main_runs, baseline)
+            winners.append((baseline, found))
+            rules.append(text)
+    winner_set = {id(w) for _, w in winners if w is not None}
+
+    table_rows = []
+    for run in runs:
+        is_winner = id(run) in winner_set
+        global_color = (run["best"] or {}).get("global_color")
+        swatch = ("<span class='swatch' style='background:rgb({})'></span>".format(
+            ",".join(str(round(255 * min(max(c, 0), 1))) for c in global_color)) if global_color else "")
+        table_rows.append(
+            f"<tr class='{'winner' if is_winner else ''}'><td>{html.escape(run['name'])}{' ★' if is_winner else ''}"
+            f"{'' if run['complete'] else ' <span class=small>(niekompletny)</span>'}</td>"
+            f"<td>{html.escape(describe(run['variant']))}</td>"
+            f"<td class='num'>{fmt(run.get('best_psnr', float('nan')), 3)}</td>"
+            f"<td class='num'>{run.get('best_iteration', '–')}</td>"
+            f"<td class='num'>{fmt(run.get('final_psnr', float('nan')), 3)}</td>"
+            f"<td class='num'>{fmt(audit_value(run, 'original/psnr_bottom'))}</td>"
+            f"<td class='num'>{fmt(audit_value(run, 'gaussian_only_black_psnr_bottom'))}</td>"
+            f"<td class='num'>{fmt(audit_value(run, 'bottom_alpha_gt_0.99'), 1, percent=True)}</td>"
+            f"<td class='num'>{fmt(audit_value(run, 'behind_share_bottom_mean'), 1, percent=True)}</td>"
+            f"<td class='num'>{fmt(audit_value(run, 'clean_anomalous/delta_psnr_bottom'), signed=True)}</td>"
+            f"<td class='num'>{fmt(audit_value(run, 'clean_near/delta_psnr_bottom'), signed=True)}</td>"
+            f"<td class='num'>{swatch}{fmt(audit_value(run, 'marcher_mae_hybrid'), 4)}</td></tr>")
+
+    psnr_of = {r["variant"]: r.get("best_psnr", float("nan")) for r in main_runs}
+    white = [r for r in main_runs if not parse_variant(r["variant"])[3]]
+    groups = [
+        ("B0 i E1a", [r for r in white if r["variant"] == "B0" or (r["variant"].startswith("E1a") and "_box" not in r["variant"])]),
+        ("B0 i E1b", [r for r in white if r["variant"] == "B0" or r["variant"].startswith("E1b")]),
+        ("rozkład komórek: normalny vs równomierny", [r for r in white if r["variant"] in ("B0", "E1a_lr1_s1") or "_box" in r["variant"]]),
+    ]
+    for base, label in (("B0", "B0"), ("E1a_lr1_s1", "lider")):
+        black_runs = [r for r in main_runs if parse_variant(r["variant"])[3] and parse_variant(r["variant"])[0] == base
+                      and not parse_variant(r["variant"])[4]]
+        groups.append((f"czarne tło, {label}: rozkład komórek",
+                       [r for r in black_runs if not parse_variant(r["variant"])[2]]))
+        for layout, layout_label in (("", "rozkład normalny"), ("_in50r", "50% pudełko + 50% radialnie")):
+            groups.append((f"czarne tło, {label}, {layout_label}: m przy Gaussach",
+                           [r for r in black_runs if parse_variant(r["variant"])[1] == layout]))
+    groups.append(("czarne tło, B0: kara barwy backscatteru i wygładzanie koloru",
+                   [r for r in main_runs if r["variant"] == "B0_bk"
+                    or (parse_variant(r["variant"])[4] and parse_variant(r["variant"])[0] == "B0"
+                        and not parse_variant(r["variant"])[1])]))
+    charts = "".join(line_chart(f"curve_{i}", f"Test hybrid PSNR [dB] od 2k iteracji: {title}", members)
+                     for i, (title, members) in enumerate(groups)
+                     if len(members) >= 2 and any(parse_variant(r["variant"])[0] != "B0" or r["variant"] not in ("B0", "B0_bk")
+                                                  for r in members))
+    bars = (
+        bar_chart("Best test hybrid PSNR względem bazy (B0, a dla czarnego tła B0_bk) [dB]",
+                  [(r["name"], r.get("best_psnr", float("nan")) - psnr_of.get(baseline_name(r["variant"]), float("nan")))
+                   for r in main_runs if r["variant"] not in ("B0", "B0_bk")], 3,
+                  note="Reguła wyboru dopuszcza spadek do −0,5 dB względem swojej bazy.")
+        + bar_chart("Pokrycie dna Gaussami: udział pikseli z α > 0,99 (best)",
+                    [(r["name"], audit_value(r, "bottom_alpha_gt_0.99")) for r in main_runs], 1, percent=True)
+        + bar_chart("Udział backscatteru zza powierzchni na dnie (best; im mniej, tym lepiej)",
+                    [(r["name"], audit_value(r, "behind_share_bottom_mean")) for r in main_runs], 1, percent=True)
+        + bar_chart("ΔPSNR dna po zastąpieniu komórek ≤5 j. od Gaussów czystą wodą (best; bliżej 0 = lepsze rozdzielenie)",
+                    [(r["name"], audit_value(r, "clean_near/delta_psnr_bottom")) for r in main_runs], 2,
+                    note="Gaussy nie są douczane po zmianie – to miara zależności rozwiązania od lokalnego medium."))
+
+    winner_html = "".join(
+        (f"<p><b>Zwycięzca względem {baseline}: {html.escape(found['name'])}</b> "
+         f"(best PSNR {fmt(found['best_psnr'], 3)} dB, it. {found['best_iteration']}).</p>")
+        if found else f"<p><b>Brak zwycięzcy względem {baseline}.</b></p>" for baseline, found in winners)
+    rule = " ".join(rules)
+    notes = "".join(f"<li>{html.escape(note)}</li>" for note in args.note)
+    winner_html += f"<ul class='small'>{notes}</ul>" if notes else ""
+    template = TEMPLATE.replace("{{RULE}}", html.escape(rule)).replace("{{WINNER}}", winner_html)
+    template = template.replace("{{TABLE}}", "".join(table_rows)).replace("{{CHARTS}}", charts)
+    template = template.replace("{{MATRIX}}", matrices(main_runs, runs))
+    template = template.replace("{{BARS}}", bars).replace("{{IMAGES}}", image_grid(main_runs))
+    template = template.replace("{{SEEDS}}", seed_table(runs))
+    template = template.replace("{{SOURCES}}", html.escape(", ".join(str(s) for s in args.sweep)))
+    slots = "".join(f".s{i + 1}{{--c:{c}}}" for i, c in enumerate(SERIES))
+    media = "".join(f':root:not([data-theme="light"]) .s{i + 1}{{--c:{c}}}' for i, c in enumerate(SERIES_DARK))
+    toggle = "".join(f':root[data-theme="dark"] .s{i + 1}{{--c:{c}}}' for i, c in enumerate(SERIES_DARK))
+    template = template.replace("{{SLOTS}}", slots).replace("{{SLOTS_MEDIA}}", media).replace("{{SLOTS_TOGGLE}}", toggle)
+    output = args.output or args.sweep[0] / "report.html"
+    output.write_text(template, encoding="utf-8")
+    print(output)
+
+
+TEMPLATE = """<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sweep medium fix</title>
+<style>
+:root{--bg:#f7f8fa;--panel:#fcfcfb;--ink:#0b0b0b;--muted:#52514e;--line:#dfe3e8;--grid:#ebeae6;--accent:#1f5fae;
+--accent-soft:#e7effa;--code:#eef1f5;--bar:#2a78d6;--win:#fff6dd}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#111418;--panel:#1a1a19;--ink:#f2f2f0;
+--muted:#c3c2b7;--line:#2b3138;--grid:#2c2c2a;--accent:#7fb0ef;--accent-soft:#1b2a3d;--code:#20262d;--bar:#3987e5;--win:#33301f}}
+:root[data-theme="dark"]{--bg:#111418;--panel:#1a1a19;--ink:#f2f2f0;--muted:#c3c2b7;--line:#2b3138;--grid:#2c2c2a;
+--accent:#7fb0ef;--accent-soft:#1b2a3d;--code:#20262d;--bar:#3987e5;--win:#33301f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1180px;margin:0 auto;padding:28px 16px 80px}h1{font-size:1.7rem;margin:0 0 6px}
+h2{font-size:1.25rem;margin:40px 0 10px;padding-top:10px;border-top:1px solid var(--line)}
+p,li{max-width:80ch}.small{font-size:.85rem;color:var(--muted)}code{font-family:ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:4px;font-size:.88em}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.tldr{border-left:4px solid var(--accent);background:var(--accent-soft)}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{background:var(--code);font-weight:600}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+table.runs td:nth-child(2){min-width:300px}tr.winner td{background:var(--win)}
+.swatch{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px;border:1px solid var(--line)}
+.viz{margin:18px 0;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;position:relative}
+.viz figcaption{font-weight:600;margin-bottom:6px}.chart{width:100%;height:auto;display:block}
+.chart .grid{stroke:var(--grid);stroke-width:1}.chart .axis{stroke:var(--muted);stroke-width:1}
+.chart text{fill:var(--muted);font-size:11px}.chart .label{fill:var(--ink);font-size:12px}.chart .value{fill:var(--ink);font-size:12px;font-variant-numeric:tabular-nums}
+{{SLOTS}}@media (prefers-color-scheme: dark){ {{SLOTS_MEDIA}} }
+{{SLOTS_TOGGLE}}
+.chart .series{fill:none;stroke:var(--c);stroke-width:2;stroke-linejoin:round}.sw{background:var(--c)}.chart .bar{fill:var(--bar)}.chart .bar:hover{opacity:.8}
+.chart .crosshair{stroke:var(--muted);stroke-dasharray:3 3}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.85rem;margin-bottom:6px}.key i{display:inline-block;width:14px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.tooltip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:.8rem;box-shadow:0 2px 8px rgba(0,0,0,.15);white-space:nowrap}
+.tooltip i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle;background:var(--c)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.tab{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:3px 12px;cursor:pointer}
+.tab[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent)}
+table.images td{padding:3px}table.images img{width:100%;min-width:180px;max-width:300px;display:block;border-radius:4px}
+</style></head><body><main>
+<h1>Sweep: globalne c, pokrycie dna i culling w stylu WS</h1>
+<p class="small">Źródła: {{SOURCES}}. Metryki obrazu: <code>joint/metrics/eval.csv</code> (pełna rozdzielczość, 4 widoki testowe).
+Metryki rozdzielenia: <code>scripts/medium_audit.py</code> na checkpoincie best (piksele co 4., „dno” = dolne 40% kadru).</p>
+<div class="card tldr"><h2 style="margin-top:0;border:0;padding:0">Wynik</h2>{{WINNER}}<p class="small">{{RULE}}</p></div>
+<h2>Tabela runów</h2>
+<div class="tw"><table class="runs"><tr><th>Run</th><th>Ustawienie</th><th class="num">best PSNR</th><th class="num">it.</th>
+<th class="num">final PSNR</th><th class="num">PSNR dna</th><th class="num">Gaussy/czarne PSNR dna</th>
+<th class="num">dno α&gt;0,99</th><th class="num">backscatter zza dna</th><th class="num">ΔPSNR dna: anomalne→woda</th>
+<th class="num">ΔPSNR dna: ≤5 j.→woda</th><th class="num">c / MAE marchera</th></tr>{{TABLE}}</table></div>
+<p class="small">Kolumny od „PSNR dna” w prawo pochodzą z audytu checkpointu best. „Gaussy/czarne” = render samych Gaussów na czarnym tle względem podwodnego GT (diagnostyka, nie miara fizyczna).
+Kolorowy kwadrat = nauczony globalny kolor wody c. MAE marchera = zgodność niezależnej reimplementacji z rendererem (wiarygodność kolumn audytu).</p>
+{{MATRIX}}
+<h2>Krzywe uczenia</h2>{{CHARTS}}
+<h2>Metryki kluczowe</h2>{{BARS}}
+<h2>Obrazy (checkpoint best)</h2>
+<p class="small"><b>backscatter</b> to odpowiednik obrazu „Medium” z water-splatting. Celem jest gładki gradient wody bez tekstury dna.</p>
+{{IMAGES}}
+<h2>Seedy</h2>{{SEEDS}}
+<h2>Zastrzeżenia</h2><ul>
+<li>Jeden seed na ustawienie w sweepie głównym; różnice poniżej ~0,1–0,2 dB nie są rozstrzygające bez sekcji „Seedy”.</li>
+<li>Maska „dno = dolne 40% kadru” jest zgrubna, ale stała dla wszystkich runów.</li>
+<li>Ablacja komórek nie douczała Gaussów; mierzy zależność obecnego rozwiązania od lokalnego medium.</li></ul>
+</main>
+<script>
+(() => {
+  document.querySelectorAll('figure[data-chart]').forEach(fig => {
+    const data = JSON.parse(fig.dataset.chart), svg = fig.querySelector('svg'), hit = svg.querySelector('.hit');
+    const cross = svg.querySelector('.crosshair'), tip = fig.querySelector('.tooltip');
+    const iters = [...new Set(data.series.flatMap(s => s.curve.map(p => p[0])))].sort((a, b) => a - b);
+    const sx = x => data.left + (x - data.x0) / Math.max(data.x1 - data.x0, 1) * (data.width - data.left - data.right);
+    function show(event) {
+      const box = svg.getBoundingClientRect(), scale = data.width / box.width;
+      const px = (event.clientX - box.left) * scale;
+      const it = iters.reduce((a, b) => Math.abs(sx(b) - px) < Math.abs(sx(a) - px) ? b : a);
+      cross.setAttribute('x1', sx(it)); cross.setAttribute('x2', sx(it)); cross.setAttribute('visibility', 'visible');
+      const rows = data.series.map(s => [s, (s.curve.find(p => p[0] === it) || [])[1]]).filter(r => r[1] !== undefined)
+        .sort((a, b) => b[1] - a[1]);
+      tip.innerHTML = `<b>iteracja ${it}</b><br>` + rows.map(([s, v]) =>
+        `<i class="s${s.slot}"></i>${s.name}: ${v.toFixed(3).replace('.', ',')} dB`).join('<br>');
+      tip.hidden = false;
+      const fbox = fig.getBoundingClientRect(); let left = event.clientX - fbox.left + 14;
+      if (left + tip.offsetWidth > fbox.width) left = event.clientX - fbox.left - tip.offsetWidth - 14;
+      tip.style.left = Math.max(4, left) + 'px'; tip.style.top = (event.clientY - fbox.top + 10) + 'px';
+    }
+    hit.addEventListener('pointermove', show);
+    hit.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); });
+  });
+  document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+    document.querySelectorAll('.panel').forEach(p => p.hidden = p.dataset.view !== button.dataset.view);
+  }));
+})();
+</script></body></html>
+"""
+
+if __name__ == "__main__":
+    main()
