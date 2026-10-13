@@ -54,7 +54,7 @@ def parse_variant(variant):
     """Split <base>[_in..][_chroma..][_csmooth..][_prox..][_ring][_bk] into
     (base, layout, prox, black, regularizer)."""
     match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
-                         r"(_kappa\d+|_scov\d{3}|_under\d{3}|_scale0dens2)?(_prox\d\d)?(_ring)?(_bk)?", variant)
+                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_prox\d\d)?(_ring)?(_bk)?", variant)
     base, layout, chroma, smooth, seabed, prox, ring, black = match.groups()
     return (base, layout or "", (prox or "") + (ring or ""), bool(black),
             (chroma or "") + (smooth or "") + (seabed or ""))
@@ -62,6 +62,9 @@ def parse_variant(variant):
 
 def regularizer_label(code):
     parts = []
+    for digit, exponent in re.findall(r"_scov(\d)e(\d)", code):
+        parts.append(f"jednostronne pokrycie dna {digit}e-{exponent}")
+    code = re.sub(r"_scov\de\d", "", code)
     for kind, value in re.findall(r"_(chroma|csmooth|kappa|scov|under|scale0dens)(\d+)", code):
         if kind == "chroma":
             parts.append("kara barwy backscatteru " + fmt(int(value) / 100, 2))
@@ -341,7 +344,7 @@ def matrices(runs, all_runs=()):
                     (("", "seed 42"), ("_seed43", "seed 43")),
                     lambda code, seed: by_full.get(f"B0{code}_bk{seed}"))
     seabed_rows = [("", "domyślna B0_chroma100_bk")] + [(code, regularizer_label(code)) for code in
-                   ("_kappa2", "_kappa4", "_scov001", "_scov010", "_scov100", "_scov200",
+                   ("_kappa2", "_kappa4", "_scov1e4", "_scov1e3", "_scov3e3", "_scov001", "_scov010", "_scov100", "_scov200",
                     "_under001", "_under010", "_under100", "_under200", "_scale0dens2")]
     seabed = matrix("Czarne tło, domyślna konfiguracja: pokrycie dna Gaussami × seed", seabed_rows,
                     (("", "seed 42"), ("_seed43", "seed 43")),

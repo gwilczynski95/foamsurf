@@ -16,7 +16,7 @@ from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
     surface_coverage_loss, under_surface_loss)
 from training.surface_depth import opaque_depth, sorted_hit_alphas
 from training.surface import LocalOverlap
-from training.proximity import damp_step, proximity_multiplier, surface_cell_mask
+from training.proximity import damp_step, nearest_sites, proximity_multiplier, surface_cell_mask
 from training.surface import install_coverage
 
 ACCUMULATORS=('contribution','visibility','path_length','weighted_path_length','max_error','gradient')
@@ -453,7 +453,12 @@ class MediumFixTrainer(CapacityTrainer):
         fraction = float(found.float().mean())
         if under_rays.shape[0] == 0:
             return model.medium.raw_density.sum() * 0, fraction
-        behind = self.renderer.render(under_rays, voronoi=model.medium.render_scene(), background=(0.0, 0.0, 0.0))
+        medium = model.medium.render_scene()
+        # Every under-surface ray has its own origin; the renderer's own start-cell
+        # search would build a [rays, sites, 3] tensor (several GB), so do it in chunks.
+        start_points = nearest_sites(under_rays[:, :3].detach(), medium.sites.detach()).to(torch.uint32)
+        behind = self.renderer.render(under_rays, voronoi=medium, background=(0.0, 0.0, 0.0),
+                                      start_points=start_points)
         if behind.backscatter is None:
             raise RuntimeError("Under-surface prior requires the RGB medium")
         return under_surface_loss(behind.backscatter), fraction

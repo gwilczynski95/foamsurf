@@ -616,3 +616,42 @@ def test_seabed_priors_short_real_training(tmp_path):
     checkpoint = torch.load(root / "joint/checkpoints/initialization.pt", map_location="cpu", weights_only=False)
     kappa = 1 + torch.nn.functional.softplus(checkpoint["model"]["gaussians.raw_kappa"])
     assert torch.allclose(kappa, torch.full_like(kappa, 4.0), atol=1e-4)
+
+
+def test_under_surface_passes_chunked_start_cells_to_renderer():
+    """Regression: without start_points the renderer builds a [rays, sites, 3] tensor (OOM)."""
+    from types import SimpleNamespace
+    from training.colmap_joint_trainer import MediumFixTrainer
+    from training.losses import MediumFixConfig
+
+    torch.manual_seed(0)
+    count = 300
+    gaussians = SimpleNamespace(
+        means=torch.tensor([[0.0, 0.0, 2.0]]), log_scales=torch.zeros(1, 2),
+        quaternions=torch.tensor([[1.0, 0.0, 0.0, 0.0]]), opacity_logits=torch.full((1, 1), 10.0),
+        raw_kappa=torch.zeros(1, 1))
+    sites = torch.randn(50, 3) * 5
+    calls = {}
+
+    class Medium:
+        raw_density = torch.zeros(50, 6, requires_grad=True)
+
+        def render_scene(self):
+            return SimpleNamespace(sites=sites)
+
+    def render(rays, **kwargs):
+        calls.update(kwargs, rays=rays)
+        return SimpleNamespace(backscatter=torch.full((rays.shape[0], 3), 0.2))
+
+    rays = torch.cat((torch.randn(count, 2) * 0.1, torch.zeros(count, 1), torch.zeros(count, 2), torch.ones(count, 1)), 1)
+    only = SimpleNamespace(hit_depths=torch.full((1, count), 2.0), hit_indices=torch.zeros(1, count, dtype=torch.int32))
+    trainer = SimpleNamespace(config=SimpleNamespace(renderer=SimpleNamespace(gaussian_radius_squared=11.3449)),
+                              medium_fix=MediumFixConfig(under_surface_weight=1.0), renderer=SimpleNamespace(render=render))
+    loss, fraction = MediumFixTrainer._under_surface(trainer, rays, only, SimpleNamespace(gaussians=gaussians, medium=Medium()))
+    assert fraction == 1.0 and float(loss) == pytest.approx(0.2)
+    start = calls["start_points"]
+    assert start.dtype == torch.uint32 and start.shape == (count,)
+    origins = calls["rays"][:, :3]
+    assert torch.allclose(origins[:, 2], torch.full((count,), 2.0 + 0.01))  # just behind the surface
+    expected = torch.cdist(origins, sites).argmin(1)
+    assert torch.equal(start.long(), expected)

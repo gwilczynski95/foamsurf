@@ -26,6 +26,8 @@
 # Seabed coverage from the default B0_chroma100_bk, BLACK background (22 runs):
 #   smoke=$(sbatch --parsable scripts/smoke_tests.sbatch)
 #   FS_VARIANT_SET=seabed sbatch --dependency=afterok:$smoke --array=0-21%7 scripts/sweep_medium_fix.sbatch
+# Smaller one-sided seabed coverage weights 1e-4, 1e-3, 3e-3 (6 runs):
+#   FS_VARIANT_SET=seabed2 sbatch --array=0-5%7 scripts/sweep_medium_fix.sbatch
 # Both stage A and prox in one array (30 runs):
 #   FS_VARIANT_SET=stageA_prox sbatch --array=0-29%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
@@ -80,8 +82,13 @@ SEABED_VARIANTS=()
 for setting in kappa2 kappa4 scov001 scov010 scov100 scov200 under001 under010 under100 under200 scale0dens2; do
   SEABED_VARIANTS+=("B0_chroma100_${setting}_bk" "B0_chroma100_${setting}_bk_seed43")
 done
+# _scov<D>e<E>: one-sided seabed coverage weight D * 10^-E.
+SEABED2_VARIANTS=()
+for setting in scov1e4 scov1e3 scov3e3; do
+  SEABED2_VARIANTS+=("B0_chroma100_${setting}_bk" "B0_chroma100_${setting}_bk_seed43")
+done
 ALL_VARIANTS=("${VARIANTS[@]}" "${BOX_VARIANTS[@]}" "${STAGEA_VARIANTS[@]}" "${PROX_VARIANTS[@]}"
-              "${CHROMA_VARIANTS[@]}" "${SEABED_VARIANTS[@]}")
+              "${CHROMA_VARIANTS[@]}" "${SEABED_VARIANTS[@]}" "${SEABED2_VARIANTS[@]}")
 case "${FS_VARIANT_SET:-main}" in
   main) ;;
   box) VARIANTS=("${BOX_VARIANTS[@]}") ;;
@@ -90,6 +97,7 @@ case "${FS_VARIANT_SET:-main}" in
   stageA_prox) VARIANTS=("${STAGEA_VARIANTS[@]}" "${PROX_VARIANTS[@]}") ;;
   chroma) VARIANTS=("${CHROMA_VARIANTS[@]}") ;;
   seabed) VARIANTS=("${SEABED_VARIANTS[@]}") ;;
+  seabed2) VARIANTS=("${SEABED2_VARIANTS[@]}") ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 
@@ -119,6 +127,12 @@ variant_overrides() {
     local value=${BASH_REMATCH[2]}
     variant_overrides "${BASH_REMATCH[1]}" || return
     echo "joint.model.gaussian_initial_kappa=$value.0"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_scov([1-9])e([0-9])$ ]]; then
+    local digit=${BASH_REMATCH[2]} exponent=${BASH_REMATCH[3]}
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "medium_fix.surface_coverage_weight=${digit}.0e-${exponent}"
     return 0
   fi
   if [[ "$name" =~ ^(.+)_(scov|under)([0-9]{3})$ ]]; then
