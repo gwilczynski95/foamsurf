@@ -28,6 +28,9 @@
 #   FS_VARIANT_SET=seabed sbatch --dependency=afterok:$smoke --array=0-21%7 scripts/sweep_medium_fix.sbatch
 # Smaller one-sided seabed coverage weights 1e-4, 1e-3, 3e-3 (6 runs):
 #   FS_VARIANT_SET=seabed2 sbatch --array=0-5%7 scripts/sweep_medium_fix.sbatch
+# More Gaussians: densify threshold 2e-4 (size penalty kept) with a cap of 500k / 700k / 1M,
+# for B0_bk, the default B0_chroma100_bk and B0_chroma100_scov3e3_bk, 2 seeds each (18 runs):
+#   FS_VARIANT_SET=gauss sbatch --array=0-17%7 scripts/sweep_medium_fix.sbatch
 # Both stage A and prox in one array (30 runs):
 #   FS_VARIANT_SET=stageA_prox sbatch --array=0-29%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
@@ -87,8 +90,13 @@ SEABED2_VARIANTS=()
 for setting in scov1e4 scov1e3 scov3e3; do
   SEABED2_VARIANTS+=("B0_chroma100_${setting}_bk" "B0_chroma100_${setting}_bk_seed43")
 done
+# _g<N>k: densify threshold 2e-4 and at most N thousand Gaussians (size penalty unchanged).
+GAUSS_VARIANTS=()
+for base in B0 B0_chroma100 B0_chroma100_scov3e3; do
+  for cap in 500 700 1000; do GAUSS_VARIANTS+=("${base}_g${cap}k_bk" "${base}_g${cap}k_bk_seed43"); done
+done
 ALL_VARIANTS=("${VARIANTS[@]}" "${BOX_VARIANTS[@]}" "${STAGEA_VARIANTS[@]}" "${PROX_VARIANTS[@]}"
-              "${CHROMA_VARIANTS[@]}" "${SEABED_VARIANTS[@]}" "${SEABED2_VARIANTS[@]}")
+              "${CHROMA_VARIANTS[@]}" "${SEABED_VARIANTS[@]}" "${SEABED2_VARIANTS[@]}" "${GAUSS_VARIANTS[@]}")
 case "${FS_VARIANT_SET:-main}" in
   main) ;;
   box) VARIANTS=("${BOX_VARIANTS[@]}") ;;
@@ -98,6 +106,7 @@ case "${FS_VARIANT_SET:-main}" in
   chroma) VARIANTS=("${CHROMA_VARIANTS[@]}") ;;
   seabed) VARIANTS=("${SEABED_VARIANTS[@]}") ;;
   seabed2) VARIANTS=("${SEABED2_VARIANTS[@]}") ;;
+  gauss) VARIANTS=("${GAUSS_VARIANTS[@]}") ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 
@@ -121,6 +130,13 @@ variant_overrides() {
   if [[ "$name" =~ ^(.+)_ring$ ]]; then
     variant_overrides "${BASH_REMATCH[1]}" || return
     echo "medium_fix.proximity_neighbors=true"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_g([0-9]+)k$ ]]; then
+    local cap=$(( BASH_REMATCH[2] * 1000 ))
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "joint.gaussian_adaptation.gradient_threshold=0.0002"
+    echo "joint.gaussian_adaptation.max_points=$cap"
     return 0
   fi
   if [[ "$name" =~ ^(.+)_kappa([0-9]+)$ ]]; then

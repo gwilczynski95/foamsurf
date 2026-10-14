@@ -54,10 +54,11 @@ def parse_variant(variant):
     """Split <base>[_in..][_chroma..][_csmooth..][_prox..][_ring][_bk] into
     (base, layout, prox, black, regularizer)."""
     match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
-                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_prox\d\d)?(_ring)?(_bk)?", variant)
-    base, layout, chroma, smooth, seabed, prox, ring, black = match.groups()
+                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_g\d+k)?"
+                         r"(_prox\d\d)?(_ring)?(_bk)?", variant)
+    base, layout, chroma, smooth, seabed, gauss, prox, ring, black = match.groups()
     return (base, layout or "", (prox or "") + (ring or ""), bool(black),
-            (chroma or "") + (smooth or "") + (seabed or ""))
+            (chroma or "") + (smooth or "") + (seabed or "") + (gauss or ""))
 
 
 def regularizer_label(code):
@@ -65,6 +66,9 @@ def regularizer_label(code):
     for digit, exponent in re.findall(r"_scov(\d)e(\d)", code):
         parts.append(f"jednostronne pokrycie dna {digit}e-{exponent}")
     code = re.sub(r"_scov\de\d", "", code)
+    for cap in re.findall(r"_g(\d+)k", code):
+        parts.append(f"do {cap} tys. Gaussów (próg zagęszczania 2e-4)")
+    code = re.sub(r"_g\d+k", "", code)
     for kind, value in re.findall(r"_(chroma|csmooth|kappa|scov|under|scale0dens)(\d+)", code):
         if kind == "chroma":
             parts.append("kara barwy backscatteru " + fmt(int(value) / 100, 2))
@@ -152,6 +156,9 @@ def load_run(path):
         best = max(curve, key=lambda item: item[1])
         run["best_iteration"], run["best_psnr"] = best
         run["final_iteration"], run["final_psnr"] = curve[-1]
+        best_row = next((r for r in rows if int(number(r["iteration"])) == run["best_iteration"]), {})
+        fps = number(best_row.get("eval/hybrid_fps"))
+        run["best_fps"] = None if math.isnan(fps) else fps
     for checkpoint in ("best", "last"):
         audit = path / "audit" / f"{checkpoint}.json"
         run[checkpoint] = json.loads(audit.read_text()) if audit.is_file() else None
@@ -325,7 +332,14 @@ def hue_text(run):
     angle = audit_value(run, "backscatter_hue_angle_bottom")
     text = "" if math.isnan(angle) else f"<br>kąt barwy backscatteru dna {fmt(angle, 1)}°"
     partial = audit_value(run, "bottom_alpha_gt_0.5") - audit_value(run, "bottom_alpha_gt_0.99")
-    return text + ("" if math.isnan(partial) else f"<br>dno półprzezroczyste (α 0,5–0,99) {fmt(partial, 0, percent=True)}")
+    text += "" if math.isnan(partial) else f"<br>dno półprzezroczyste (α 0,5–0,99) {fmt(partial, 0, percent=True)}"
+    count = ((run.get("best") or {}).get("gaussians") or {}).get("count")
+    fps = run.get("best_fps")
+    if count:
+        text += f"<br>Gaussów {count / 1000:.0f} tys."
+    if fps:
+        text += f" · {fps:.0f} FPS"
+    return text
 
 
 def matrices(runs, all_runs=()):
@@ -349,12 +363,19 @@ def matrices(runs, all_runs=()):
     seabed = matrix("Czarne tło, domyślna konfiguracja: pokrycie dna Gaussami × seed", seabed_rows,
                     (("", "seed 42"), ("_seed43", "seed 43")),
                     lambda code, seed: by_full.get(f"B0_chroma100{code}_bk{seed}"))
-    if not (stage_a or prox or chroma or seabed):
+    bases = (("B0", "B0_bk"), ("B0_chroma100", "domyślna B0_chroma100_bk"),
+             ("B0_chroma100_scov3e3", "domyślna + pokrycie dna 3e-3"))
+    caps = (("", "ok. 290 tys. (próg 4e-4)"), ("500", "do 500 tys."), ("700", "do 700 tys."), ("1000", "do 1 mln"))
+    gauss = "".join(
+        matrix(f"Czarne tło: baza × liczba Gaussów, seed {label}", bases, caps,
+               lambda base, cap, seed=seed: by_full.get(f"{base}_bk{seed}" if not cap else f"{base}_g{cap}k_bk{seed}"))
+        for seed, label in (("", "42"), ("_seed43", "43")))
+    if not (stage_a or prox or chroma or seabed or gauss):
         return ""
     legend = ("<p class='small'>W komórce: <b>best test PSNR</b>; PSNR wody; ΔPSNR dna po zastąpieniu komórek ≤5 j. "
               "czystą wodą (bliżej 0 = medium mniej podpiera dno); pokrycie dna Gaussami; odsetek pikseli wody bez Gaussów "
               "(spadek = Gaussy wchodzą na wodę). Wiersz „1 (brak)” = run z etapu A.</p>")
-    return "<h2>Macierze porównań</h2>" + legend + seabed + chroma + stage_a + prox
+    return "<h2>Macierze porównań</h2>" + legend + gauss + seabed + chroma + stage_a + prox
 
 
 def seed_table(runs):
@@ -448,6 +469,9 @@ def main():
                     or any(c in r["variant"] for c in ("_kappa", "_scov", "_scale0dens2"))]))
     groups.append(("domyślna konfiguracja: kara za medium pod dnem",
                    [r for r in main_runs if r["variant"] == "B0_chroma100_bk" or "_under" in r["variant"]]))
+    for base, label in (("B0", "B0_bk"), ("B0_chroma100", "domyślna"), ("B0_chroma100_scov3e3", "domyślna + pokrycie 3e-3")):
+        groups.append((f"{label}: liczba Gaussów",
+                       [r for r in main_runs if r["variant"] == f"{base}_bk" or re.fullmatch(rf"{base}_g\d+k_bk", r["variant"])]))
     groups.append(("czarne tło, B0: kara barwy backscatteru i wygładzanie koloru",
                    [r for r in main_runs if r["variant"] == "B0_bk"
                     or (parse_variant(r["variant"])[4] and parse_variant(r["variant"])[0] == "B0"
