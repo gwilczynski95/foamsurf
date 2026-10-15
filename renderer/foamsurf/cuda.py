@@ -521,11 +521,18 @@ class NativeHybridRenderer:
             if start_points is None:
                 with torch.no_grad():
                     origins = rays[:, :3]
-                    unique, inverse = torch.unique(
-                        origins, dim=0, return_inverse=True
-                    )
-                    nearest = self._nearest_sites(points, unique)
-                    start_points = nearest[inverse].to(torch.uint32)
+                    if bool((origins == origins[:1]).all()):
+                        # One camera: one lookup, same site torch.unique would give.
+                        nearest = self._nearest_sites(points, origins[:1])
+                        start_points = (
+                            nearest.expand(ray_count).contiguous().to(torch.uint32)
+                        )
+                    else:
+                        unique, inverse = torch.unique(
+                            origins, dim=0, return_inverse=True
+                        )
+                        nearest = self._nearest_sites(points, unique)
+                        start_points = nearest[inverse].to(torch.uint32)
             else:
                 start_points = start_points.reshape(-1).to(
                     device=points.device, dtype=torch.uint32
@@ -651,22 +658,8 @@ class NativeHybridRenderer:
             )
 
         if hit_depths.size(0):
-            valid_hits = (
-                (hit_indices >= 0)
-                & (hit_depths >= self.near)
-                & (hit_depths <= self.far)
-            )
-            masked_depths = torch.where(
-                valid_hits,
-                hit_depths,
-                torch.full_like(hit_depths, float("inf")),
-            )
-            surface_depth, slots = masked_depths.min(dim=0)
-            surface_index = torch.gather(hit_indices, 0, slots[None]).squeeze(0)
-            surface_depth = torch.where(
-                torch.isfinite(surface_depth),
-                surface_depth,
-                torch.full_like(surface_depth, -1.0),
+            surface_depth, surface_index = self._bindings.surface_hits(
+                hit_depths, hit_indices, self.near, self.far
             )
         else:
             surface_depth = torch.full(

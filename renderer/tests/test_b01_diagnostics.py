@@ -189,6 +189,9 @@ class _BindingSpy:
         self.wrapped = wrapped
         self.diagnostic_calls = 0
 
+    def __getattr__(self, name):
+        return getattr(self.wrapped, name)
+
     def hybrid_forward(self, *args, **kwargs):
         return self.wrapped.hybrid_forward(*args, **kwargs)
 

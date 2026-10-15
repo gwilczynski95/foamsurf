@@ -89,6 +89,16 @@ void hybrid_backward_cuda(
     float *raw_kappa_grad,
     const void *stream);
 
+void surface_hit_cuda(uint32_t num_rays,
+                      uint32_t hit_buffer_size,
+                      float near_plane,
+                      float far_plane,
+                      const float *hit_depths,
+                      const int32_t *hit_indices,
+                      float *surface_depth,
+                      int32_t *surface_index,
+                      const void *stream);
+
 // RGB medium: per-channel attenuation and backscatter [V,3] in one traversal.
 struct RgbSceneTensors {
     const float *points;

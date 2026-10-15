@@ -1133,6 +1133,38 @@ __global__ void hybrid_backward_kernel(
     }
 }
 
+// First valid Gaussian hit per ray: the smallest depth among slots with an
+// index >= 0 and near <= depth <= far, the earliest slot on ties, slot 0 when
+// no slot is valid (then depth -1), exactly as the former PyTorch where/min/
+// gather over the [K, R] buffers.
+__global__ void surface_hit_kernel(uint32_t num_rays,
+                                   uint32_t hit_buffer_size,
+                                   float near_plane,
+                                   float far_plane,
+                                   const float *hit_depths,
+                                   const int32_t *hit_indices,
+                                   float *surface_depth,
+                                   int32_t *surface_index) {
+    uint32_t ray_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ray_index >= num_rays) {
+        return;
+    }
+    float best_depth = INFINITY;
+    uint32_t best_slot = 0;
+    for (uint32_t slot = 0; slot < hit_buffer_size; ++slot) {
+        uint32_t offset = slot * num_rays + ray_index;
+        float depth = hit_depths[offset];
+        bool valid = hit_indices[offset] >= 0 && depth >= near_plane &&
+                     depth <= far_plane;
+        if (valid && depth < best_depth) {
+            best_depth = depth;
+            best_slot = slot;
+        }
+    }
+    surface_index[ray_index] = hit_indices[best_slot * num_rays + ray_index];
+    surface_depth[ray_index] = isfinite(best_depth) ? best_depth : -1.0f;
+}
+
 // RGB medium in one traversal. It computes what rgb_medium.compose_cuda gets
 // from six launches of the scalar kernel above. Pass p < 3 is the direct pass
 // of channel p (density attenuation[:, p], medium colour 0); pass p >= 3 is the
@@ -1888,6 +1920,24 @@ void hybrid_backward_cuda(
         gaussian_colors_grad,
         opacity_logits_grad,
         raw_kappa_grad);
+}
+
+void surface_hit_cuda(uint32_t num_rays,
+                      uint32_t hit_buffer_size,
+                      float near_plane,
+                      float far_plane,
+                      const float *hit_depths,
+                      const int32_t *hit_indices,
+                      float *surface_depth,
+                      int32_t *surface_index,
+                      const void *stream) {
+    constexpr uint32_t block_size = 256;
+    uint32_t grid_size = (num_rays + block_size - 1) / block_size;
+    cudaStream_t cuda_stream =
+        *reinterpret_cast<const cudaStream_t *>(stream);
+    surface_hit_kernel<<<grid_size, block_size, 0, cuda_stream>>>(
+        num_rays, hit_buffer_size, near_plane, far_plane, hit_depths,
+        hit_indices, surface_depth, surface_index);
 }
 
 void rgb_forward_cuda(

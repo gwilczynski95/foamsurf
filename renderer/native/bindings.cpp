@@ -309,6 +309,37 @@ py::tuple hybrid_diagnostics(TensorList values,
         ray_statistics, gaussian_statistics, medium_statistics);
 }
 
+py::tuple surface_hits(torch::Tensor hit_depths,
+                       torch::Tensor hit_indices,
+                       float near_plane,
+                       float far_plane) {
+    hit_depths = hit_depths.contiguous();
+    hit_indices = hit_indices.contiguous();
+    require_float_cuda(hit_depths, "hit_depths");
+    TORCH_CHECK(hit_indices.is_cuda() &&
+                    hit_indices.scalar_type() == torch::kInt32,
+                "hit_indices must be CUDA int32");
+    TORCH_CHECK(hit_depths.dim() == 2 && hit_depths.size(0) > 0 &&
+                    hit_indices.sizes() == hit_depths.sizes(),
+                "hit buffers must have matching [K, R] shapes with K > 0");
+    auto ray_count = hit_depths.size(1);
+    auto depth = torch::empty({ray_count}, hit_depths.options());
+    auto index = torch::empty({ray_count}, hit_indices.options());
+    if (ray_count > 0) {
+        cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+        foamsurf::surface_hit_cuda(static_cast<uint32_t>(ray_count),
+                                   static_cast<uint32_t>(hit_depths.size(0)),
+                                   near_plane,
+                                   far_plane,
+                                   hit_depths.data_ptr<float>(),
+                                   hit_indices.data_ptr<int32_t>(),
+                                   depth.data_ptr<float>(),
+                                   index.data_ptr<int32_t>(),
+                                   &stream);
+    }
+    return py::make_tuple(depth, index);
+}
+
 // RGB tensor list: points, attenuation [V,3], backscatter [V,3], medium_colors,
 // adjacency, offsets, rays, start_points, hit_depths, hit_indices, means,
 // log_scales, quaternions, gaussian_colors, opacity_logits, raw_kappa,
@@ -459,6 +490,12 @@ void init_hybrid_bindings(py::module &module) {
                py::arg("far_plane"),
                py::arg("threshold") = 0.001f,
                py::arg("max_intersections") = 1024);
+    module.def("surface_hits",
+               surface_hits,
+               py::arg("hit_depths"),
+               py::arg("hit_indices"),
+               py::arg("near_plane"),
+               py::arg("far_plane"));
     module.def("rgb_forward",
                rgb_forward,
                py::arg("tensors"),
