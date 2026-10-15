@@ -22,6 +22,7 @@ from foamsurf_model import (
     VoronoiMediumModel,
     VoronoiTopologyController,
 )
+from foamsurf_model.gaussian_adaptation import scheduled_opacity_threshold
 from .checkpoints import (
     checkpoint_payload,
     load_checkpoint,
@@ -49,10 +50,8 @@ from .sampler import RandomCameraRaySampler
 
 
 def _primitive_gradient_magnitude(module) -> torch.Tensor:
-    # Only per-primitive tensors; scene-wide ones (global medium color) have
-    # no primitive axis.
     squared = None
-    for parameter in module.named_primitive_parameters().values():
+    for parameter in module.parameters():
         if parameter.grad is None or parameter.ndim == 0:
             continue
         value = parameter.grad.detach().reshape(parameter.shape[0], -1)
@@ -531,7 +530,9 @@ class Trainer:
             "adaptation/opacity_threshold": (
                 self.gaussian_adaptation.config.min_opacity
                 if self.gaussian_adaptation.config.policy != "graphdeco"
-                else self.gaussian_adaptation.opacity_threshold(iteration)
+                else scheduled_opacity_threshold(
+                    self.gaussian_adaptation.config, iteration
+                )
             ),
             "adaptation/densification_due": int(
                 self.gaussian_adaptation.should_densify(iteration)
@@ -882,7 +883,7 @@ class Trainer:
                 if self.last_adaptation_post_psnr == self.last_adaptation_post_psnr
                 else float(loss.psnr.item())
             )
-            changed = self.gaussian_adaptation.reset_opacity(iteration)
+            changed = self.gaussian_adaptation.reset_opacity()
             self.last_opacity_reset = {"applied": 1, "changed": changed}
             self._schedule_medium_freeze(
                 iteration, self.config.gaussian_adaptation.medium_freeze_after_reset

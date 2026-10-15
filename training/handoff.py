@@ -55,10 +55,8 @@ def apply_medium_lr_multipliers(
         name: float(rate) * float(multipliers[name])
         for name, rate in rates.items()
     }
-    from .optimizer import medium_schedule_name
-
     for group in optimizer.param_groups:
-        name = medium_schedule_name(group.get("name"))
+        name = group.get("name")
         if name in adjusted:
             group["lr"] = adjusted[name]
     return adjusted

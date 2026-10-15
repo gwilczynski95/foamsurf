@@ -7,11 +7,8 @@ from training.config import ExperimentConfig
 from training.end_to_end import atomic_json
 from training.warmup_profile import WarmupProfile
 
-def transfer_medium(payload,device,color_activation='dc',color_mode='per_cell'):
-    """Exact physical transfer, independent of the warmup's canonical color export.
-
-    color_mode='global' starts the shared color at the mean transferred color.
-    """
+def transfer_medium(payload,device,color_activation='dc'):
+    """Exact physical transfer, independent of the warmup's canonical color export."""
     import torch
     from foamsurf_model.medium import VoronoiMediumModel
     state={n:payload['model']['medium.'+n] for n in VoronoiMediumModel.PARAMETER_NAMES}
@@ -31,10 +28,6 @@ def transfer_medium(payload,device,color_activation='dc',color_mode='per_cell'):
                                             payload['model']['medium.bbox_max'],device)
     # Outer origin is not a permanent protection from adaptation in joint.
     medium.guard_mask.zero_()
-    if color_mode=='global':
-        medium.enable_global_color(medium.colors.detach().mean(0))
-    elif color_mode!='per_cell':
-        raise ValueError('Unknown medium color mode')
     return medium
 
 
@@ -89,8 +82,7 @@ def run_stage(output,stage):
             random.seed(config.seed);np.random.seed(config.seed);torch.manual_seed(config.seed);torch.cuda.manual_seed_all(config.seed)
             payload=load_checkpoint(output/'warmup/checkpoints/last.pt')
             medium=transfer_medium(payload,config.device,
-                manifest.get('medium_color_activation','dc'),
-                manifest.get('medium_fix',{}).get('color_mode','per_cell'))
+                manifest.get('medium_color_activation','dc'))
             dataset=load_dataset(config.dataset.source_path,resolution=config.dataset.resolution,
                                  device=config.device,llffhold=config.dataset.llffhold)
             points,colors=dataset.initial_point_cloud()
@@ -109,8 +101,7 @@ def run_stage(output,stage):
             trainer._evaluate_and_checkpoint(0)
             atomic_json(output/'handoff_report.json',dict(source_count=medium.point_count,
                 retained_count=medium.point_count,gaussian_count=len(points),removed_count=0,
-                color_activation=medium.color_activation,color_mode=medium.color_mode,
-                fresh_optimizers=True,joint_iteration=0))
+                color_activation=medium.color_activation,fresh_optimizers=True,joint_iteration=0))
         install_joint_topology(trainer)
         if trainer.start_iteration<=config.optimization.iterations:
             result=trainer.fit()

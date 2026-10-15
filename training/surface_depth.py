@@ -1,4 +1,5 @@
-"""Per-ray Gaussian hit alphas and the depth where the Gaussian surface becomes opaque."""
+"""Per-ray Gaussian hit alphas, the depth where the Gaussian surface becomes opaque,
+and chunked nearest-site lookup for rays that start inside the medium."""
 from __future__ import annotations
 
 import torch
@@ -48,3 +49,17 @@ def opaque_depth(depth, alpha, threshold=0.5):
     first = below.float().argmax(0)
     surface = depth.gather(0, first[None])[0]
     return torch.where(found, surface, torch.full_like(surface, float("inf"))), found
+
+
+@torch.no_grad()
+def nearest_sites(points: torch.Tensor, sites: torch.Tensor) -> torch.Tensor:
+    """Voronoi cell index of every point (exact nearest site, chunked).
+
+    The renderer's own start-cell search builds a [points, sites, 3] tensor,
+    which runs out of memory when many rays start at different points.
+    """
+    out = torch.empty(points.shape[0], dtype=torch.long, device=points.device)
+    chunk = max(1024, int(1.5e8 // max(sites.shape[0], 1)))
+    for start in range(0, points.shape[0], chunk):
+        out[start:start + chunk] = torch.cdist(points[start:start + chunk], sites).argmin(1)
+    return out

@@ -560,64 +560,7 @@ class MixedRaySampler:
         return self.batch_from_indices(indices)
 
 
-def stratified_box_sites(lo, hi, count):
-    """Jittered grid with near-cubic cells: per-axis counts follow box extents.
-
-    Grid cells are drawn without replacement and one site is placed uniformly
-    inside each, so spacing is roughly (volume / count)^(1/3) on every axis.
-    """
-    lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
-    size = np.maximum(hi - lo, 1e-6)
-    spacing = (np.prod(size) / count) ** (1 / 3)
-    cells = np.maximum(np.ceil(size / spacing), 1).astype(np.int64)
-    while np.prod(cells) < count:  # rounding can leave fewer cells than sites
-        cells[np.argmax(size / cells)] += 1
-    chosen = np.random.choice(int(np.prod(cells)), size=count, replace=False)
-    index = np.stack(np.unravel_index(chosen, cells), axis=-1)
-    unit = (index + np.random.random_sample((count, 3))) / cells
-    return (lo + unit * size).astype(np.float32), cells.tolist(), float(spacing)
-
-
-def outer_shell_sites(lo, hi, count, mode, radius, extent):
-    """Sites strictly outside the box [lo, hi].
-
-    radial: uniform directions from the box center, distance log-uniform from
-    the box boundary to ``radius`` times that boundary distance, so cells grow
-    with distance but cover view directions evenly.
-    normal: the 'normal' Gaussian (std = extent * half box), rejecting samples
-    that fall inside the box.
-    """
-    lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
-    center, half = (lo + hi) / 2, np.maximum((hi - lo) / 2, 1e-6)
-    if mode == 'radial':
-        direction = np.random.normal(size=(count, 3))
-        direction /= np.linalg.norm(direction, axis=1, keepdims=True)
-        boundary = np.min(half / np.maximum(np.abs(direction), 1e-12), axis=1)
-        scale = np.exp(np.random.random_sample(count) * np.log(radius))
-        # Nudge off the boundary so every site is strictly outside the box.
-        return (center + direction * (boundary * scale * (1 + 1e-6))[:, None]).astype(np.float32)
-    kept = []
-    total = 0
-    for _ in range(1000):
-        sample = center + np.random.normal(size=(4 * count, 3)) * half * extent
-        sample = sample[np.any((sample < lo) | (sample > hi), axis=1)]
-        kept.append(sample)
-        total += len(sample)
-        if total >= count:
-            return np.concatenate(kept)[:count].astype(np.float32)
-    raise ValueError('Normal outer sampling could not leave the box; increase spatial_extent')
-
-
-def sample_spatial(points, cameras, count, fraction, extent, distribution='normal', margin=0.1,
-                   inner_fraction=0.5, outer='radial', outer_radius=10.0):
-    """Spatial Voronoi sites around the COLMAP (1-99%) and camera box.
-
-    normal: axis-aligned Gaussian, std = extent * half box (unclipped).
-    box: jittered grid filling the box enlarged by ``margin`` of its size per
-    side; ``extent`` is unused.
-    box_shell: ``inner_fraction`` of the sites as the box grid, the rest
-    outside the enlarged box (see outer_shell_sites).
-    """
+def sample_spatial(points, cameras, count, fraction, extent):
     points = np.asarray(points, dtype=np.float32)
     cameras = np.asarray(cameras, dtype=np.float32)
     if points.ndim != 2 or points.shape[1] != 3 or len(points) < 5:
@@ -630,36 +573,18 @@ def sample_spatial(points, cameras, count, fraction, extent, distribution='norma
         raise ValueError('Invalid spatial initialization')
     lo = np.minimum(np.percentile(points,1,axis=0),cameras.min(axis=0))
     hi = np.maximum(np.percentile(points,99,axis=0),cameras.max(axis=0))
-    if distribution not in ('normal','box','box_shell') or not np.isfinite(margin) or margin < 0:
-        raise ValueError('Invalid spatial distribution')
-    if distribution == 'box_shell' and (not 0 < inner_fraction < 1 or outer not in ('radial','normal')
-                                        or not np.isfinite(outer_radius) or outer_radius <= 1):
-        raise ValueError('Invalid box_shell settings')
     center = (lo+hi)/2
+    # Axis-aligned Gaussian: one standard deviation is half the robust extent.
+    # extent=1 and 2 give moderate/wide coverage, without clipping to this box.
+    scale = np.maximum((hi-lo)/2,1e-3)*extent
     n = int(count*fraction)
     selected = np.random.randint(len(points),size=n)
     jitter = max(float(np.linalg.norm(hi-lo))*1e-3,1e-5)
     near = points[selected] + np.random.normal(size=(n,3))*jitter
-    report = dict(distribution=distribution,center=center.tolist(),colmap_count=n,
-                  spatial_count=count-n,jitter=jitter,robust_lower=lo.tolist(),robust_upper=hi.tolist())
-    if distribution == 'normal':
-        # Axis-aligned Gaussian: one standard deviation is half the robust extent.
-        # extent=1 and 2 give moderate/wide coverage, without clipping to this box.
-        scale = np.maximum((hi-lo)/2,1e-3)*extent
-        spatial = center + np.random.normal(size=(count-n,3))*scale
-        report.update(std=scale.tolist())
-    else:
-        pad = (hi-lo)*margin
-        inner = count-n if distribution == 'box' else int(round((count-n)*inner_fraction))
-        spatial, cells, spacing = stratified_box_sites(lo-pad, hi+pad, inner)
-        report.update(box_lower=(lo-pad).tolist(), box_upper=(hi+pad).tolist(), margin=margin,
-                      grid_cells=cells, spacing=spacing, inner_count=inner)
-        if distribution == 'box_shell':
-            shell = outer_shell_sites(lo-pad, hi+pad, count-n-inner, outer, outer_radius, extent)
-            spatial = np.concatenate((spatial, shell))
-            report.update(outer=outer, outer_radius=outer_radius, outer_count=len(shell))
+    spatial = center + np.random.normal(size=(count-n,3))*scale
     sites = np.concatenate((near,spatial)).astype(np.float32)
-    return sites, report
+    return sites, dict(center=center.tolist(),std=scale.tolist(),colmap_count=n,
+                       spatial_count=count-n,jitter=jitter,robust_lower=lo.tolist(),robust_upper=hi.tolist())
 
 @torch.no_grad()
 def initialize_spatial_medium(medium,dataset,config,profile):
@@ -670,10 +595,7 @@ def initialize_spatial_medium(medium,dataset,config,profile):
     points,_ = dataset.initial_point_cloud()
     cameras = torch.stack([c.origin for c in dataset.train]).cpu().numpy()
     sites, report = sample_spatial(points,cameras,profile.spatial_count,
-                                  profile.spatial_colmap_fraction,profile.spatial_extent,
-                                  profile.spatial_distribution,profile.spatial_box_margin,
-                                  profile.spatial_inner_fraction,profile.spatial_outer,
-                                  profile.spatial_outer_radius)
+                                  profile.spatial_colmap_fraction,profile.spatial_extent)
     device=medium.sites.device
     medium.sites=nn.Parameter(torch.as_tensor(sites,device=device))
     # All are ordinary learnable medium cells, with identical density law.

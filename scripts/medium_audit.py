@@ -194,8 +194,6 @@ def main():
     opacity = gaussians.opacities.detach().flatten()
     summary = dict(
         checkpoint=str(checkpoint), iteration=int(trainer.start_iteration - 1), stride=args.stride,
-        color_mode=medium.color_mode,
-        global_color=medium.global_color.detach().tolist() if medium.color_mode == "global" else None,
         cells=dict(total=int(sites.shape[0]), near=int(near.sum()), anomalous=int(anomalous.sum()),
                    color_std_near=float(colors[distance < 2].std(0).mean()) if (distance < 2).sum() > 1 else float("nan"),
                    color_std_far=float(colors[far].std(0).mean()),

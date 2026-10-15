@@ -270,20 +270,12 @@ def masked_direct_consistency(gaussian_image, direct_image, gaussian_alpha, thre
 
 @dataclass(frozen=True)
 class MediumFixConfig:
-    """Medium-color mode and per-ray Gaussian coverage prior (IUI3 joint)."""
-    color_mode: str = 'per_cell'
-    coverage_weight: float = 0.0
-    coverage_start: int = 1000
-    coverage_ramp: int = 2000
-    coverage_rays: int = 131072
-    # Surface cells (containing an eligible Gaussian) keep only this fraction of
-    # each medium step; 1 disables. Ramp from 1 starting at proximity_start.
-    proximity_multiplier: float = 1.0
-    proximity_start: int = 1000
-    proximity_ramp: int = 1000
-    proximity_min_opacity: float = 0.5
-    proximity_colmap_distance: float = 2.0
-    proximity_neighbors: bool = False
+    """Seabed/backscatter priors of the IUI3 joint stage, all off by default.
+
+    Every prior uses the same random subset of ``prior_rays`` training rays and
+    one Gaussian-only render of it.
+    """
+    prior_rays: int = 131072
     # Backscatter chroma prior: on rays where Gaussians are opaque, backscatter
     # should have the water's color (any brightness); see backscatter_chroma_loss.
     chroma_weight: float = 0.0
@@ -308,24 +300,15 @@ class MediumFixConfig:
     under_surface_offset: float = 0.01
 
     def __post_init__(self):
-        if self.color_mode not in ('per_cell', 'global'):
-            raise ValueError('medium_fix.color_mode must be per_cell or global')
-        if not math.isfinite(self.proximity_multiplier) or not 0 <= self.proximity_multiplier <= 1:
-            raise ValueError('medium_fix.proximity_multiplier must be in [0, 1]')
-        for name in ('proximity_start', 'proximity_ramp'):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
-                raise ValueError(f'Invalid medium_fix.{name}')
-        if not 0 <= self.proximity_min_opacity < 1:
-            raise ValueError('medium_fix.proximity_min_opacity must be in [0, 1)')
-        if not math.isfinite(self.proximity_colmap_distance) or self.proximity_colmap_distance <= 0:
-            raise ValueError('medium_fix.proximity_colmap_distance must be positive')
-        if type(self.proximity_neighbors) is not bool:
-            raise ValueError('medium_fix.proximity_neighbors must be a boolean')
-        if not math.isfinite(self.chroma_weight) or self.chroma_weight < 0:
-            raise ValueError('Invalid medium_fix.chroma_weight')
-        for name in ('chroma_start', 'chroma_ramp'):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
-                raise ValueError(f'Invalid medium_fix.{name}')
+        if type(self.prior_rays) is not int or self.prior_rays < 1:
+            raise ValueError('Invalid medium_fix.prior_rays')
+        for prefix in ('chroma', 'surface_coverage', 'under_surface'):
+            weight = getattr(self, f'{prefix}_weight')
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(f'Invalid medium_fix.{prefix}_weight')
+            for name in (f'{prefix}_start', f'{prefix}_ramp'):
+                if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                    raise ValueError(f'Invalid medium_fix.{name}')
         if not 0 <= self.chroma_margin_degrees < 90:
             raise ValueError('medium_fix.chroma_margin_degrees must be in [0, 90)')
         if not 0 < self.chroma_water_alpha < self.chroma_alpha_threshold < 1:
@@ -333,28 +316,13 @@ class MediumFixConfig:
         if not 0 <= self.chroma_ema < 1:
             raise ValueError('medium_fix.chroma_ema must be in [0, 1)')
         for prefix in ('surface_coverage', 'under_surface'):
-            weight = getattr(self, f'{prefix}_weight')
-            if not math.isfinite(weight) or weight < 0:
-                raise ValueError(f'Invalid medium_fix.{prefix}_weight')
-            for name in (f'{prefix}_start', f'{prefix}_ramp'):
-                if type(getattr(self, name)) is not int or getattr(self, name) < 0:
-                    raise ValueError(f'Invalid medium_fix.{name}')
             if not 0 < getattr(self, f'{prefix}_threshold') < 1:
                 raise ValueError(f'medium_fix.{prefix}_threshold must be in (0, 1)')
         if not math.isfinite(self.under_surface_offset) or self.under_surface_offset < 0:
             raise ValueError('medium_fix.under_surface_offset must be non-negative')
-        if not math.isfinite(self.coverage_weight) or self.coverage_weight < 0:
-            raise ValueError('Invalid coverage weight')
-        for name in ('coverage_start', 'coverage_ramp', 'coverage_rays'):
-            value = getattr(self, name)
-            if type(value) is not int or value < (1 if name == 'coverage_rays' else 0):
-                raise ValueError(f'Invalid medium_fix.{name}')
 
     def as_dict(self):
         return asdict(self)
-
-    def coverage_weight_at(self, iteration):
-        return ramp_weight(self.coverage_weight, iteration, self.coverage_start, self.coverage_ramp)
 
     def chroma_weight_at(self, iteration):
         return ramp_weight(self.chroma_weight, iteration, self.chroma_start, self.chroma_ramp)
@@ -366,18 +334,6 @@ class MediumFixConfig:
     def under_surface_weight_at(self, iteration):
         return ramp_weight(self.under_surface_weight, iteration, self.under_surface_start,
                            self.under_surface_ramp)
-
-
-def coverage_binarization_loss(alpha):
-    """Mean A(1-A) of per-ray Gaussian-only alpha A = 1 - T_g.
-
-    Unlike per-Gaussian opacity binarization, this acts on pixel coverage:
-    each ray is pushed to be fully covered by Gaussians or entirely empty.
-    """
-    alpha = alpha.reshape(-1)
-    if alpha.numel() == 0:
-        return alpha.sum() * 0
-    return (alpha * (1 - alpha)).mean()
 
 
 def water_direction(backscatter, gaussian_alpha, water_alpha):

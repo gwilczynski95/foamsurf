@@ -10,16 +10,6 @@ class WarmupProfile:
     spatial_count: int = 25000
     spatial_colmap_fraction: float = 0.1
     spatial_extent: float = 1.0
-    # normal: Gaussian around the COLMAP/camera box (std = spatial_extent * half box);
-    # box: jittered near-cubic grid inside that box enlarged by spatial_box_margin.
-    spatial_distribution: str = "normal"
-    spatial_box_margin: float = 0.1
-    # box_shell: spatial_inner_fraction of sites as the box grid, the rest outside it;
-    # spatial_outer is radial (log distance up to spatial_outer_radius x box boundary)
-    # or normal (the normal distribution with box samples rejected).
-    spatial_inner_fraction: float = 0.5
-    spatial_outer: str = "radial"
-    spatial_outer_radius: float = 10.0
     ray_sampling: str = "single_camera"
     population_policy: str = "foamsurf"
     population_factor: float = 1.15
@@ -85,16 +75,6 @@ class WarmupProfile:
                 raise ValueError("invalid spatial COLMAP fraction")
             if not math.isfinite(self.spatial_extent) or self.spatial_extent <= 0:
                 raise ValueError("invalid spatial extent")
-            if self.spatial_distribution not in ("normal", "box", "box_shell"):
-                raise ValueError("spatial_distribution must be normal, box or box_shell")
-            if not 0 < self.spatial_inner_fraction < 1:
-                raise ValueError("spatial_inner_fraction must be in (0, 1)")
-            if self.spatial_outer not in ("radial", "normal"):
-                raise ValueError("spatial_outer must be radial or normal")
-            if not math.isfinite(self.spatial_outer_radius) or self.spatial_outer_radius <= 1:
-                raise ValueError("spatial_outer_radius must exceed 1")
-            if not math.isfinite(self.spatial_box_margin) or self.spatial_box_margin < 0:
-                raise ValueError("invalid spatial box margin")
             if self.outer_points != 0 or self.corner_guards:
                 raise ValueError("spatial sites are ordinary medium sites, not guards")
         if self.site_initialization in ("pcd", "spatial") and (self.corner_guards or self.density_beta != 10 or self.activation_scale != 1):

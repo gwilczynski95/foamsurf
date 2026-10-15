@@ -46,9 +46,8 @@ def _heatmap(value: torch.Tensor) -> torch.Tensor:
 
 
 def _gradient_magnitude(module) -> torch.Tensor:
-    # Per-primitive tensors only; a global medium color has no primitive axis.
     squared = None
-    for parameter in module.named_primitive_parameters().values():
+    for parameter in module.parameters():
         if parameter.grad is None or parameter.ndim == 0:
             continue
         per_primitive = parameter.grad.detach().reshape(
