@@ -31,7 +31,8 @@ void validate_inputs(const torch::Tensor &points,
                      const torch::Tensor &gaussian_colors,
                      const torch::Tensor &opacity_logits,
                      const torch::Tensor &raw_kappa,
-                     const torch::Tensor &background) {
+                     const torch::Tensor &background,
+                     int64_t density_columns = 1) {
     require_float_cuda(points, "points");
     require_float_cuda(densities, "densities");
     require_float_cuda(medium_colors, "medium_colors");
@@ -57,8 +58,8 @@ void validate_inputs(const torch::Tensor &points,
     TORCH_CHECK(points.dim() == 2 && points.size(1) == 3,
                 "points must have shape [V, 3]");
     TORCH_CHECK(densities.dim() == 2 && densities.size(0) == points.size(0) &&
-                    densities.size(1) == 1,
-                "densities must have shape [V, 1]");
+                    densities.size(1) == density_columns,
+                "densities must have shape [V, ", density_columns, "]");
     TORCH_CHECK(medium_colors.dim() == 2 &&
                     medium_colors.size(0) == points.size(0) &&
                     medium_colors.size(1) == 3,
@@ -308,6 +309,130 @@ py::tuple hybrid_diagnostics(TensorList values,
         ray_statistics, gaussian_statistics, medium_statistics);
 }
 
+// RGB tensor list: points, attenuation [V,3], backscatter [V,3], medium_colors,
+// adjacency, offsets, rays, start_points, hit_depths, hit_indices, means,
+// log_scales, quaternions, gaussian_colors, opacity_logits, raw_kappa,
+// background.
+void validate_rgb_inputs(TensorList &values) {
+    TORCH_CHECK(values.size() == 17, "RGB medium expects 17 tensors");
+    for (auto &value : values) {
+        value = value.contiguous();
+    }
+    validate_inputs(values[0], values[1], values[3], values[4], values[5],
+                    values[6], values[7], values[8], values[9], values[10],
+                    values[11], values[12], values[13], values[14], values[15],
+                    values[16], 3);
+    require_float_cuda(values[2], "backscatter");
+    TORCH_CHECK(values[2].sizes() == values[1].sizes(),
+                "backscatter must have the shape of attenuation");
+}
+
+foamsurf::RgbSceneTensors rgb_scene(const TensorList &values) {
+    return {values[0].data_ptr<float>(),
+            values[1].data_ptr<float>(),
+            values[2].data_ptr<float>(),
+            values[3].data_ptr<float>(),
+            values[4].data_ptr<uint32_t>(),
+            values[5].data_ptr<uint32_t>(),
+            values[6].data_ptr<float>(),
+            values[7].data_ptr<uint32_t>(),
+            values[8].data_ptr<float>(),
+            values[9].data_ptr<int32_t>(),
+            values[10].data_ptr<float>(),
+            values[11].data_ptr<float>(),
+            values[12].data_ptr<float>(),
+            values[13].data_ptr<float>(),
+            values[14].data_ptr<float>(),
+            values[15].data_ptr<float>()};
+}
+
+py::tuple rgb_forward(TensorList values,
+                      float near_plane,
+                      float far_plane,
+                      float threshold,
+                      uint32_t max_intersections) {
+    validate_rgb_inputs(values);
+    auto settings = settings_for(values[0], values[10], values[6], values[8],
+                                 near_plane, far_plane, threshold,
+                                 max_intersections);
+    auto ray_count = values[6].size(0);
+    auto direct = torch::empty({ray_count, 3}, values[6].options());
+    auto backscatter = torch::empty({ray_count, 3}, values[6].options());
+    auto transmission = torch::empty({ray_count, 3}, values[6].options());
+    auto intersections = torch::empty(
+        {ray_count, 1}, values[6].options().dtype(torch::kUInt32));
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    foamsurf::rgb_forward_cuda(settings,
+                               rgb_scene(values),
+                               values[16].data_ptr<float>(),
+                               direct.data_ptr<float>(),
+                               backscatter.data_ptr<float>(),
+                               transmission.data_ptr<float>(),
+                               intersections.data_ptr<uint32_t>(),
+                               &stream);
+    return py::make_tuple(direct, backscatter, transmission, intersections);
+}
+
+py::tuple rgb_backward(TensorList values,
+                       TensorList outputs,
+                       TensorList output_grads,
+                       float near_plane,
+                       float far_plane,
+                       float threshold,
+                       uint32_t max_intersections) {
+    validate_rgb_inputs(values);
+    TORCH_CHECK(outputs.size() == 3 && output_grads.size() == 3,
+                "outputs and output_grads must be (direct, backscatter, "
+                "transmission)");
+    auto ray_count = values[6].size(0);
+    for (size_t index = 0; index < 3; ++index) {
+        outputs[index] = outputs[index].contiguous();
+        output_grads[index] = output_grads[index].contiguous();
+        require_float_cuda(outputs[index], "output");
+        require_float_cuda(output_grads[index], "output_grad");
+        TORCH_CHECK(outputs[index].dim() == 2 &&
+                        outputs[index].size(0) == ray_count &&
+                        outputs[index].size(1) == 3 &&
+                        output_grads[index].sizes() == outputs[index].sizes(),
+                    "outputs and output_grads must have shape [R, 3]");
+    }
+    auto settings = settings_for(values[0], values[10], values[6], values[8],
+                                 near_plane, far_plane, threshold,
+                                 max_intersections);
+    TensorList gradients = {torch::zeros_like(values[0]),
+                            torch::zeros_like(values[1]),
+                            torch::zeros_like(values[2]),
+                            torch::zeros_like(values[3]),
+                            torch::zeros_like(values[10]),
+                            torch::zeros_like(values[11]),
+                            torch::zeros_like(values[12]),
+                            torch::zeros_like(values[13]),
+                            torch::zeros_like(values[14]),
+                            torch::zeros_like(values[15])};
+    foamsurf::RgbGradientTensors gradient_pointers{
+        gradients[0].data_ptr<float>(), gradients[1].data_ptr<float>(),
+        gradients[2].data_ptr<float>(), gradients[3].data_ptr<float>(),
+        gradients[4].data_ptr<float>(), gradients[5].data_ptr<float>(),
+        gradients[6].data_ptr<float>(), gradients[7].data_ptr<float>(),
+        gradients[8].data_ptr<float>(), gradients[9].data_ptr<float>()};
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    foamsurf::rgb_backward_cuda(settings,
+                                rgb_scene(values),
+                                outputs[0].data_ptr<float>(),
+                                outputs[1].data_ptr<float>(),
+                                outputs[2].data_ptr<float>(),
+                                output_grads[0].data_ptr<float>(),
+                                output_grads[1].data_ptr<float>(),
+                                output_grads[2].data_ptr<float>(),
+                                gradient_pointers,
+                                &stream);
+    py::tuple result(gradients.size());
+    for (size_t index = 0; index < gradients.size(); ++index) {
+        result[index] = gradients[index];
+    }
+    return result;
+}
+
 } // namespace
 
 void init_hybrid_bindings(py::module &module) {
@@ -330,6 +455,22 @@ void init_hybrid_bindings(py::module &module) {
     module.def("hybrid_diagnostics",
                hybrid_diagnostics,
                py::arg("tensors"),
+               py::arg("near_plane"),
+               py::arg("far_plane"),
+               py::arg("threshold") = 0.001f,
+               py::arg("max_intersections") = 1024);
+    module.def("rgb_forward",
+               rgb_forward,
+               py::arg("tensors"),
+               py::arg("near_plane"),
+               py::arg("far_plane"),
+               py::arg("threshold") = 0.001f,
+               py::arg("max_intersections") = 1024);
+    module.def("rgb_backward",
+               rgb_backward,
+               py::arg("tensors"),
+               py::arg("outputs"),
+               py::arg("output_grads"),
                py::arg("near_plane"),
                py::arg("far_plane"),
                py::arg("threshold") = 0.001f,

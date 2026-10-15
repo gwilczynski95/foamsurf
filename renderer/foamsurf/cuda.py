@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+import os
 from pathlib import Path
 
 import torch
@@ -182,6 +183,91 @@ class _HybridCudaFunction(torch.autograd.Function):
         )
 
 
+class _RgbCudaFunction(torch.autograd.Function):
+    """RGB medium in one traversal: direct, backscatter and direct transmittance [R,3]."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        bindings,
+        points,
+        attenuation,
+        backscatter,
+        medium_colors,
+        adjacency,
+        offsets,
+        rays,
+        start_points,
+        hit_depths,
+        hit_indices,
+        means,
+        log_scales,
+        quaternions,
+        gaussian_colors,
+        opacity_logits,
+        raw_kappa,
+        background,
+        near_plane,
+        far_plane,
+        threshold,
+        max_intersections,
+    ):
+        tensors = (
+            points,
+            attenuation,
+            backscatter,
+            medium_colors,
+            adjacency,
+            offsets,
+            rays,
+            start_points,
+            hit_depths,
+            hit_indices,
+            means,
+            log_scales,
+            quaternions,
+            gaussian_colors,
+            opacity_logits,
+            raw_kappa,
+            background,
+        )
+        direct, scattered, transmission, num_intersections = bindings.rgb_forward(
+            list(tensors), near_plane, far_plane, threshold, max_intersections
+        )
+        ctx.bindings = bindings
+        ctx.settings = (near_plane, far_plane, threshold, max_intersections)
+        ctx.save_for_backward(*tensors, direct, scattered, transmission)
+        ctx.mark_non_differentiable(num_intersections)
+        return direct, scattered, transmission, num_intersections
+
+    @staticmethod
+    def backward(ctx, direct_gradient, scattered_gradient, transmission_gradient, _):
+        *tensors, direct, scattered, transmission = ctx.saved_tensors
+        gradients = ctx.bindings.rgb_backward(
+            list(tensors),
+            [direct, scattered, transmission],
+            [direct_gradient, scattered_gradient, transmission_gradient],
+            *ctx.settings,
+        )
+        del ctx.bindings
+        return (
+            None,
+            *gradients[:4],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            *gradients[4:],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 class NativeHybridRenderer:
     """OptiX hit generation plus fused Voronoi/Gaussian CUDA compositing.
 
@@ -212,6 +298,15 @@ class NativeHybridRenderer:
         self.far = float(far)
         self.transmittance_threshold = float(transmittance_threshold)
         self.max_intersections = int(max_intersections)
+        # RGB medium: "fused" (one traversal) or "six_pass" (rgb_medium.compose_cuda,
+        # kept for A/B comparison); same results within atomic-order noise.
+        self.rgb_medium_backend = os.environ.get(
+            "FOAMSURF_RGB_MEDIUM_BACKEND", "fused"
+        )
+        if self.rgb_medium_backend not in {"fused", "six_pass"}:
+            raise ValueError(
+                "FOAMSURF_RGB_MEDIUM_BACKEND must be 'fused' or 'six_pass'"
+            )
         self._bindings = self._load_foamsurf_bindings()
         self._flare_renderer_directory = flare_renderer_directory
         self._number_of_sides = int(number_of_sides)
@@ -478,11 +573,15 @@ class NativeHybridRenderer:
         compositor = _HybridCudaFunction.apply
         rgb_parts = None
         if isinstance(voronoi, RGBVoronoiScene):
-            from .rgb_medium import compose_cuda
+            from .rgb_medium import compose_cuda, compose_fused
+            if self.rgb_medium_backend == "six_pass":
+                compose, apply = compose_cuda, _HybridCudaFunction.apply
+            else:
+                compose, apply = compose_fused, _RgbCudaFunction.apply
             def compositor(*args):
                 nonlocal rgb_parts
-                rgba_out, counts, rgb_parts = compose_cuda(
-                    _HybridCudaFunction.apply, args, voronoi.attenuation, voronoi.backscatter)
+                rgba_out, counts, rgb_parts = compose(
+                    apply, args, voronoi.attenuation, voronoi.backscatter)
                 return rgba_out, counts
 
         rgba, num_intersections = compositor(

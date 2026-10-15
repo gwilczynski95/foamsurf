@@ -1133,6 +1133,619 @@ __global__ void hybrid_backward_kernel(
     }
 }
 
+// RGB medium in one traversal. It computes what rgb_medium.compose_cuda gets
+// from six launches of the scalar kernel above. Pass p < 3 is the direct pass
+// of channel p (density attenuation[:, p], medium colour 0); pass p >= 3 is the
+// backscatter pass of channel p - 3 (density backscatter[:, p - 3], Gaussian
+// colour and background 0). Every pass keeps its own transmittance, updated
+// with the same float operations as the scalar kernel, and stops at the same
+// check points (after a Gaussian event, before a Voronoi step), so each output
+// equals the scalar launch's output for its channel. Boundaries and Gaussian
+// alphas are computed once for all passes.
+constexpr int kRgbPasses = 6;
+constexpr uint32_t kAllRgbPasses = (1u << kRgbPasses) - 1u;
+
+__device__ inline float component(Vec3 value, int index) {
+    return index == 0 ? value.x : (index == 1 ? value.y : value.z);
+}
+
+__device__ inline float rgb_pass_density(const float *attenuation,
+                                         const float *backscatter,
+                                         uint32_t cell,
+                                         int pass) {
+    return pass < 3 ? attenuation[3 * cell + pass]
+                    : backscatter[3 * cell + pass - 3];
+}
+
+__device__ inline uint32_t rgb_active_passes(const float *transmittance,
+                                             uint32_t active,
+                                             float threshold) {
+#pragma unroll
+    for (int pass = 0; pass < kRgbPasses; ++pass) {
+        if (transmittance[pass] <= threshold) {
+            active &= ~(1u << pass);
+        }
+    }
+    return active;
+}
+
+// composite_medium for every active pass; only backscatter passes have colour.
+__device__ inline void rgb_composite_medium(uint32_t cell,
+                                            float start,
+                                            float end,
+                                            const float *attenuation,
+                                            const float *backscatter,
+                                            const float *medium_colors,
+                                            uint32_t active,
+                                            float *value,
+                                            float *transmittance) {
+    float length = fmaxf(end - start, 0.0f);
+    if (length <= 0.0f) {
+        return;
+    }
+    Vec3 color = make_vec3(medium_colors + 3 * cell);
+#pragma unroll
+    for (int pass = 0; pass < kRgbPasses; ++pass) {
+        if (!(active & (1u << pass))) {
+            continue;
+        }
+        float density = fmaxf(
+            rgb_pass_density(attenuation, backscatter, cell, pass), 0.0f);
+        float alpha = 1.0f - expf(-density * length);
+        alpha = fminf(fmaxf(alpha, 0.0f), 1.0f);
+        float weight = transmittance[pass] * alpha;
+        if (pass >= 3) {
+            value[pass] = value[pass] + component(color, pass - 3) * weight;
+        }
+        transmittance[pass] *= 1.0f - alpha;
+    }
+}
+
+__global__ void rgb_forward_kernel(
+    HybridLaunchSettings settings,
+    const float *points,
+    const float *attenuation,
+    const float *backscatter,
+    const float *medium_colors,
+    const uint32_t *adjacency,
+    const uint32_t *offsets,
+    const float *rays,
+    const uint32_t *start_points,
+    const float *hit_depths,
+    const int32_t *hit_indices,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *gaussian_colors,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    const float *background,
+    float *direct_output,
+    float *backscatter_output,
+    float *transmission_output,
+    uint32_t *num_intersections) {
+    uint32_t ray_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ray_index >= settings.num_rays) {
+        return;
+    }
+    Vec3 origin = make_vec3(rays + 6 * ray_index);
+    Vec3 direction = normalized(make_vec3(rays + 6 * ray_index + 3));
+    float value[kRgbPasses];
+    float transmittance[kRgbPasses];
+#pragma unroll
+    for (int pass = 0; pass < kRgbPasses; ++pass) {
+        value[pass] = 0.0f;
+        transmittance[pass] = 1.0f;
+    }
+    uint32_t active = rgb_active_passes(
+        transmittance, kAllRgbPasses, settings.transmittance_threshold);
+    float cursor_depth = settings.near_plane;
+    HitCursor hit_cursor{0};
+    uint32_t steps = 0;
+
+    uint32_t current = settings.num_points ? start_points[ray_index] : 0;
+    bool finished = false;
+    while (!finished && cursor_depth < settings.far_plane && active &&
+           steps < settings.max_intersections) {
+        ++steps;
+        float boundary_depth = settings.far_plane;
+        uint32_t next = UINT32_MAX;
+        bool has_boundary = false;
+        if (settings.num_points) {
+            has_boundary = next_boundary(current,
+                                         origin,
+                                         direction,
+                                         points,
+                                         adjacency,
+                                         offsets,
+                                         boundary_depth,
+                                         next);
+            if (!has_boundary || boundary_depth >= settings.far_plane) {
+                boundary_depth = settings.far_plane;
+                finished = true;
+            } else if (boundary_depth <= cursor_depth) {
+                current = next;
+                continue;
+            }
+        } else {
+            finished = true;
+        }
+
+        float hit_depth;
+        int gaussian_index;
+        while (next_hit(settings,
+                        ray_index,
+                        hit_cursor,
+                        hit_depths,
+                        hit_indices,
+                        cursor_depth,
+                        boundary_depth,
+                        hit_depth,
+                        gaussian_index)) {
+            if (settings.num_points) {
+                rgb_composite_medium(current,
+                                     cursor_depth,
+                                     hit_depth,
+                                     attenuation,
+                                     backscatter,
+                                     medium_colors,
+                                     active,
+                                     value,
+                                     transmittance);
+            }
+            float alpha = evaluate_gaussian_scalar(gaussian_index,
+                                                   hit_depth,
+                                                   origin,
+                                                   direction,
+                                                   means,
+                                                   log_scales,
+                                                   quaternions,
+                                                   opacity_logits,
+                                                   raw_kappa)
+                              .alpha;
+            alpha = fminf(fmaxf(alpha, 0.0f), 1.0f);
+            Vec3 color = make_vec3(gaussian_colors + 3 * gaussian_index);
+#pragma unroll
+            for (int pass = 0; pass < kRgbPasses; ++pass) {
+                if (!(active & (1u << pass))) {
+                    continue;
+                }
+                float weight = transmittance[pass] * alpha;
+                if (pass < 3) {
+                    value[pass] = value[pass] + component(color, pass) * weight;
+                }
+                transmittance[pass] *= 1.0f - alpha;
+            }
+            active = rgb_active_passes(
+                transmittance, active, settings.transmittance_threshold);
+            cursor_depth = fmaxf(cursor_depth, hit_depth);
+            ++hit_cursor.slot;
+            if (!active) {
+                break;
+            }
+        }
+        if (!active) {
+            break;
+        }
+        if (settings.num_points) {
+            rgb_composite_medium(current,
+                                 cursor_depth,
+                                 boundary_depth,
+                                 attenuation,
+                                 backscatter,
+                                 medium_colors,
+                                 active,
+                                 value,
+                                 transmittance);
+        }
+        cursor_depth = boundary_depth;
+        if (!finished && has_boundary) {
+            current = next;
+        }
+        active = rgb_active_passes(
+            transmittance, active, settings.transmittance_threshold);
+    }
+
+    Vec3 background_color = make_vec3(background);
+#pragma unroll
+    for (int channel = 0; channel < 3; ++channel) {
+        direct_output[3 * ray_index + channel] =
+            value[channel] +
+            component(background_color, channel) * transmittance[channel];
+        backscatter_output[3 * ray_index + channel] = value[channel + 3];
+        // The six-pass path reads 1 - (1 - T) from the scalar alpha channel.
+        transmission_output[3 * ray_index + channel] =
+            1.0f - (1.0f - transmittance[channel]);
+    }
+    num_intersections[ray_index] = steps;
+}
+
+// backward_event reduced to the one channel a pass contributes to.
+__device__ inline float rgb_backward_event(float alpha,
+                                           float color,
+                                           float final_value,
+                                           float final_transmittance,
+                                           float value_gradient,
+                                           float alpha_gradient,
+                                           float &prefix,
+                                           float &transmittance,
+                                           float &color_gradient) {
+    alpha = fminf(fmaxf(alpha, 0.0f), 1.0f - 1.0e-7f);
+    float transmittance_before = transmittance;
+    float weight = transmittance_before * alpha;
+    color_gradient = value_gradient * weight;
+    float prefix_after = prefix + color * weight;
+    float transmittance_after = transmittance_before * (1.0f - alpha);
+    float tail = (final_value - prefix_after) *
+                 (1.0f / fmaxf(transmittance_after, kEpsilon));
+    float alpha_derivative =
+        transmittance_before * (value_gradient * (color - tail)) +
+        alpha_gradient * final_transmittance / fmaxf(1.0f - alpha, kEpsilon);
+    prefix = prefix_after;
+    transmittance = transmittance_after;
+    return alpha_derivative;
+}
+
+struct RgbBackwardState {
+    float final_value[kRgbPasses];
+    float final_transmittance[kRgbPasses];
+    float value_gradient[kRgbPasses];
+    float alpha_gradient[kRgbPasses];
+    float prefix[kRgbPasses];
+    float transmittance[kRgbPasses];
+};
+
+__device__ inline void rgb_backward_medium(
+    uint32_t cell,
+    float start,
+    float end,
+    const EndpointOwner &start_owner,
+    const EndpointOwner &end_owner,
+    Vec3 origin,
+    Vec3 direction,
+    uint32_t active,
+    const float *points,
+    const float *attenuation,
+    const float *backscatter,
+    const float *medium_colors,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    float *points_grad,
+    float *attenuation_grad,
+    float *backscatter_grad,
+    float *medium_colors_grad,
+    float *means_grad,
+    float *log_scales_grad,
+    float *quaternions_grad,
+    float *opacity_logits_grad,
+    float *raw_kappa_grad,
+    RgbBackwardState &state) {
+    float length = fmaxf(end - start, 0.0f);
+    if (length <= 0.0f) {
+        return;
+    }
+    Vec3 color = make_vec3(medium_colors + 3 * cell);
+    float length_derivative = 0.0f;
+#pragma unroll
+    for (int pass = 0; pass < kRgbPasses; ++pass) {
+        if (!(active & (1u << pass))) {
+            continue;
+        }
+        float raw_density =
+            rgb_pass_density(attenuation, backscatter, cell, pass);
+        float density = fmaxf(raw_density, 0.0f);
+        float one_minus_alpha = expf(-density * length);
+        float alpha = 1.0f - one_minus_alpha;
+        float color_gradient;
+        float alpha_derivative = rgb_backward_event(
+            alpha,
+            pass < 3 ? 0.0f : component(color, pass - 3),
+            state.final_value[pass],
+            state.final_transmittance[pass],
+            state.value_gradient[pass],
+            state.alpha_gradient[pass],
+            state.prefix[pass],
+            state.transmittance[pass],
+            color_gradient);
+        if (pass >= 3) {
+            atomicAdd(medium_colors_grad + 3 * cell + pass - 3, color_gradient);
+        }
+        if (raw_density > 0.0f) {
+            float *density_grad = pass < 3
+                                      ? attenuation_grad + 3 * cell + pass
+                                      : backscatter_grad + 3 * cell + pass - 3;
+            atomicAdd(density_grad, alpha_derivative * length * one_minus_alpha);
+        }
+        length_derivative += alpha_derivative * density * one_minus_alpha;
+    }
+    accumulate_endpoint_gradient(start_owner,
+                                 -length_derivative,
+                                 origin,
+                                 direction,
+                                 points,
+                                 means,
+                                 log_scales,
+                                 quaternions,
+                                 opacity_logits,
+                                 raw_kappa,
+                                 points_grad,
+                                 means_grad,
+                                 log_scales_grad,
+                                 quaternions_grad,
+                                 opacity_logits_grad,
+                                 raw_kappa_grad);
+    accumulate_endpoint_gradient(end_owner,
+                                 length_derivative,
+                                 origin,
+                                 direction,
+                                 points,
+                                 means,
+                                 log_scales,
+                                 quaternions,
+                                 opacity_logits,
+                                 raw_kappa,
+                                 points_grad,
+                                 means_grad,
+                                 log_scales_grad,
+                                 quaternions_grad,
+                                 opacity_logits_grad,
+                                 raw_kappa_grad);
+}
+
+__global__ void rgb_backward_kernel(
+    HybridLaunchSettings settings,
+    const float *points,
+    const float *attenuation,
+    const float *backscatter,
+    const float *medium_colors,
+    const uint32_t *adjacency,
+    const uint32_t *offsets,
+    const float *rays,
+    const uint32_t *start_points,
+    const float *hit_depths,
+    const int32_t *hit_indices,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *gaussian_colors,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    const float *direct_output,
+    const float *backscatter_output,
+    const float *transmission_output,
+    const float *direct_output_grad,
+    const float *backscatter_output_grad,
+    const float *transmission_output_grad,
+    float *points_grad,
+    float *attenuation_grad,
+    float *backscatter_grad,
+    float *medium_colors_grad,
+    float *means_grad,
+    float *log_scales_grad,
+    float *quaternions_grad,
+    float *gaussian_colors_grad,
+    float *opacity_logits_grad,
+    float *raw_kappa_grad) {
+    uint32_t ray_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ray_index >= settings.num_rays) {
+        return;
+    }
+    Vec3 origin = make_vec3(rays + 6 * ray_index);
+    Vec3 direction = normalized(make_vec3(rays + 6 * ray_index + 3));
+    RgbBackwardState state;
+#pragma unroll
+    for (int channel = 0; channel < 3; ++channel) {
+        // Direct pass: its alpha output is 1 - transmission.
+        state.final_value[channel] = direct_output[3 * ray_index + channel];
+        state.final_transmittance[channel] =
+            transmission_output[3 * ray_index + channel];
+        state.value_gradient[channel] =
+            direct_output_grad[3 * ray_index + channel];
+        state.alpha_gradient[channel] =
+            -transmission_output_grad[3 * ray_index + channel];
+        // Backscatter pass: its alpha output is unused.
+        state.final_value[channel + 3] =
+            backscatter_output[3 * ray_index + channel];
+        state.final_transmittance[channel + 3] = 0.0f;
+        state.value_gradient[channel + 3] =
+            backscatter_output_grad[3 * ray_index + channel];
+        state.alpha_gradient[channel + 3] = 0.0f;
+    }
+#pragma unroll
+    for (int pass = 0; pass < kRgbPasses; ++pass) {
+        state.prefix[pass] = 0.0f;
+        state.transmittance[pass] = 1.0f;
+    }
+    uint32_t active = rgb_active_passes(
+        state.transmittance, kAllRgbPasses, settings.transmittance_threshold);
+    float cursor_depth = settings.near_plane;
+    EndpointOwner cursor_owner{OwnerType::None, -1, 0, 0, cursor_depth};
+    HitCursor hit_cursor{0};
+    uint32_t steps = 0;
+    uint32_t current = settings.num_points ? start_points[ray_index] : 0;
+    bool finished = false;
+
+    while (!finished && cursor_depth < settings.far_plane && active &&
+           steps < settings.max_intersections) {
+        ++steps;
+        float boundary_depth = settings.far_plane;
+        uint32_t next = UINT32_MAX;
+        bool has_boundary = false;
+        EndpointOwner boundary_owner{
+            OwnerType::None, -1, 0, 0, settings.far_plane};
+        if (settings.num_points) {
+            has_boundary = next_boundary(current,
+                                         origin,
+                                         direction,
+                                         points,
+                                         adjacency,
+                                         offsets,
+                                         boundary_depth,
+                                         next);
+            if (!has_boundary || boundary_depth >= settings.far_plane) {
+                boundary_depth = settings.far_plane;
+                finished = true;
+            } else if (boundary_depth <= cursor_depth) {
+                current = next;
+                continue;
+            } else {
+                boundary_owner = {OwnerType::Boundary,
+                                  -1,
+                                  current,
+                                  next,
+                                  boundary_depth};
+            }
+        } else {
+            finished = true;
+        }
+
+        float hit_depth;
+        int gaussian_index;
+        while (next_hit(settings,
+                        ray_index,
+                        hit_cursor,
+                        hit_depths,
+                        hit_indices,
+                        cursor_depth,
+                        boundary_depth,
+                        hit_depth,
+                        gaussian_index)) {
+            EndpointOwner gaussian_owner{
+                OwnerType::Gaussian, gaussian_index, 0, 0, hit_depth};
+            if (settings.num_points) {
+                rgb_backward_medium(current,
+                                    cursor_depth,
+                                    hit_depth,
+                                    cursor_owner,
+                                    gaussian_owner,
+                                    origin,
+                                    direction,
+                                    active,
+                                    points,
+                                    attenuation,
+                                    backscatter,
+                                    medium_colors,
+                                    means,
+                                    log_scales,
+                                    quaternions,
+                                    opacity_logits,
+                                    raw_kappa,
+                                    points_grad,
+                                    attenuation_grad,
+                                    backscatter_grad,
+                                    medium_colors_grad,
+                                    means_grad,
+                                    log_scales_grad,
+                                    quaternions_grad,
+                                    opacity_logits_grad,
+                                    raw_kappa_grad,
+                                    state);
+            }
+            float alpha = evaluate_gaussian_scalar(gaussian_index,
+                                                   hit_depth,
+                                                   origin,
+                                                   direction,
+                                                   means,
+                                                   log_scales,
+                                                   quaternions,
+                                                   opacity_logits,
+                                                   raw_kappa)
+                              .alpha;
+            Vec3 color = make_vec3(gaussian_colors + 3 * gaussian_index);
+            float alpha_coefficient = 0.0f;
+#pragma unroll
+            for (int pass = 0; pass < kRgbPasses; ++pass) {
+                if (!(active & (1u << pass))) {
+                    continue;
+                }
+                float color_gradient;
+                alpha_coefficient += rgb_backward_event(
+                    alpha,
+                    pass < 3 ? component(color, pass) : 0.0f,
+                    state.final_value[pass],
+                    state.final_transmittance[pass],
+                    state.value_gradient[pass],
+                    state.alpha_gradient[pass],
+                    state.prefix[pass],
+                    state.transmittance[pass],
+                    color_gradient);
+                if (pass < 3) {
+                    atomicAdd(gaussian_colors_grad + 3 * gaussian_index + pass,
+                              color_gradient);
+                }
+            }
+            // The alpha derivative is linear in the coefficient: one dual
+            // evaluation serves all passes.
+            accumulate_gaussian_geometry(gaussian_index,
+                                         hit_depth,
+                                         alpha_coefficient,
+                                         0.0f,
+                                         origin,
+                                         direction,
+                                         means,
+                                         log_scales,
+                                         quaternions,
+                                         opacity_logits,
+                                         raw_kappa,
+                                         means_grad,
+                                         log_scales_grad,
+                                         quaternions_grad,
+                                         opacity_logits_grad,
+                                         raw_kappa_grad);
+            active = rgb_active_passes(
+                state.transmittance, active, settings.transmittance_threshold);
+            cursor_depth = fmaxf(cursor_depth, hit_depth);
+            cursor_owner = gaussian_owner;
+            ++hit_cursor.slot;
+            if (!active) {
+                break;
+            }
+        }
+        if (!active) {
+            break;
+        }
+        if (settings.num_points) {
+            rgb_backward_medium(current,
+                                cursor_depth,
+                                boundary_depth,
+                                cursor_owner,
+                                boundary_owner,
+                                origin,
+                                direction,
+                                active,
+                                points,
+                                attenuation,
+                                backscatter,
+                                medium_colors,
+                                means,
+                                log_scales,
+                                quaternions,
+                                opacity_logits,
+                                raw_kappa,
+                                points_grad,
+                                attenuation_grad,
+                                backscatter_grad,
+                                medium_colors_grad,
+                                means_grad,
+                                log_scales_grad,
+                                quaternions_grad,
+                                opacity_logits_grad,
+                                raw_kappa_grad,
+                                state);
+        }
+        cursor_depth = boundary_depth;
+        cursor_owner = boundary_owner;
+        if (!finished && has_boundary) {
+            current = next;
+        }
+        active = rgb_active_passes(
+            state.transmittance, active, settings.transmittance_threshold);
+    }
+}
+
 } // namespace
 
 void hybrid_forward_cuda(
@@ -1275,6 +1888,95 @@ void hybrid_backward_cuda(
         gaussian_colors_grad,
         opacity_logits_grad,
         raw_kappa_grad);
+}
+
+void rgb_forward_cuda(
+    const HybridLaunchSettings &settings,
+    const RgbSceneTensors &scene,
+    const float *background,
+    float *direct_output,
+    float *backscatter_output,
+    float *transmission_output,
+    uint32_t *output_num_intersections,
+    const void *stream) {
+    constexpr uint32_t block_size = 128;
+    uint32_t grid_size = (settings.num_rays + block_size - 1) / block_size;
+    cudaStream_t cuda_stream =
+        *reinterpret_cast<const cudaStream_t *>(stream);
+    rgb_forward_kernel<<<grid_size, block_size, 0, cuda_stream>>>(
+        settings,
+        scene.points,
+        scene.attenuation,
+        scene.backscatter,
+        scene.medium_colors,
+        scene.adjacency,
+        scene.offsets,
+        scene.rays,
+        scene.start_points,
+        scene.hit_depths,
+        scene.hit_indices,
+        scene.means,
+        scene.log_scales,
+        scene.quaternions,
+        scene.gaussian_colors,
+        scene.opacity_logits,
+        scene.raw_kappa,
+        background,
+        direct_output,
+        backscatter_output,
+        transmission_output,
+        output_num_intersections);
+}
+
+void rgb_backward_cuda(
+    const HybridLaunchSettings &settings,
+    const RgbSceneTensors &scene,
+    const float *direct_output,
+    const float *backscatter_output,
+    const float *transmission_output,
+    const float *direct_output_grad,
+    const float *backscatter_output_grad,
+    const float *transmission_output_grad,
+    const RgbGradientTensors &gradients,
+    const void *stream) {
+    constexpr uint32_t block_size = 128;
+    uint32_t grid_size = (settings.num_rays + block_size - 1) / block_size;
+    cudaStream_t cuda_stream =
+        *reinterpret_cast<const cudaStream_t *>(stream);
+    rgb_backward_kernel<<<grid_size, block_size, 0, cuda_stream>>>(
+        settings,
+        scene.points,
+        scene.attenuation,
+        scene.backscatter,
+        scene.medium_colors,
+        scene.adjacency,
+        scene.offsets,
+        scene.rays,
+        scene.start_points,
+        scene.hit_depths,
+        scene.hit_indices,
+        scene.means,
+        scene.log_scales,
+        scene.quaternions,
+        scene.gaussian_colors,
+        scene.opacity_logits,
+        scene.raw_kappa,
+        direct_output,
+        backscatter_output,
+        transmission_output,
+        direct_output_grad,
+        backscatter_output_grad,
+        transmission_output_grad,
+        gradients.points,
+        gradients.attenuation,
+        gradients.backscatter,
+        gradients.medium_colors,
+        gradients.means,
+        gradients.log_scales,
+        gradients.quaternions,
+        gradients.gaussian_colors,
+        gradients.opacity_logits,
+        gradients.raw_kappa);
 }
 
 } // namespace foamsurf

@@ -110,6 +110,39 @@ def test_uniform_analytic_and_extremes(renderer,coefficient):
     assert torch.isfinite(actual.image).all()
 
 
+def random_gaussians(count, seed):
+    torch.manual_seed(seed)
+    means=torch.randn(count,3,device='cuda')*.6+torch.tensor([0.,0.,2.5],device='cuda')
+    values=(means,torch.rand(count,2,device='cuda')*.6-1.2,torch.randn(count,4,device='cuda'),
+            torch.rand(count,3,device='cuda'),torch.randn(count,1,device='cuda')+1.,torch.randn(count,1,device='cuda')*.3)
+    return GaussianScene(*[v.contiguous().requires_grad_() for v in values])
+
+
+@requires_cuda
+@pytest.mark.parametrize('threshold',[0.,1e-4,1e-2,.3])
+def test_fused_matches_six_pass_with_early_termination(threshold):
+    """Every pass must stop where its own scalar launch stops; values are exact."""
+    renderer=NativeHybridRenderer(max_batch_size=4096,far=5.,transmittance_threshold=threshold)
+    m=scene();m=replace(m,attenuation=(m.attenuation.detach()*6).requires_grad_(),
+                        backscatter=(m.backscatter.detach()*4).requires_grad_())
+    g=random_gaussians(40,7);synchronize(renderer,m,g)
+    torch.manual_seed(3)
+    directions=torch.randn(1024,3,device='cuda')*torch.tensor([.35,.35,1.],device='cuda')+torch.tensor([0.,0.,1.],device='cuda')
+    rays=torch.cat((torch.zeros_like(directions),directions),-1)
+    params=[m.sites,m.attenuation,m.backscatter,m.colors,g.means,g.log_scales,g.quaternions,g.colors,g.opacity_logits,g.raw_kappa]
+    weights=torch.randn(3,3,device='cuda')
+    results={}
+    for backend in ('six_pass','fused'):
+        renderer.rgb_medium_backend=backend
+        out=renderer.render(rays,g,m,background=(.1,.2,.3))
+        loss=(out.image*weights[0]).sum()+(out.backscatter*weights[1]).sum()+(out.alpha*weights[2,0]).sum()
+        results[backend]=(out,torch.autograd.grad(loss,params))
+    (old,old_grads),(new,new_grads)=results['six_pass'],results['fused']
+    for name in ('image','alpha','direct','backscatter','direct_transmittance','num_intersections'):
+        assert torch.equal(getattr(old,name),getattr(new,name)),name
+    for a,e in zip(new_grads,old_grads):torch.testing.assert_close(a,e,atol=1e-5,rtol=1e-4)
+
+
 def test_reference_gradcheck_and_opaque_occlusion():
     torch.manual_seed(4)
     args=[torch.rand(shape,dtype=torch.float64,requires_grad=True) for shape in [(3,),(3,3),(3,3),(3,3),(3,),(3,3),(3,)]]

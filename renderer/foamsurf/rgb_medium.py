@@ -1,8 +1,19 @@
-"""Six-pass CUDA composition; OptiX hits/starts are shared across all passes.
+"""RGB medium composition; OptiX hits/starts are shared across all passes.
 
-Correctness-first backend: reuses native geometry derivatives. Not a fused kernel.
+compose_fused: one traversal (foamsurf._C.rgb_forward/rgb_backward), the default.
+compose_cuda: six launches of the scalar kernel, kept for A/B comparison
+(NativeHybridRenderer.rgb_medium_backend = "six_pass").
 """
 import torch
+
+
+def compose_fused(apply, arguments, attenuation, backscatter):
+    """Same outputs as compose_cuda; arguments are those of _HybridCudaFunction."""
+    args = list(arguments)
+    direct, scattered, transmission, count = apply(
+        args[0], args[1], attenuation, backscatter, *args[3:])
+    rgba = torch.cat((direct + scattered, 1-transmission.mean(-1, keepdim=True)), -1)
+    return rgba, count, (direct, scattered, transmission)
 
 
 def compose_cuda(apply, arguments, attenuation, backscatter):
