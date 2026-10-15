@@ -67,7 +67,7 @@ this GPU and records the "before" state that every later comparison uses.
 
 ```bash
 DATA=<path to IUI3-RedSea-Undistorted>
-mkdir -p handoff && tar -xf renderer_handoff_2026-10-15.tar -C handoff   # RUNS=handoff
+mkdir -p handoff && tar -xf renderer_handoff_2026-10-15.tar -C handoff
 OUT=outputs/renderer_baseline_3090 && mkdir -p $OUT
 python -m pytest -q -rs renderer/tests 2>&1 | tee $OUT/renderer_tests.txt
 python -m pytest -q -rs tests 2>&1 | tee $OUT/tests.txt
