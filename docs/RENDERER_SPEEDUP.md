@@ -3,7 +3,7 @@
 You are working on a fresh clone on a machine with an **RTX 3090** (compute
 capability 8.6). Nothing outside this repository exists there except what is
 listed in §1; every path below is relative to the repository root unless it is
-one of the variables `$ENV`, `$OPTIX`, `$DRIVER`, `$DATA`, `$RUNS`.
+one of the variables `$ENV`, `$OPTIX`, `$DRIVER`, `$DATA`.
 
 **Goal.** Make `NativeHybridRenderer.render` faster for the RGB medium used by
 every current experiment, **without changing what it computes**: images,
@@ -13,6 +13,8 @@ quality (§6).
 
 Read first: `renderer/README.md` (scalar renderer contract: Gaussian event,
 Voronoi traversal, compositing, backward) and `renderer/foamsurf/rgb_medium.py`.
+Order of work: §1 build → **Step 0 baseline** → §3 changes → §5 and §6
+acceptance → §7 report.
 
 ## 1. Machine setup
 
@@ -45,7 +47,7 @@ rebuild with `renderer/build.sh` (same variables). Build products (`*.so`,
 
 - `$DATA` — the IUI3 dataset (`IUI3-RedSea-Undistorted`, 132 MB; COLMAP model in
   `sparse/0` or a flat `sparse/`).
-- `$RUNS` — unpack `renderer_handoff_2026-10-15.tar` (185 MB). It contains two
+- `renderer_handoff_2026-10-15.tar` (185 MB), unpacked to `handoff/` in Step 0. It contains two
   trained runs, each with `pipeline_config.json`, `joint/config.yaml`,
   `joint/checkpoints/best.pt` (+ sidecars), `joint/metrics/eval.csv`,
   `joint/summary.json`:
@@ -56,6 +58,45 @@ rebuild with `renderer/build.sh` (same variables). Build products (`*.so`,
 
 The run directories store the cluster's dataset path; every tool below takes
 `--dataset $DATA` (or `--set ...source_path=$DATA`) to override it.
+
+## Step 0 — baseline on the 3090, before touching the renderer
+
+Do this in the first session, on the unmodified checkout (`dev/medium_fix`),
+right after the build of §1. It checks that the build and the tools work on
+this GPU and records the "before" state that every later comparison uses.
+
+```bash
+DATA=<path to IUI3-RedSea-Undistorted>
+mkdir -p handoff && tar -xf renderer_handoff_2026-10-15.tar -C handoff   # RUNS=handoff
+OUT=outputs/renderer_baseline_3090 && mkdir -p $OUT
+python -m pytest -q -rs renderer/tests 2>&1 | tee $OUT/renderer_tests.txt
+python -m pytest -q -rs tests 2>&1 | tee $OUT/tests.txt
+for run in B0_chroma100_bk B0_chroma100_scov3e3_g700k_bk; do
+  R=handoff/runs/$run
+  python scripts/renderer_check.py capture --run $R --dataset $DATA --reference $OUT/$run.pt
+  python scripts/renderer_check.py compare --run $R --dataset $DATA --reference $OUT/$run.pt \
+    | tee $OUT/${run}_self_compare.txt
+  python scripts/renderer_check.py bench --run $R --dataset $DATA --json $OUT/${run}_bench.json \
+    | tee $OUT/${run}_bench.txt
+done
+```
+
+- **`$OUT/*.pt` are the reference renders and gradients of the current
+  renderer. Never overwrite or regenerate them after renderer code has
+  changed** — every later `compare` is against these files. They are large and
+  stay out of git.
+- The self-compare (old renderer vs itself) must print `PASS`; its numbers are
+  the noise floor (forward should be exact, gradients differ only by atomic
+  accumulation order). If it fails, the tolerances or the tool are wrong — stop
+  and report, do not start on the renderer.
+- `renderer/tests/test_rgb_medium_renderer.py` and `scripts/renderer_check.py`
+  have not yet run on a GPU before this step. If either fails for a reason
+  unrelated to the renderer (an API mismatch, a path, memory), fix the test or
+  the tool in a separate commit and say so; do not change renderer code to make
+  them pass.
+- Report to the user: the two pytest summaries, both `*_self_compare.txt`
+  and both `*_bench.txt`. The `bench` output replaces the 4090 profile numbers of
+  §2 as the baseline for this GPU.
 
 ## 2. What the renderer does now (RGB medium)
 
@@ -160,9 +201,9 @@ python -m pytest -q -rs renderer/tests          # run from the repo root; test_r
 python -m pytest -q tests/                      # training code; includes short GPU trainings
 
 # Real-checkpoint snapshot, comparison, benchmark (scripts/renderer_check.py)
-python scripts/renderer_check.py capture --run $RUNS/runs/B0_chroma100_bk --dataset $DATA --reference ref/default.pt
-python scripts/renderer_check.py compare --run $RUNS/runs/B0_chroma100_bk --dataset $DATA --reference ref/default.pt
-python scripts/renderer_check.py bench   --run $RUNS/runs/B0_chroma100_bk --dataset $DATA --json ref/bench_before.json
+python scripts/renderer_check.py capture --run handoff/runs/B0_chroma100_bk --dataset $DATA --reference <file>.pt
+python scripts/renderer_check.py compare --run handoff/runs/B0_chroma100_bk --dataset $DATA --reference <file>.pt
+python scripts/renderer_check.py bench   --run handoff/runs/B0_chroma100_bk --dataset $DATA --json <file>.json
 ```
 
 `capture` stores, for the 4 test views (`MTN_5894/5903/5911/5928`), the hybrid
@@ -176,16 +217,16 @@ renders, and a training forward / forward+backward with peak memory.
 
 ## 5. Acceptance — equivalence
 
-Before changing any renderer code:
+The references are the Step 0 files. After the change (rebuilt with
+`renderer/build.sh`), for both runs:
 
 ```bash
-python scripts/renderer_check.py capture ... --reference ref/default.pt
-python scripts/renderer_check.py compare ... --reference ref/default.pt   # old vs old: noise floor
-python scripts/renderer_check.py bench   ... --json ref/bench_before.json
-# the same for runs/B0_chroma100_scov3e3_g700k_bk (ref/g700k.pt, bench)
+python scripts/renderer_check.py compare --run handoff/runs/$run --dataset $DATA \
+  --reference outputs/renderer_baseline_3090/$run.pt
+python scripts/renderer_check.py bench --run handoff/runs/$run --dataset $DATA --json outputs/<new>/${run}_bench.json
 ```
 
-After the change, `compare` against the same references must print `PASS`:
+`compare` must print `PASS`:
 
 - images (hybrid, backscatter, alpha, Gaussian alpha): mean |Δ| ≤ 1e-5 and
   |Δ| > 1e-3 on at most 0.01% of values, per view;
