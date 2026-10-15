@@ -23,14 +23,12 @@ def checkpoint_payload(
     voronoi_adaptation_state: dict[str, Any] | None = None,
     medium_frozen_until: int = 0,
     disentanglement_state: dict[str, Any] | None = None,
-    prefix_training_seconds: float = 0.0,
 ) -> dict[str, Any]:
     return {
         "format_version": 1,
         "baseline": "B0",
         "iteration": int(iteration),
         "training_seconds": float(training_seconds),
-        "prefix_training_seconds": float(prefix_training_seconds),
         "best_psnr": float(best_psnr),
         "topology_revision": int(topology_revision),
         "config": config.as_dict(),

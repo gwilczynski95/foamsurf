@@ -268,6 +268,26 @@ def masked_direct_consistency(gaussian_image, direct_image, gaussian_alpha, thre
     return loss, selected.mean().detach()
 
 
+# Removed medium_fix options and their inactive values, still present in
+# manifests and resume sidecars written before the cleanup.
+_LEGACY_MEDIUM_FIX = {
+    "color_mode": "per_cell", "coverage_weight": 0.0, "proximity_multiplier": 1.0,
+}
+_LEGACY_MEDIUM_FIX_PREFIXES = ("coverage_", "proximity_")
+
+
+def drop_legacy_medium_fix(values):
+    """Return medium_fix settings without inactive removed options."""
+
+    values = dict(values)
+    for key in list(values):
+        if key in _LEGACY_MEDIUM_FIX or key.startswith(_LEGACY_MEDIUM_FIX_PREFIXES):
+            if key in _LEGACY_MEDIUM_FIX and values[key] != _LEGACY_MEDIUM_FIX[key]:
+                raise ValueError(f"medium_fix.{key}={values[key]!r} is no longer supported")
+            del values[key]
+    return values
+
+
 @dataclass(frozen=True)
 class MediumFixConfig:
     """Seabed/backscatter priors of the IUI3 joint stage, all off by default.

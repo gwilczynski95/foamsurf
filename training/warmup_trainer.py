@@ -118,11 +118,9 @@ class WarmupTrainer(Trainer):
         profile.validate()
         if not config.voronoi_warmup.enabled or config.representation_mode != "voronoi_only":
             raise ValueError("WarmupTrainer requires enabled Voronoi-only initialization")
-        if config.dataset.train_target != "both" or config.medium_handoff.prefix_iterations:
-            raise ValueError("warmup requires combined RGB and no separate prefix")
-        if any(getattr(config.disentanglement, key) != 0 for key in (
-            "opacity_binarization_weight", "opaque_if_used_weight", "graph_tv_weight",
-            "density_cap_weight", "optical_thickness_weight")):
+        if config.dataset.train_target != "both":
+            raise ValueError("warmup requires combined RGB")
+        if config.disentanglement.opacity_binarization_weight != 0:
             raise ValueError("joint disentanglement losses must be disabled for this warmup")
         if config.gaussian_adaptation.enabled:
             raise ValueError("Gaussian adaptation must be disabled during initialization")
@@ -249,7 +247,7 @@ class WarmupTrainer(Trainer):
         payload = checkpoint_payload(self.model, self.gaussian_optimizer, self.medium_optimizer,
             self.config, iteration, self.training_seconds, self.best_psnr, self.topology.revision,
             self.gaussian_adaptation.state_dict(), self.voronoi_adaptation.state_dict(),
-            self.medium_frozen_until, self.disentanglement.state_dict(), self.prefix_training_seconds)
+            self.medium_frozen_until, self.disentanglement.state_dict())
         medium = self.model.medium
         payload["warmup"] = {"version": 2, "profile": self.profile.as_dict(),
             "topology_period": self._topology_period, "topology_since_update": self._topology_since_update,

@@ -174,49 +174,6 @@ warmup:
       opacity_binarization_end_ramp: 0
       opacity_binarization_end_ramp_shape: linear
       opacity_binarization_maintenance_scale: 1
-      opaque_if_used_weight: 0
-      opaque_if_used_start: 0
-      opaque_if_used_ramp: 0
-      opaque_if_used_ramp_shape: linear
-      graph_tv_weight: 0
-      graph_tv_start: 0
-      graph_tv_ramp: 0
-      graph_tv_ramp_shape: linear
-      graph_tv_mode: huber
-      graph_tv_huber_delta: 0.02
-      density_cap_weight: 0
-      density_cap_start: 0
-      density_cap_ramp: 0
-      density_cap_ramp_shape: linear
-      density_cap_policy: fixed
-      density_cap_fixed_value: 1
-      density_cap_quantile: 0.95
-      density_cap_multiplier: 2
-      density_cap_minimum: 0.005
-      density_cap_update_interval: 25
-      density_cap_ema_decay: 0.99
-      density_cap_warmup_until: 5000
-      optical_thickness_weight: 0
-      optical_thickness_start: 0
-      optical_thickness_ramp: 0
-      optical_thickness_ramp_shape: linear
-      epsilon: 1.0e-08
-    medium_handoff:
-      prefix_mode: none
-      prefix_iterations: 0
-      prefix_reset_medium_optimizer: true
-      gaussian_freeze_start: null
-      gaussian_freeze_duration: 0
-      medium_sites_lr_multiplier: 1
-      medium_density_lr_multiplier: 1
-      medium_color_lr_multiplier: 1
-    radfoam_prior:
-      enabled: false
-      checkpoint_path: ''
-      labels_path: ''
-      gaussian_count: 100000
-      pca_neighbors: 8
-      reset_density: 1.0e-08
     voronoi_warmup:
       enabled: true
       milestone_iterations:
@@ -262,7 +219,6 @@ warmup:
       preserve_clone_opacity: false
       preserve_split_opacity: false
       runaway_max_points: null
-      movement_threshold: 0.001
       min_effective_scale: 1.0e-05
     voronoi_adaptation:
       enabled: true
@@ -411,49 +367,6 @@ joint:
       opacity_binarization_end_ramp: 0
       opacity_binarization_end_ramp_shape: linear
       opacity_binarization_maintenance_scale: 1
-      opaque_if_used_weight: 0
-      opaque_if_used_start: 0
-      opaque_if_used_ramp: 0
-      opaque_if_used_ramp_shape: linear
-      graph_tv_weight: 0
-      graph_tv_start: 0
-      graph_tv_ramp: 0
-      graph_tv_ramp_shape: linear
-      graph_tv_mode: huber
-      graph_tv_huber_delta: 0.02
-      density_cap_weight: 0
-      density_cap_start: 0
-      density_cap_ramp: 0
-      density_cap_ramp_shape: linear
-      density_cap_policy: fixed
-      density_cap_fixed_value: 1
-      density_cap_quantile: 0.95
-      density_cap_multiplier: 2
-      density_cap_minimum: 0.005
-      density_cap_update_interval: 25
-      density_cap_ema_decay: 0.99
-      density_cap_warmup_until: 5000
-      optical_thickness_weight: 0
-      optical_thickness_start: 0
-      optical_thickness_ramp: 0
-      optical_thickness_ramp_shape: linear
-      epsilon: 1.0e-08
-    medium_handoff:
-      prefix_mode: none
-      prefix_iterations: 0
-      prefix_reset_medium_optimizer: true
-      gaussian_freeze_start: null
-      gaussian_freeze_duration: 0
-      medium_sites_lr_multiplier: 1
-      medium_density_lr_multiplier: 1
-      medium_color_lr_multiplier: 1
-    radfoam_prior:
-      enabled: false
-      checkpoint_path: ''
-      labels_path: ''
-      gaussian_count: 100000
-      pca_neighbors: 8
-      reset_density: 1.0e-08
     voronoi_warmup:
       enabled: false
       milestone_iterations: []
@@ -490,7 +403,6 @@ joint:
       preserve_clone_opacity: false
       preserve_split_opacity: false
       runaway_max_points: null
-      movement_threshold: 0.001
       min_effective_scale: 1.0e-05
     voronoi_adaptation:
       enabled: false

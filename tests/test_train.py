@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from train import fit_iui3, resolve_iui3
+import yaml
+
+from train import fit_iui3, normalize_saved_manifest, resolve_iui3
+from training.config import ExperimentConfig, drop_legacy_keys
 from training.end_to_end import EndToEndConfig
 
 
@@ -27,24 +30,72 @@ def test_iui3_baseline_contract(tmp_path):
     assert m["rgb_smoothing"]["color"] == pytest.approx(1.0)
 
 
-def test_iui3_sigmoid_configs_resolve_to_cli_equivalents(tmp_path):
-    baseline = ROOT / "configs/iui3_5k.yaml"
-    cases = (
-        ("iui3_sigmoid_both.yaml", "sigmoid"),
-        ("iui3_sigmoid_gaussians.yaml", "dc"),
-    )
-    for filename, medium in cases:
-        output = tmp_path / filename
-        config = resolve_iui3(ROOT / "configs" / filename, output)
-        via_cli = resolve_iui3(
-            baseline, output,
-            gaussian_rgb_activation="sigmoid",
-            medium_color_activation=medium,
-            wandb_project="foamsurf_iui3_sigmoid",
-        )
-        assert config == via_cli
-        assert config["joint"]["model"]["gaussian_rgb_activation"] == "sigmoid"
-        assert config["medium_color_activation"] == medium
+# Inactive settings of removed features, as written by runs before the cleanup.
+LEGACY_STAGE = {
+    "radfoam_prior": {"enabled": False, "checkpoint_path": "", "gaussian_count": 100000},
+    "medium_handoff": {"prefix_mode": "none", "prefix_iterations": 0,
+                       "gaussian_freeze_start": None, "gaussian_freeze_duration": 0},
+}
+LEGACY_DISENTANGLEMENT = {"graph_tv_weight": 0, "graph_tv_mode": "huber", "density_cap_weight": 0,
+                          "optical_thickness_weight": 0, "opaque_if_used_weight": 0,
+                          "epsilon": 1.0e-8}
+LEGACY_ADAPTATION = {"movement_threshold": 0.001, "min_opacity_densify": None,
+                     "opacity_reset_prune_grace": 0}
+LEGACY_MEDIUM_FIX = {"color_mode": "per_cell", "coverage_weight": 0.0, "coverage_rays": 131072,
+                     "proximity_multiplier": 1.0, "proximity_neighbors": False}
+
+
+def with_legacy(stage):
+    stage = {**stage, **LEGACY_STAGE}
+    stage["disentanglement"] = {**stage["disentanglement"], **LEGACY_DISENTANGLEMENT}
+    stage["gaussian_adaptation"] = {**stage["gaussian_adaptation"], **LEGACY_ADAPTATION}
+    return stage
+
+
+def test_old_manifest_with_inactive_removed_settings_still_resumes(tmp_path):
+    manifest = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "run")
+    old = json.loads(json.dumps(manifest))
+    for stage in ("warmup", "joint"):
+        old[stage] = with_legacy(old[stage])
+    old["medium_fix"] = {**old["medium_fix"], **LEGACY_MEDIUM_FIX}
+    assert normalize_saved_manifest(old) == manifest
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "pipeline_config.json").write_text(json.dumps(old))
+    # Identical after normalization, so only the missing --resume is rejected.
+    with pytest.raises(ValueError, match="requires --resume"):
+        fit_iui3(manifest)
+
+
+def test_old_stage_yaml_with_inactive_removed_settings_loads(tmp_path):
+    current = ExperimentConfig().as_dict()
+    current["dataset"]["source_path"] = str(tmp_path)
+    path = tmp_path / "joint.yaml"
+    path.write_text(yaml.safe_dump(with_legacy(current)))
+    assert ExperimentConfig.load(path).as_dict() == current
+
+
+@pytest.mark.parametrize("section, key, value", [
+    ("radfoam_prior", "enabled", True),
+    ("medium_handoff", "prefix_iterations", 100),
+    ("medium_handoff", "gaussian_freeze_start", 1000),
+    ("disentanglement", "graph_tv_weight", 0.1),
+    ("gaussian_adaptation", "policy", "flare_movement"),
+    ("gaussian_adaptation", "min_opacity_densify", 0.1),
+])
+def test_active_removed_settings_are_rejected(section, key, value):
+    stage = with_legacy(ExperimentConfig().as_dict())
+    stage[section] = {**stage[section], key: value}
+    with pytest.raises(ValueError, match="no longer supported"):
+        drop_legacy_keys(stage)
+
+
+def test_active_removed_medium_fix_settings_are_rejected():
+    from training.losses import drop_legacy_medium_fix
+    with pytest.raises(ValueError, match="no longer supported"):
+        drop_legacy_medium_fix({"coverage_weight": 0.1})
+    with pytest.raises(ValueError, match="no longer supported"):
+        drop_legacy_medium_fix({"color_mode": "global"})
 
 
 def test_iui3_variant_rejects_unexpected_fields(tmp_path):

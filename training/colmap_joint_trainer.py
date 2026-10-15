@@ -12,7 +12,7 @@ from training.end_to_end import atomic_json
 from training.disentanglement import undirected_edges
 from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
     CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency,
-    MediumFixConfig, water_direction, backscatter_chroma_loss,
+    MediumFixConfig, drop_legacy_medium_fix, water_direction, backscatter_chroma_loss,
     surface_coverage_loss, under_surface_loss)
 from training.surface_depth import nearest_sites, opaque_depth, sorted_hit_alphas
 from training.surface import LocalOverlap
@@ -60,7 +60,7 @@ class ColmapJointTrainer(Trainer):
         payload=checkpoint_payload(self.model,self.gaussian_optimizer,self.medium_optimizer,
             self.config,iteration,self.training_seconds,self.best_psnr,self.topology.revision,
             self.gaussian_adaptation.state_dict(),self.voronoi_adaptation.state_dict(),
-            self.medium_frozen_until,self.disentanglement.state_dict(),self.prefix_training_seconds)
+            self.medium_frozen_until,self.disentanglement.state_dict())
         payload['colmap_joint']=dict(birth_steps=self.birth_steps.detach().cpu(),
             medium_accumulators={n:getattr(self.voronoi_adaptation,n).detach().cpu() for n in ACCUMULATORS},
             camera_stack=list(self.sampler._camera_stack),python_rng=random.getstate(),numpy_rng=np.random.get_state())
@@ -288,7 +288,7 @@ class MediumFixTrainer(CapacityTrainer):
         if medium_fix is None:
             manifest = json.loads((Path(config.output_dir).parent / "pipeline_config.json").read_text())
             medium_fix = manifest.get("medium_fix", {})
-        self.medium_fix = MediumFixConfig(**medium_fix)
+        self.medium_fix = MediumFixConfig(**drop_legacy_medium_fix(medium_fix))
         self._captured_prior = None
         self.water_ema = None
         self.chroma_metrics = ({name: float("nan") for name in CHROMA_METRICS}
@@ -302,7 +302,8 @@ class MediumFixTrainer(CapacityTrainer):
             raise ValueError("Backscatter chroma prior requires the RGB medium")
         if self.resume_path is not None:
             sidecar = Path(self.resume_path).with_suffix(".medium_fix.json")
-            saved = json.loads(sidecar.read_text()) if sidecar.is_file() else MediumFixConfig().as_dict()
+            saved = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+            saved = {**MediumFixConfig().as_dict(), **drop_legacy_medium_fix(saved)}
             if saved != self.medium_fix.as_dict():
                 raise ValueError("Resume medium_fix settings mismatch")
             state = Path(self.resume_path).with_suffix(".medium_fix_state.json")

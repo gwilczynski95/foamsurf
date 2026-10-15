@@ -1,7 +1,0 @@
-# IUI3 A4 with bounded RGB for both representations.
-# Override --output-dir for each new experiment to avoid reusing outputs.
-base_config: iui3_5k.yaml
-output_dir: outputs/iui3_sigmoid/both_sigmoid
-gaussian_rgb_activation: sigmoid
-medium_color_activation: sigmoid
-wandb_project: foamsurf_iui3_sigmoid

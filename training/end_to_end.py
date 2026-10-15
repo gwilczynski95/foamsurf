@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 import yaml
-from training.config import ExperimentConfig
+from training.config import ExperimentConfig, drop_legacy_keys
 from training.warmup_profile import WarmupProfile
 from evaluation.surface_partition import variants
 
@@ -87,10 +87,8 @@ class EndToEndConfig:
             raise ValueError('Joint stage must be hybrid')
         if self.joint.voronoi_adaptation.enabled:
             raise ValueError('End-to-end baseline preserves all retained Voronoi cells; disable joint population adaptation')
-        if self.joint.voronoi_warmup.enabled or self.joint.medium_handoff.prefix_mode != 'none':
-            raise ValueError('Joint stage cannot have a second warmup/prefix')
-        if self.warmup.radfoam_prior.enabled or self.joint.radfoam_prior.enabled:
-            raise ValueError('Native end-to-end training cannot import a RadFoam prior')
+        if self.joint.voronoi_warmup.enabled:
+            raise ValueError('Joint stage cannot have a second warmup')
         if self.warmup.dataset != self.joint.dataset or self.warmup.background != self.joint.background:
             raise ValueError('Warmup and joint dataset/background must match')
         if self.warmup.seed != self.joint.seed:
@@ -133,7 +131,10 @@ class EndToEndTrainer:
         if root.exists() and any(root.iterdir()):
             if not resume:
                 raise FileExistsError(f'Nonempty output: {root}; use --resume to continue')
-            if json.loads((root/'pipeline_config.json').read_text()) != manifest:
+            saved = json.loads((root/'pipeline_config.json').read_text())
+            for name in ('warmup', 'joint'):
+                saved[name] = drop_legacy_keys(saved[name])
+            if saved != manifest:
                 raise ValueError('Resume requires the same resolved end-to-end configuration')
         else:
             root.mkdir(parents=True, exist_ok=True)

@@ -28,9 +28,6 @@ class HybridSceneModel(nn.Module):
         config: ExperimentConfig,
         device: torch.device,
     ) -> "HybridSceneModel":
-        if config.radfoam_prior.enabled:
-            raise ValueError("External RadFoam prior initialization was archived; use native FoamSurf training")
-
         points, colors = dataset.initial_point_cloud(
             config.model.gaussian_initial_points
         )

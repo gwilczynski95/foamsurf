@@ -12,7 +12,7 @@ import sys
 
 import yaml
 
-from training.config import ExperimentConfig
+from training.config import ExperimentConfig, drop_legacy_keys
 from training.end_to_end import EndToEndConfig, EndToEndTrainer, atomic_json, update_config
 
 ROOT = Path(__file__).resolve().parent
@@ -126,15 +126,27 @@ def resolve_iui3(
     return source
 
 
+def normalize_saved_manifest(saved):
+    """A saved IUI3 manifest as the current code would resolve it.
+
+    Manifests written before medium_fix (or a newer field) used the defaults;
+    inactive options removed since then are dropped.
+    """
+    from training.losses import MediumFixConfig, drop_legacy_medium_fix
+
+    saved = dict(saved)
+    saved["medium_fix"] = {**MediumFixConfig().as_dict(),
+                           **drop_legacy_medium_fix(saved.get("medium_fix", {}))}
+    for stage in ("warmup", "joint"):
+        saved[stage] = drop_legacy_keys(saved[stage])
+    return saved
+
+
 def fit_iui3(manifest, resume=False):
     root = Path(manifest["output_dir"])
     path = root / "pipeline_config.json"
     if root.exists() and any(root.iterdir()):
-        saved = json.loads(path.read_text()) if path.is_file() else None
-        if saved is not None:
-            # Manifests written before medium_fix (or a newer field) used the defaults.
-            from training.losses import MediumFixConfig
-            saved["medium_fix"] = {**MediumFixConfig().as_dict(), **saved.get("medium_fix", {})}
+        saved = normalize_saved_manifest(json.loads(path.read_text())) if path.is_file() else None
         if not resume or saved != manifest:
             raise ValueError("Nonempty output requires --resume with the identical configuration")
     else:
