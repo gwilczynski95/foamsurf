@@ -109,7 +109,7 @@ class RendererConfig:
     max_intersections: int = 1_024
     number_of_sides: int = 8
     gaussian_radius_squared: float = 11.3449
-    gaussian_hit_buffer_size: int = 16
+    gaussian_hit_buffer_size: int = 64
 
 
 @dataclass

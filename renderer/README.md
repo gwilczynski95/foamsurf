@@ -20,7 +20,7 @@ NativeHybridRenderer.render(...)
   +-- optional: exact nearest Voronoi site for every unique ray origin
   |
   +-- FlaRe-base OptiX Render
-  |     output: sorted Gaussian hit_depths and hit_indices, shape [16, R]
+  |     output: sorted Gaussian hit_depths and hit_indices, shape [64, R]
   |
   +-- foamsurf._C.hybrid_forward
         hybrid_forward_kernel, 128 threads/block, one thread/ray
@@ -58,7 +58,7 @@ renderer/
   setup.py            independent Python extension build
 ```
 
-The generated files `foamsurf/_C.so`, `foamsurf/_optix/` and `build/` are
+The generated files `foamsurf/_C.so`, `foamsurf/_optix_k64/` and `build/` are
 ignored by Git and must never be committed.
 
 ## Public scene contract
@@ -244,10 +244,12 @@ loss.
 
 ## Current hard limits and CUDA work queue
 
-- The vendored OptiX hit buffer has `HIT_BUFFER_SIZE = 16`. More than sixteen
-  Gaussian intersections on one ray are truncated before hybrid compositing.
-- A complete render has two native launches and materializes `[16,R]` depth
-  and index buffers.
+- The vendored OptiX hit buffer has `HIT_BUFFER_SIZE = 64` (the only size
+  built and used). More than 64 Gaussian intersections on one ray are truncated
+  before hybrid compositing.
+- A complete render has two native stages and materializes `[64,R]` depth
+  and index buffers; the RGB medium runs the compositing kernel six times
+  (`foamsurf/rgb_medium.py`, see `docs/RENDERER_SPEEDUP.md`).
 - Nearest starting-cell lookup is Python/PyTorch brute force.
 - The native backend is CUDA float32 and single-GPU.
 - Topology construction/rebuild is outside this standalone renderer.
@@ -264,14 +266,16 @@ PyTorch oracle and this implementation before replacing it.
 ## Build and tests
 
 ```bash
-cd /shared/results/gmwilczn/foamsurf/foamsurf/renderer
-CUDA_VISIBLE_DEVICES=1 ./build.sh
+cd renderer
+./build.sh            # TORCH_CUDA_ARCH_LIST selects the GPU architecture (8.9 default, 8.6 for RTX 3090)
 
-# Oracle, native values/gradients and external baseline equivalence.
-CUDA_VISIBLE_DEVICES=1 python -m pytest -q
+# Oracle, native values/gradients and external baseline equivalence
+# (from the repository root: some tests import the training code).
+cd .. && python -m pytest -q renderer/tests
 
-# Full-call benchmark; resolution means an R x R ray grid.
-CUDA_VISIBLE_DEVICES=1 python -m foamsurf.benchmark --resolution 800
+# Synthetic full-call benchmark; resolution means an R x R ray grid.
+python -m foamsurf.benchmark --resolution 800
+# Real-checkpoint equivalence and benchmark: scripts/renderer_check.py (repository root).
 ```
 
 The external-equivalence test may import original implementations as test

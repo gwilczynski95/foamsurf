@@ -123,7 +123,7 @@ def test_gaussian_only_alpha_gradient_matches_finite_difference():
     rays = torch.zeros(64, 6, device=device)
     rays[:, :2] = 0.1 * torch.randn(64, 2, device=device)
     rays[:, 5] = 1.0
-    renderer = NativeHybridRenderer(max_batch_size=64, near=0.0, far=10.0, gaussian_hit_buffer_size=16)
+    renderer = NativeHybridRenderer(max_batch_size=64, near=0.0, far=10.0, gaussian_hit_buffer_size=64)
 
     def loss_of(opacity_logits):
         scene = GaussianScene(opacity_logits=opacity_logits, **scene_args)

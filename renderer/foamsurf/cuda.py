@@ -200,7 +200,7 @@ class NativeHybridRenderer:
         max_intersections: int = 1024,
         number_of_sides: int = 8,
         gaussian_radius_squared: float = 11.3449,
-        gaussian_hit_buffer_size: int = 16,
+        gaussian_hit_buffer_size: int = 64,
         flare_renderer_directory: str | Path | None = None,
     ) -> None:
         if max_batch_size <= 0:
@@ -239,7 +239,7 @@ class NativeHybridRenderer:
     @staticmethod
     def _load_optix(directory: str | Path | None):
         if directory is None:
-            directory = Path(__file__).resolve().parent / "_optix"
+            directory = Path(__file__).resolve().parent / "_optix_k64"
         directory = Path(directory)
         module = directory / "PYOPTIXFLARERENDERER.so"
         if not module.is_file():
