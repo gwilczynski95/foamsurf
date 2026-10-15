@@ -51,6 +51,20 @@ def _unpack(file, format_string: str):
     return struct.unpack("<" + format_string, data)
 
 
+def colmap_model_dir(root: str | Path) -> Path | None:
+    """COLMAP model directory: ``sparse/0`` (classic layout) or flat ``sparse/``.
+
+    Newer COLMAP exports write the model directly into ``sparse/`` (with extra
+    rigs.bin/frames.bin, which are not needed here). Returns None if neither
+    holds a cameras + images model.
+    """
+    for candidate in (Path(root) / "sparse" / "0", Path(root) / "sparse"):
+        for suffix in (".bin", ".txt"):
+            if (candidate / f"cameras{suffix}").is_file() and (candidate / f"images{suffix}").is_file():
+                return candidate
+    return None
+
+
 def _read_cameras_binary(path: Path) -> dict[int, _Intrinsics]:
     cameras = {}
     with path.open("rb") as file:
@@ -214,7 +228,9 @@ class ColmapDataset:
         if self.llffhold < 2:
             raise ValueError("llffhold must be at least 2")
 
-        sparse = self.root / "sparse" / "0"
+        sparse = colmap_model_dir(self.root)
+        if sparse is None:
+            raise ValueError(f"no COLMAP model in {self.root}/sparse/0 or {self.root}/sparse")
         if (sparse / "cameras.bin").exists():
             intrinsics = _read_cameras_binary(sparse / "cameras.bin")
             extrinsics = _read_images_binary(sparse / "images.bin")

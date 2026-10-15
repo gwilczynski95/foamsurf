@@ -655,3 +655,26 @@ def test_under_surface_passes_chunked_start_cells_to_renderer():
     assert torch.allclose(origins[:, 2], torch.full((count,), 2.0 + 0.01))  # just behind the surface
     expected = torch.cdist(origins, sites).argmin(1)
     assert torch.equal(start.long(), expected)
+
+
+def test_colmap_model_dir_accepts_classic_and_flat_layouts(tmp_path):
+    from foamsurf_data.colmap import colmap_model_dir
+    from foamsurf_data.factory import detect_dataset_type
+
+    flat = tmp_path / "flat"
+    (flat / "sparse").mkdir(parents=True)
+    for name in ("cameras.bin", "images.bin", "points3D.bin", "rigs.bin", "frames.bin"):
+        (flat / "sparse" / name).write_bytes(b"")
+    assert colmap_model_dir(flat) == flat / "sparse"
+    assert detect_dataset_type(flat) == "colmap"
+    classic = tmp_path / "classic"
+    (classic / "sparse" / "0").mkdir(parents=True)
+    for name in ("cameras.txt", "images.txt", "points3D.txt"):
+        (classic / "sparse" / "0" / name).write_text("")
+    (classic / "sparse" / "cameras.bin").write_bytes(b"")  # incomplete flat model is ignored
+    assert colmap_model_dir(classic) == classic / "sparse" / "0"
+    empty = tmp_path / "empty"
+    (empty / "sparse").mkdir(parents=True)
+    assert colmap_model_dir(empty) is None
+    with pytest.raises(ValueError, match="sparse/0 or sparse"):
+        detect_dataset_type(empty)
