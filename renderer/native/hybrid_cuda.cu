@@ -1427,37 +1427,70 @@ struct RgbBackwardState {
     float transmittance[kRgbPasses];
 };
 
-__device__ inline void rgb_backward_medium(
-    uint32_t cell,
-    float start,
-    float end,
-    const EndpointOwner &start_owner,
-    const EndpointOwner &end_owner,
-    Vec3 origin,
-    Vec3 direction,
-    uint32_t active,
-    const float *points,
-    const float *attenuation,
-    const float *backscatter,
-    const float *medium_colors,
-    const float *means,
-    const float *log_scales,
-    const float *quaternions,
-    const float *opacity_logits,
-    const float *raw_kappa,
-    float *points_grad,
-    float *attenuation_grad,
-    float *backscatter_grad,
-    float *medium_colors_grad,
-    float *means_grad,
-    float *log_scales_grad,
-    float *quaternions_grad,
-    float *opacity_logits_grad,
-    float *raw_kappa_grad,
-    RgbBackwardState &state) {
+// Backward writes few global atomics: parameter gradients are summed in
+// registers while they keep going to the same address and written once.
+//
+// CellGradient: attenuation, backscatter and colour gradients of the cell the
+// ray is in, written when the ray leaves it.
+struct CellGradient {
+    uint32_t cell;
+    float density[kRgbPasses];
+    float color[3];
+};
+
+__device__ inline void flush_cell(CellGradient &gradient,
+                                  float *attenuation_grad,
+                                  float *backscatter_grad,
+                                  float *medium_colors_grad) {
+    if (gradient.cell == UINT32_MAX) {
+        return;
+    }
+    uint32_t cell = gradient.cell;
+#pragma unroll
+    for (int pass = 0; pass < kRgbPasses; ++pass) {
+        if (gradient.density[pass] != 0.0f) {
+            atomicAdd(pass < 3 ? attenuation_grad + 3 * cell + pass
+                               : backscatter_grad + 3 * cell + pass - 3,
+                      gradient.density[pass]);
+        }
+        gradient.density[pass] = 0.0f;
+    }
+#pragma unroll
+    for (int channel = 0; channel < 3; ++channel) {
+        if (gradient.color[channel] != 0.0f) {
+            atomicAdd(medium_colors_grad + 3 * cell + channel,
+                      gradient.color[channel]);
+        }
+        gradient.color[channel] = 0.0f;
+    }
+    gradient.cell = UINT32_MAX;
+}
+
+// Backward of one medium segment for every active pass; returns the summed
+// derivative with respect to the segment length (the caller handles its
+// endpoints).
+__device__ inline float rgb_backward_medium(uint32_t cell,
+                                            float start,
+                                            float end,
+                                            uint32_t active,
+                                            const float *attenuation,
+                                            const float *backscatter,
+                                            const float *medium_colors,
+                                            float *attenuation_grad,
+                                            float *backscatter_grad,
+                                            float *medium_colors_grad,
+                                            CellGradient &cell_gradient,
+                                            RgbBackwardState &state) {
     float length = fmaxf(end - start, 0.0f);
     if (length <= 0.0f) {
-        return;
+        return 0.0f;
+    }
+    if (cell_gradient.cell != cell) {
+        flush_cell(cell_gradient,
+                   attenuation_grad,
+                   backscatter_grad,
+                   medium_colors_grad);
+        cell_gradient.cell = cell;
     }
     Vec3 color = make_vec3(medium_colors + 3 * cell);
     float length_derivative = 0.0f;
@@ -1483,48 +1516,94 @@ __device__ inline void rgb_backward_medium(
             state.transmittance[pass],
             color_gradient);
         if (pass >= 3) {
-            atomicAdd(medium_colors_grad + 3 * cell + pass - 3, color_gradient);
+            cell_gradient.color[pass - 3] += color_gradient;
         }
         if (raw_density > 0.0f) {
-            float *density_grad = pass < 3
-                                      ? attenuation_grad + 3 * cell + pass
-                                      : backscatter_grad + 3 * cell + pass - 3;
-            atomicAdd(density_grad, alpha_derivative * length * one_minus_alpha);
+            cell_gradient.density[pass] +=
+                alpha_derivative * length * one_minus_alpha;
         }
         length_derivative += alpha_derivative * density * one_minus_alpha;
     }
-    accumulate_endpoint_gradient(start_owner,
-                                 -length_derivative,
-                                 origin,
-                                 direction,
-                                 points,
-                                 means,
-                                 log_scales,
-                                 quaternions,
-                                 opacity_logits,
-                                 raw_kappa,
-                                 points_grad,
-                                 means_grad,
-                                 log_scales_grad,
-                                 quaternions_grad,
-                                 opacity_logits_grad,
-                                 raw_kappa_grad);
-    accumulate_endpoint_gradient(end_owner,
-                                 length_derivative,
-                                 origin,
-                                 direction,
-                                 points,
-                                 means,
-                                 log_scales,
-                                 quaternions,
-                                 opacity_logits,
-                                 raw_kappa,
-                                 points_grad,
-                                 means_grad,
-                                 log_scales_grad,
-                                 quaternions_grad,
-                                 opacity_logits_grad,
-                                 raw_kappa_grad);
+    return length_derivative;
+}
+
+// The start of the next medium segment: a Gaussian event or a cell boundary.
+// Its gradient has up to three parts at the same depth (end of the segment
+// before it, its own alpha for a Gaussian, start of the segment after it); they
+// are summed and written with one evaluation.
+struct PendingEndpoint {
+    EndpointOwner owner;
+    float alpha_coefficient;
+    float depth_coefficient;
+};
+
+// Site gradient of the boundary just written for its second site: the next
+// boundary's first site is usually the same one.
+struct SiteCarry {
+    uint32_t site;
+    Vec3 gradient;
+};
+
+__device__ inline void flush_site_carry(SiteCarry &carry, float *points_grad) {
+    if (carry.site != UINT32_MAX) {
+        atomic_add_vec3(points_grad + 3 * carry.site, carry.gradient);
+        carry.site = UINT32_MAX;
+    }
+}
+
+__device__ inline void flush_endpoint(PendingEndpoint &pending,
+                                      SiteCarry &carry,
+                                      Vec3 origin,
+                                      Vec3 direction,
+                                      const float *points,
+                                      const float *means,
+                                      const float *log_scales,
+                                      const float *quaternions,
+                                      const float *opacity_logits,
+                                      const float *raw_kappa,
+                                      float *points_grad,
+                                      float *means_grad,
+                                      float *log_scales_grad,
+                                      float *quaternions_grad,
+                                      float *opacity_logits_grad,
+                                      float *raw_kappa_grad) {
+    const EndpointOwner &owner = pending.owner;
+    if (owner.type == OwnerType::Gaussian) {
+        accumulate_gaussian_geometry(owner.gaussian,
+                                     owner.depth,
+                                     pending.alpha_coefficient,
+                                     pending.depth_coefficient,
+                                     origin,
+                                     direction,
+                                     means,
+                                     log_scales,
+                                     quaternions,
+                                     opacity_logits,
+                                     raw_kappa,
+                                     means_grad,
+                                     log_scales_grad,
+                                     quaternions_grad,
+                                     opacity_logits_grad,
+                                     raw_kappa_grad);
+    } else if (owner.type == OwnerType::Boundary &&
+               pending.depth_coefficient != 0.0f) {
+        Vec3 first = make_vec3(points + 3 * owner.first);
+        Vec3 second = make_vec3(points + 3 * owner.second);
+        Vec3 first_gradient =
+            cell_intersection_gradient(first, second, origin, direction) *
+            pending.depth_coefficient;
+        Vec3 second_gradient =
+            cell_intersection_gradient(second, first, origin, direction) *
+            pending.depth_coefficient;
+        if (carry.site == owner.first) {
+            first_gradient = first_gradient + carry.gradient;
+            carry.site = UINT32_MAX;
+        }
+        flush_site_carry(carry, points_grad);
+        atomic_add_vec3(points_grad + 3 * owner.first, first_gradient);
+        carry = {owner.second, second_gradient};
+    }
+    pending = {{OwnerType::None, -1, 0, 0, 0.0f}, 0.0f, 0.0f};
 }
 
 __global__ void rgb_backward_kernel(
@@ -1586,19 +1665,34 @@ __global__ void rgb_backward_kernel(
             backscatter_output_grad[3 * ray_index + channel];
         state.alpha_gradient[channel + 3] = 0.0f;
     }
+    CellGradient cell_gradient;
+    cell_gradient.cell = UINT32_MAX;
 #pragma unroll
     for (int pass = 0; pass < kRgbPasses; ++pass) {
         state.prefix[pass] = 0.0f;
         state.transmittance[pass] = 1.0f;
+        cell_gradient.density[pass] = 0.0f;
+    }
+#pragma unroll
+    for (int channel = 0; channel < 3; ++channel) {
+        cell_gradient.color[channel] = 0.0f;
     }
     uint32_t active = rgb_active_passes(
         state.transmittance, kAllRgbPasses, settings.transmittance_threshold);
     float cursor_depth = settings.near_plane;
-    EndpointOwner cursor_owner{OwnerType::None, -1, 0, 0, cursor_depth};
+    PendingEndpoint pending{
+        {OwnerType::None, -1, 0, 0, cursor_depth}, 0.0f, 0.0f};
+    SiteCarry carry{UINT32_MAX, {0.0f, 0.0f, 0.0f}};
     HitCursor hit_cursor{0};
     uint32_t steps = 0;
     uint32_t current = settings.num_points ? start_points[ray_index] : 0;
     bool finished = false;
+
+#define FOAMSURF_FLUSH_ENDPOINT()                                              \
+    flush_endpoint(pending, carry, origin, direction, points, means,          \
+                   log_scales, quaternions, opacity_logits, raw_kappa,         \
+                   points_grad, means_grad, log_scales_grad, quaternions_grad, \
+                   opacity_logits_grad, raw_kappa_grad)
 
     while (!finished && cursor_depth < settings.far_plane && active &&
            steps < settings.max_intersections) {
@@ -1645,37 +1739,26 @@ __global__ void rgb_backward_kernel(
                         boundary_depth,
                         hit_depth,
                         gaussian_index)) {
-            EndpointOwner gaussian_owner{
-                OwnerType::Gaussian, gaussian_index, 0, 0, hit_depth};
+            float length_derivative = 0.0f;
             if (settings.num_points) {
-                rgb_backward_medium(current,
-                                    cursor_depth,
-                                    hit_depth,
-                                    cursor_owner,
-                                    gaussian_owner,
-                                    origin,
-                                    direction,
-                                    active,
-                                    points,
-                                    attenuation,
-                                    backscatter,
-                                    medium_colors,
-                                    means,
-                                    log_scales,
-                                    quaternions,
-                                    opacity_logits,
-                                    raw_kappa,
-                                    points_grad,
-                                    attenuation_grad,
-                                    backscatter_grad,
-                                    medium_colors_grad,
-                                    means_grad,
-                                    log_scales_grad,
-                                    quaternions_grad,
-                                    opacity_logits_grad,
-                                    raw_kappa_grad,
-                                    state);
+                length_derivative = rgb_backward_medium(current,
+                                                        cursor_depth,
+                                                        hit_depth,
+                                                        active,
+                                                        attenuation,
+                                                        backscatter,
+                                                        medium_colors,
+                                                        attenuation_grad,
+                                                        backscatter_grad,
+                                                        medium_colors_grad,
+                                                        cell_gradient,
+                                                        state);
+                pending.depth_coefficient -= length_derivative;
             }
+            FOAMSURF_FLUSH_ENDPOINT();
+            pending = {{OwnerType::Gaussian, gaussian_index, 0, 0, hit_depth},
+                       0.0f,
+                       length_derivative};
             float alpha = evaluate_gaussian_scalar(gaussian_index,
                                                    hit_depth,
                                                    origin,
@@ -1687,14 +1770,14 @@ __global__ void rgb_backward_kernel(
                                                    raw_kappa)
                               .alpha;
             Vec3 color = make_vec3(gaussian_colors + 3 * gaussian_index);
-            float alpha_coefficient = 0.0f;
+            float color_gradient[3] = {0.0f, 0.0f, 0.0f};
 #pragma unroll
             for (int pass = 0; pass < kRgbPasses; ++pass) {
                 if (!(active & (1u << pass))) {
                     continue;
                 }
-                float color_gradient;
-                alpha_coefficient += rgb_backward_event(
+                float pass_color_gradient;
+                pending.alpha_coefficient += rgb_backward_event(
                     alpha,
                     pass < 3 ? component(color, pass) : 0.0f,
                     state.final_value[pass],
@@ -1703,34 +1786,21 @@ __global__ void rgb_backward_kernel(
                     state.alpha_gradient[pass],
                     state.prefix[pass],
                     state.transmittance[pass],
-                    color_gradient);
+                    pass_color_gradient);
                 if (pass < 3) {
-                    atomicAdd(gaussian_colors_grad + 3 * gaussian_index + pass,
-                              color_gradient);
+                    color_gradient[pass] = pass_color_gradient;
                 }
             }
-            // The alpha derivative is linear in the coefficient: one dual
-            // evaluation serves all passes.
-            accumulate_gaussian_geometry(gaussian_index,
-                                         hit_depth,
-                                         alpha_coefficient,
-                                         0.0f,
-                                         origin,
-                                         direction,
-                                         means,
-                                         log_scales,
-                                         quaternions,
-                                         opacity_logits,
-                                         raw_kappa,
-                                         means_grad,
-                                         log_scales_grad,
-                                         quaternions_grad,
-                                         opacity_logits_grad,
-                                         raw_kappa_grad);
+#pragma unroll
+            for (int channel = 0; channel < 3; ++channel) {
+                if (color_gradient[channel] != 0.0f) {
+                    atomicAdd(gaussian_colors_grad + 3 * gaussian_index + channel,
+                              color_gradient[channel]);
+                }
+            }
             active = rgb_active_passes(
                 state.transmittance, active, settings.transmittance_threshold);
             cursor_depth = fmaxf(cursor_depth, hit_depth);
-            cursor_owner = gaussian_owner;
             ++hit_cursor.slot;
             if (!active) {
                 break;
@@ -1739,43 +1809,36 @@ __global__ void rgb_backward_kernel(
         if (!active) {
             break;
         }
+        float length_derivative = 0.0f;
         if (settings.num_points) {
-            rgb_backward_medium(current,
-                                cursor_depth,
-                                boundary_depth,
-                                cursor_owner,
-                                boundary_owner,
-                                origin,
-                                direction,
-                                active,
-                                points,
-                                attenuation,
-                                backscatter,
-                                medium_colors,
-                                means,
-                                log_scales,
-                                quaternions,
-                                opacity_logits,
-                                raw_kappa,
-                                points_grad,
-                                attenuation_grad,
-                                backscatter_grad,
-                                medium_colors_grad,
-                                means_grad,
-                                log_scales_grad,
-                                quaternions_grad,
-                                opacity_logits_grad,
-                                raw_kappa_grad,
-                                state);
+            length_derivative = rgb_backward_medium(current,
+                                                    cursor_depth,
+                                                    boundary_depth,
+                                                    active,
+                                                    attenuation,
+                                                    backscatter,
+                                                    medium_colors,
+                                                    attenuation_grad,
+                                                    backscatter_grad,
+                                                    medium_colors_grad,
+                                                    cell_gradient,
+                                                    state);
+            pending.depth_coefficient -= length_derivative;
         }
+        FOAMSURF_FLUSH_ENDPOINT();
+        pending = {boundary_owner, 0.0f, length_derivative};
         cursor_depth = boundary_depth;
-        cursor_owner = boundary_owner;
         if (!finished && has_boundary) {
             current = next;
         }
         active = rgb_active_passes(
             state.transmittance, active, settings.transmittance_threshold);
     }
+    FOAMSURF_FLUSH_ENDPOINT();
+#undef FOAMSURF_FLUSH_ENDPOINT
+    flush_site_carry(carry, points_grad);
+    flush_cell(cell_gradient, attenuation_grad, backscatter_grad,
+               medium_colors_grad);
 }
 
 } // namespace
