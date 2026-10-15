@@ -535,6 +535,48 @@ __global__ void hybrid_forward_kernel(
     num_intersections[ray_index] = steps;
 }
 
+// Medium statistics of the cell a ray is in, summed while it stays there and
+// written when it leaves (one atomicMax per visit: the ray error is constant).
+struct CellStatistics {
+    uint32_t cell;
+    float weight;
+    float segments;
+    float path;
+    float weighted_path;
+};
+
+__device__ inline void flush_cell_statistics(CellStatistics &statistics,
+                                             float ray_error,
+                                             float *medium_statistics) {
+    if (statistics.cell == UINT32_MAX) {
+        return;
+    }
+    float *target = medium_statistics + 5 * statistics.cell;
+    atomicAdd(target, statistics.weight);
+    atomicAdd(target + 1, statistics.segments);
+    atomicAdd(target + 2, statistics.path);
+    atomicAdd(target + 3, statistics.weighted_path);
+    atomicMax(reinterpret_cast<int *>(target + 4), __float_as_int(ray_error));
+    statistics = {UINT32_MAX, 0.0f, 0.0f, 0.0f, 0.0f};
+}
+
+__device__ inline void add_cell_statistics(CellStatistics &statistics,
+                                           uint32_t cell,
+                                           float weight,
+                                           float length,
+                                           float transmittance_before,
+                                           float ray_error,
+                                           float *medium_statistics) {
+    if (statistics.cell != cell) {
+        flush_cell_statistics(statistics, ray_error, medium_statistics);
+        statistics.cell = cell;
+    }
+    statistics.weight += weight;
+    statistics.segments += 1.0f;
+    statistics.path += length;
+    statistics.weighted_path += transmittance_before * length;
+}
+
 // Optional B0.1 instrumentation. It repeats scalar traversal in a separate
 // forward-only launch, so regular rendering and autograd remain unchanged.
 // Outputs are reduced to [R,8], [G,4], [V,5], never rays x primitives.
@@ -573,6 +615,8 @@ __global__ void hybrid_diagnostics_kernel(
     float medium_weight = 0.0f;
     float medium_path = 0.0f;
     float weighted_medium_path = 0.0f;
+    float ray_error = ray_errors[ray_index];
+    CellStatistics cell_statistics{UINT32_MAX, 0.0f, 0.0f, 0.0f, 0.0f};
 
     uint32_t current = settings.num_points ? start_points[ray_index] : 0;
     bool finished = false;
@@ -613,15 +657,9 @@ __global__ void hybrid_diagnostics_kernel(
                     medium_path += length;
                     weighted_medium_path += transmittance_before * length;
                     ++medium_segments;
-                    atomicAdd(medium_statistics + 5 * current, weight);
-                    atomicAdd(medium_statistics + 5 * current + 1, 1.0f);
-                    atomicAdd(medium_statistics + 5 * current + 2, length);
-                    atomicAdd(medium_statistics + 5 * current + 3,
-                              transmittance_before * length);
-                    atomicMax(
-                        reinterpret_cast<int *>(
-                            medium_statistics + 5 * current + 4),
-                        __float_as_int(ray_errors[ray_index]));
+                    add_cell_statistics(cell_statistics, current, weight,
+                                        length, transmittance_before,
+                                        ray_error, medium_statistics);
                     transmittance *= 1.0f - alpha;
                 }
             }
@@ -660,15 +698,9 @@ __global__ void hybrid_diagnostics_kernel(
                 medium_path += length;
                 weighted_medium_path += transmittance_before * length;
                 ++medium_segments;
-                atomicAdd(medium_statistics + 5 * current, weight);
-                atomicAdd(medium_statistics + 5 * current + 1, 1.0f);
-                atomicAdd(medium_statistics + 5 * current + 2, length);
-                atomicAdd(medium_statistics + 5 * current + 3,
-                          transmittance_before * length);
-                atomicMax(
-                    reinterpret_cast<int *>(
-                        medium_statistics + 5 * current + 4),
-                        __float_as_int(ray_errors[ray_index]));
+                add_cell_statistics(cell_statistics, current, weight, length,
+                                    transmittance_before, ray_error,
+                                    medium_statistics);
                 transmittance *= 1.0f - alpha;
             }
         }
@@ -678,6 +710,7 @@ __global__ void hybrid_diagnostics_kernel(
         }
     }
 
+    flush_cell_statistics(cell_statistics, ray_error, medium_statistics);
     float *stats = ray_statistics + 8 * ray_index;
     stats[0] = gaussian_weight;
     stats[1] = medium_weight;
@@ -1427,6 +1460,136 @@ struct RgbBackwardState {
     float transmittance[kRgbPasses];
 };
 
+// accumulate_gaussian_geometry in reverse mode: the same function as
+// evaluate_gaussian_dual (plane depth from the formula with the saved depth as
+// its value, r^2 clamped without derivative below epsilon, exp(kappa log r^2)),
+// differentiated by hand instead of carrying 11 dual derivatives, which needs
+// far fewer registers and operations.
+__device__ inline void accumulate_gaussian_geometry_reverse(
+    int index,
+    float hit_depth,
+    float alpha_coefficient,
+    float depth_coefficient,
+    Vec3 origin,
+    Vec3 direction,
+    const float *means,
+    const float *log_scales,
+    const float *quaternions,
+    const float *opacity_logits,
+    const float *raw_kappa,
+    float *means_grad,
+    float *log_scales_grad,
+    float *quaternions_grad,
+    float *opacity_logits_grad,
+    float *raw_kappa_grad) {
+    Vec3 mean = make_vec3(means + 3 * index);
+    const float *q = quaternions + 4 * index;
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    float factor = 2.0f / (w * w + x * x + y * y + z * z);
+    // Rotation entries r_ij = delta_ij + factor * p_ij(q).
+    float p[3][3] = {{-(y * y + z * z), x * y + w * z, x * z - w * y},
+                     {x * y - w * z, -(x * x + z * z), y * z + w * x},
+                     {x * z + w * y, y * z - w * x, -(x * x + y * y)}};
+    Vec3 row0 = {1.0f + factor * p[0][0], factor * p[0][1], factor * p[0][2]};
+    Vec3 row1 = {factor * p[1][0], 1.0f + factor * p[1][1], factor * p[1][2]};
+    Vec3 row2 = {factor * p[2][0], factor * p[2][1], 1.0f + factor * p[2][2]};
+
+    Vec3 offset = mean - origin;
+    float numerator = dot(row2, offset);
+    float denominator = dot(row2, direction);
+    float formula_depth = numerator / denominator;
+    Vec3 local = origin + direction * hit_depth - mean;
+    float inverse_scale_x = expf(-log_scales[2 * index]);
+    float inverse_scale_y = expf(-log_scales[2 * index + 1]);
+    float projection_u = dot(row0, local);
+    float projection_v = dot(row1, local);
+    float u = inverse_scale_x * projection_u;
+    float v = inverse_scale_y * projection_v;
+    float radius_squared = u * u + v * v;
+    bool clamped = !(radius_squared >= kEpsilon);
+    if (clamped) {
+        radius_squared = kEpsilon;
+    }
+    float exp_raw = expf(raw_kappa[index]);
+    float kappa = 1.0f + logf(1.0f + exp_raw);
+    float log_radius = logf(radius_squared);
+    float radial_power = expf(kappa * log_radius);
+    float exponent = -0.5f * radial_power / kappa;
+    float response = expf(exponent);
+    float opacity = 1.0f / (1.0f + expf(-opacity_logits[index]));
+
+    // Reverse pass.
+    float opacity_logit_gradient =
+        alpha_coefficient * response * opacity * (1.0f - opacity);
+    float exponent_gradient = alpha_coefficient * opacity * response;
+    float power_gradient = exponent_gradient * -0.5f / kappa;
+    float kappa_gradient = -exponent_gradient * exponent / kappa;
+    float product_gradient = power_gradient * radial_power;
+    kappa_gradient += product_gradient * log_radius;
+    float radius_gradient = clamped ? 0.0f : product_gradient * kappa / radius_squared;
+    float u_gradient = radius_gradient * 2.0f * u;
+    float v_gradient = radius_gradient * 2.0f * v;
+    float log_scale_x_gradient = -u_gradient * projection_u * inverse_scale_x;
+    float log_scale_y_gradient = -v_gradient * projection_v * inverse_scale_y;
+    float projection_u_gradient = u_gradient * inverse_scale_x;
+    float projection_v_gradient = v_gradient * inverse_scale_y;
+    Vec3 row0_gradient = local * projection_u_gradient;
+    Vec3 row1_gradient = local * projection_v_gradient;
+    Vec3 local_gradient =
+        row0 * projection_u_gradient + row1 * projection_v_gradient;
+    float depth_gradient = dot(local_gradient, direction) + depth_coefficient;
+    float numerator_gradient = depth_gradient / denominator;
+    float denominator_gradient =
+        -depth_gradient * formula_depth / denominator;
+    Vec3 row2_gradient =
+        offset * numerator_gradient + direction * denominator_gradient;
+    Vec3 mean_gradient = row2 * numerator_gradient - local_gradient;
+
+    float g[3][3] = {{row0_gradient.x, row0_gradient.y, row0_gradient.z},
+                     {row1_gradient.x, row1_gradient.y, row1_gradient.z},
+                     {row2_gradient.x, row2_gradient.y, row2_gradient.z}};
+    float weighted = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 3; ++i) {
+#pragma unroll
+        for (int j = 0; j < 3; ++j) {
+            weighted += g[i][j] * p[i][j];
+        }
+    }
+    // d factor / d q_k = -factor^2 q_k.
+    float shared = factor * factor * weighted;
+    float w_gradient =
+        factor * (g[0][1] * z - g[0][2] * y - g[1][0] * z + g[1][2] * x +
+                  g[2][0] * y - g[2][1] * x) -
+        shared * w;
+    float x_gradient =
+        factor * (g[0][1] * y + g[0][2] * z + g[1][0] * y -
+                  2.0f * g[1][1] * x + g[1][2] * w + g[2][0] * z -
+                  g[2][1] * w - 2.0f * g[2][2] * x) -
+        shared * x;
+    float y_gradient =
+        factor * (-2.0f * g[0][0] * y + g[0][1] * x - g[0][2] * w +
+                  g[1][0] * x + g[1][2] * z + g[2][0] * w + g[2][1] * z -
+                  2.0f * g[2][2] * y) -
+        shared * y;
+    float z_gradient =
+        factor * (-2.0f * g[0][0] * z + g[0][1] * w + g[0][2] * x -
+                  g[1][0] * w - 2.0f * g[1][1] * z + g[1][2] * y +
+                  g[2][0] * x + g[2][1] * y) -
+        shared * z;
+    float raw_kappa_gradient = kappa_gradient * exp_raw * (1.0f / (1.0f + exp_raw));
+
+    atomic_add_vec3(means_grad + 3 * index, mean_gradient);
+    atomicAdd(log_scales_grad + 2 * index, log_scale_x_gradient);
+    atomicAdd(log_scales_grad + 2 * index + 1, log_scale_y_gradient);
+    atomicAdd(quaternions_grad + 4 * index, w_gradient);
+    atomicAdd(quaternions_grad + 4 * index + 1, x_gradient);
+    atomicAdd(quaternions_grad + 4 * index + 2, y_gradient);
+    atomicAdd(quaternions_grad + 4 * index + 3, z_gradient);
+    atomicAdd(opacity_logits_grad + index, opacity_logit_gradient);
+    atomicAdd(raw_kappa_grad + index, raw_kappa_gradient);
+}
+
 // Backward writes few global atomics: parameter gradients are summed in
 // registers while they keep going to the same address and written once.
 //
@@ -1569,7 +1732,7 @@ __device__ inline void flush_endpoint(PendingEndpoint &pending,
                                       float *raw_kappa_grad) {
     const EndpointOwner &owner = pending.owner;
     if (owner.type == OwnerType::Gaussian) {
-        accumulate_gaussian_geometry(owner.gaussian,
+        accumulate_gaussian_geometry_reverse(owner.gaussian,
                                      owner.depth,
                                      pending.alpha_coefficient,
                                      pending.depth_coefficient,
