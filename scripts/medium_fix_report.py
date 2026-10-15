@@ -51,14 +51,14 @@ PROX = (("", "1 (brak)"), ("_prox50", "0,5"), ("_prox30", "0,3"), ("_prox10", "0
 
 
 def parse_variant(variant):
-    """Split <base>[_in..][_chroma..][_csmooth..][_prox..][_ring][_bk] into
+    """Split <base>[_in..][_chroma..][_csmooth..][seabed][_g..k][_far..][_prox..][_ring][_bk] into
     (base, layout, prox, black, regularizer)."""
     match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
-                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_g\d+k)?"
+                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_g\d+k)?(_far\d+s\d{3})?"
                          r"(_prox\d\d)?(_ring)?(_bk)?", variant)
-    base, layout, chroma, smooth, seabed, gauss, prox, ring, black = match.groups()
+    base, layout, chroma, smooth, seabed, gauss, far, prox, ring, black = match.groups()
     return (base, layout or "", (prox or "") + (ring or ""), bool(black),
-            (chroma or "") + (smooth or "") + (seabed or "") + (gauss or ""))
+            (chroma or "") + (smooth or "") + (seabed or "") + (gauss or "") + (far or ""))
 
 
 def regularizer_label(code):
@@ -69,6 +69,9 @@ def regularizer_label(code):
     for cap in re.findall(r"_g(\d+)k", code):
         parts.append(f"do {cap} tys. Gaussów (próg zagęszczania 2e-4)")
     code = re.sub(r"_g\d+k", "", code)
+    for distance, scale in re.findall(r"_far(\d+)s(\d{3})", code):
+        parts.append(f"usuwanie Gaussów o skali > {fmt(int(scale) / 1000, 2)} dalej niż {distance} j. od kamer")
+    code = re.sub(r"_far\d+s\d{3}", "", code)
     for kind, value in re.findall(r"_(chroma|csmooth|kappa|scov|under|scale0dens)(\d+)", code):
         if kind == "chroma":
             parts.append("kara barwy backscatteru " + fmt(int(value) / 100, 2))
@@ -104,9 +107,14 @@ def describe(variant):
 SEABED_CODES = ("_kappa", "_scov", "_under", "_scale0dens2")
 
 
+FAR_BASE = "B0_chroma100_scov3e3_g700k_bk"
+
+
 def baseline_name(variant):
-    """Seabed variants vs the default B0_chroma100_bk, other black-background runs
-    vs B0_bk, the rest vs B0."""
+    """Far-pruning variants vs FAR_BASE, seabed variants vs the default
+    B0_chroma100_bk, other black-background runs vs B0_bk, the rest vs B0."""
+    if "_far" in variant:
+        return FAR_BASE
     if variant.startswith("B0_chroma100_") and any(code in variant for code in SEABED_CODES):
         return "B0_chroma100_bk"
     return "B0_bk" if parse_variant(variant)[3] else "B0"
@@ -333,6 +341,12 @@ def hue_text(run):
     text = "" if math.isnan(angle) else f"<br>kąt barwy backscatteru dna {fmt(angle, 1)}°"
     partial = audit_value(run, "bottom_alpha_gt_0.5") - audit_value(run, "bottom_alpha_gt_0.99")
     text += "" if math.isnan(partial) else f"<br>dno półprzezroczyste (α 0,5–0,99) {fmt(partial, 0, percent=True)}"
+    water = audit_value(run, "open_water_alpha_gt_0.5")
+    if not math.isnan(water):
+        text += f"<br>otwarta woda zajęta przez G (α&gt;0,5) {fmt(water, 1, percent=True)}"
+    center, border = audit_value(run, "bottom_center_alpha_gt_0.99"), audit_value(run, "bottom_border_alpha_gt_0.99")
+    if not math.isnan(center):
+        text += f"<br>dno α&gt;0,99: środek {fmt(center, 0, percent=True)} · brzegi {fmt(border, 0, percent=True)}"
     count = ((run.get("best") or {}).get("gaussians") or {}).get("count")
     fps = run.get("best_fps")
     if count:
@@ -370,6 +384,19 @@ def matrices(runs, all_runs=()):
         matrix(f"Czarne tło: baza × liczba Gaussów, seed {label}", bases, caps,
                lambda base, cap, seed=seed: by_full.get(f"{base}_bk{seed}" if not cap else f"{base}_g{cap}k_bk{seed}"))
         for seed, label in (("", "42"), ("_seed43", "43")))
+    distances = (("", "bez usuwania"), ("10", "odległość > 10"), ("15", "odległość > 15"), ("20", "odległość > 20"))
+    scales = (("030", "skala > 0,03"), ("050", "skala > 0,05"), ("080", "skala > 0,08"))
+    base = FAR_BASE.removesuffix("_g700k_bk")
+    far = "".join(
+        matrix(f"Domyślna + pokrycie dna 3e-3, do 700 tys. Gaussów: usuwanie dużych Gaussów daleko od kamer, seed {label}",
+               distances, scales,
+               lambda d, sc, seed=seed: by_full.get(f"{FAR_BASE}{seed}" if not d else f"{base}_g700k_far{d}s{sc}_bk{seed}"))
+        for seed, label in (("", "42"), ("_seed43", "43")))
+    far_scov = matrix("Usuwanie (odległość > 15, skala > 0,05) × waga pokrycia dna",
+                      (("_scov3e3", "pokrycie 3e-3"), ("_scov5e3", "pokrycie 5e-3"), ("_scov1e2", "pokrycie 1e-2")),
+                      (("", "seed 42"), ("_seed43", "seed 43")),
+                      lambda code, seed: by_full.get(f"B0_chroma100{code}_g700k_far15s050_bk{seed}"))
+    gauss = far + far_scov + gauss
     if not (stage_a or prox or chroma or seabed or gauss):
         return ""
     legend = ("<p class='small'>W komórce: <b>best test PSNR</b>; PSNR wody; ΔPSNR dna po zastąpieniu komórek ≤5 j. "
@@ -419,7 +446,7 @@ def main():
     runs.sort(key=family_order)
     main_runs = [r for r in runs if r["seed"] is None]
     winners, rules = [], []
-    for baseline in ("B0", "B0_bk", "B0_chroma100_bk"):
+    for baseline in ("B0", "B0_bk", "B0_chroma100_bk", FAR_BASE):
         compared = [r for r in main_runs if baseline_name(r["variant"]) == baseline and r["variant"] != baseline]
         if compared and any(r["variant"] == baseline for r in main_runs):
             found, text = select_winner(main_runs, baseline)
@@ -472,6 +499,9 @@ def main():
     for base, label in (("B0", "B0_bk"), ("B0_chroma100", "domyślna"), ("B0_chroma100_scov3e3", "domyślna + pokrycie 3e-3")):
         groups.append((f"{label}: liczba Gaussów",
                        [r for r in main_runs if r["variant"] == f"{base}_bk" or re.fullmatch(rf"{base}_g\d+k_bk", r["variant"])]))
+    for distance in ("10", "15", "20"):
+        groups.append((f"usuwanie dużych Gaussów dalej niż {distance} j. od kamer",
+                       [r for r in main_runs if r["variant"] == FAR_BASE or f"_far{distance}s" in r["variant"]]))
     groups.append(("czarne tło, B0: kara barwy backscatteru i wygładzanie koloru",
                    [r for r in main_runs if r["variant"] == "B0_bk"
                     or (parse_variant(r["variant"])[4] and parse_variant(r["variant"])[0] == "B0"
@@ -486,6 +516,9 @@ def main():
                   [(r["name"], r.get("best_psnr", float("nan")) - psnr_of.get(baseline_name(r["variant"]), float("nan")))
                    for r in main_runs if r["variant"] not in ("B0", "B0_bk")], 3,
                   note="Reguła wyboru dopuszcza spadek do −0,5 dB względem swojej bazy.")
+        + bar_chart("Otwarta woda zajęta przez Gaussy: udział pikseli maski wody z α > 0,5 (best; im mniej, tym lepiej)",
+                    [(r["name"], audit_value(r, "open_water_alpha_gt_0.5")) for r in main_runs], 1, percent=True,
+                    note="Maska otwartej wody: configs/iui3_open_water.npz (α Gaussów domyślnego runu < 0,01).")
         + bar_chart("Pokrycie dna Gaussami: udział pikseli z α > 0,99 (best)",
                     [(r["name"], audit_value(r, "bottom_alpha_gt_0.99")) for r in main_runs], 1, percent=True)
         + bar_chart("Udział backscatteru zza powierzchni na dnie (best; im mniej, tym lepiej)",

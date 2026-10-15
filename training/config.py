@@ -229,6 +229,12 @@ class GaussianAdaptationConfig:
     screen_pruning_enabled: bool = False
     max_screen_size: float = 20.0
     max_world_scale_fraction: float = 0.10
+    # Gaussians whose largest scale exceeds far_prune_scale and whose center is
+    # farther than far_prune_distance from every training camera (both in world
+    # units) are pruned at every opacity-prune or size-prune event; they fill
+    # open water. None disables.
+    far_prune_distance: float | None = None
+    far_prune_scale: float = 0.05
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
@@ -761,6 +767,12 @@ class ExperimentConfig:
                 raise ValueError(
                     f"gaussian_adaptation.{name} must be non-negative"
                 )
+        if adaptation.far_prune_distance is not None and not (
+            adaptation.far_prune_distance > 0 and adaptation.far_prune_scale > 0
+        ):
+            raise ValueError(
+                "gaussian_adaptation.far_prune_distance and far_prune_scale must be positive"
+            )
         medium_adaptation = self.voronoi_adaptation
         if medium_adaptation.enabled and self.representation_mode == "gaussian_only":
             raise ValueError("Voronoi adaptation cannot run in gaussian_only mode")

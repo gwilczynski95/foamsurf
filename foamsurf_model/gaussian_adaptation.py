@@ -115,7 +115,11 @@ class GaussianAdaptationController:
         config: GaussianAdaptationConfig,
         scene_extent: float,
         support_radius: float = 3.0,
+        camera_centers: torch.Tensor | None = None,
     ) -> None:
+        if config.far_prune_distance is not None and camera_centers is None:
+            raise ValueError("far_prune_distance needs the training camera centers")
+        self.camera_centers = camera_centers
         self.model = model
         self.optimizer = optimizer
         self.config = config
@@ -144,6 +148,7 @@ class GaussianAdaptationController:
             "opacity_pruning_active": 0,
             "screen_prune": 0,
             "world_prune": 0,
+            "far_prune": 0,
             "gradient_opacity_overlap": 0,
             "gradient_screen_overlap": 0,
             "gradient_world_overlap": 0,
@@ -237,6 +242,15 @@ class GaussianAdaptationController:
         self.total_opacity_resets += 1
         self.last_opacity_reset_changed = changed
         return changed
+
+    @torch.no_grad()
+    def far_from_cameras(self, points: torch.Tensor) -> torch.Tensor:
+        """Points farther than far_prune_distance from every training camera."""
+        distance = torch.full(points.shape[:1], float("inf"), device=points.device)
+        centers = self.camera_centers.to(points.device, points.dtype)
+        for chunk in torch.split(torch.arange(points.shape[0], device=points.device), 262144):
+            distance[chunk] = torch.cdist(points[chunk], centers).amin(dim=1)
+        return distance > self.config.far_prune_distance
 
     @torch.no_grad()
     def projected_radii(self, camera) -> torch.Tensor:
@@ -412,7 +426,14 @@ class GaussianAdaptationController:
             world_prune = scales > (
                 self.config.max_world_scale_fraction * self.scene_extent
             )
-        mandatory_prune = screen_prune | world_prune
+        far_prune = torch.zeros_like(raw_opacity_prune)
+        if self.config.far_prune_distance is not None and (
+            opacity_pruning_active or size_pruning_active
+        ):
+            far_prune = self.far_from_cameras(self.model.means) & (
+                scales > self.config.far_prune_scale
+            )
+        mandatory_prune = screen_prune | world_prune | far_prune
         opacity_prune = raw_opacity_prune & mandatory_prune
         optional_opacity = indices[
             raw_opacity_prune & ~mandatory_prune
@@ -462,8 +483,11 @@ class GaussianAdaptationController:
         # remove do not affect the final model. Avoid allocating them. New
         # children have no accumulated screen-radius history, so screen
         # pruning removes the oversized parent, not its replacement.
-        clone_mask &= ~opacity_prune & ~world_prune
+        clone_mask &= ~opacity_prune & ~world_prune & ~far_prune
         split_mask &= ~opacity_prune
+        if self.config.far_prune_distance is not None:
+            # Split children are scaled by 1/1.6 and stay near the parent.
+            split_mask &= ~(far_prune & (scales / 1.6 > self.config.far_prune_scale))
         if size_pruning_active:
             child_world_prune = scales / 1.6 > (
                 self.config.max_world_scale_fraction * self.scene_extent
@@ -567,6 +591,7 @@ class GaussianAdaptationController:
             "opacity_pruning_active": int(opacity_pruning_active),
             "screen_prune": int(screen_prune.sum().item()),
             "world_prune": int(world_prune.sum().item()),
+            "far_prune": int(far_prune.sum().item()),
             "gradient_opacity_overlap": int(
                 (gradient_candidates & opacity_prune).sum().item()
             ),

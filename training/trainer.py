@@ -225,6 +225,7 @@ class Trainer:
             self.gaussian_optimizer,
             config.gaussian_adaptation,
             self.scene_extent,
+            camera_centers=torch.stack([camera.origin for camera in self.dataset.train]),
         )
         if payload is not None and payload.get("gaussian_adaptation") is not None:
             self.gaussian_adaptation.load_state_dict(
@@ -580,6 +581,9 @@ class Trainer:
         )
         row.update(self.last_hit_statistics)
         row.update(self.last_disentanglement.metrics())
+        if self.config.gaussian_adaptation.far_prune_distance is not None:
+            # Only when enabled: CSV columns of resumed runs must not change.
+            row["adaptation/far_prune_candidates"] = adaptation_statistics["far_prune"]
         return row
 
     @torch.no_grad()
@@ -788,6 +792,7 @@ class Trainer:
                 f"clone={self.last_adaptation['clone']} "
                 f"split={self.last_adaptation['split']} "
                 f"prune={self.last_adaptation['prune']} "
+                f"far_prune={statistics['far_prune']} "
                 f"budget_skip={self.last_adaptation['budget_skip']} "
                 f"count={self.model.gaussians.point_count} "
                 f"grad_p95={statistics['gradient_p95']:.3e} "

@@ -15,16 +15,18 @@
 # last.pt (scripts/medium_audit.py).
 #
 #   FS_VARIANT_SET=gauss sbatch --array=0-17%7 scripts/sweep_medium_fix.sbatch
+#   FS_VARIANT_SET=far sbatch --array=0-21%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
 #   FS_SEED_VARIANTS="B0_chroma100_bk" FS_SEEDS="44 45" sbatch --array=0-1%7 scripts/sweep_medium_fix.sbatch
 # Resume a set (finished stages are skipped, the audits run again):
 #   FS_RUN_ID=<job id> FS_RESUME=1 FS_VARIANT_SET=... sbatch --array=... scripts/sweep_medium_fix.sbatch
 #
-# Variant names: B0[_chroma<NNN>][_scov<NNN>|_scov<D>e<E>][_under<NNN>][_g<N>k][_bk][_seed<S>]
+# Variant names: B0[_chroma<NNN>][_scov<NNN>|_scov<D>e<E>][_under<NNN>][_g<N>k][_far<D>s<SSS>][_bk][_seed<S>]
 #   _chroma<NNN>  backscatter chroma prior weight NNN/100 (B0_chroma100_bk = configs/iui3_default.yaml)
 #   _scov...      one-sided seabed coverage weight NNN/100 or D*10^-E
 #   _under<NNN>   under-seabed medium penalty weight NNN/100
 #   _g<N>k        densify threshold 2e-4 and at most N thousand Gaussians
+#   _far<D>s<SSS> prune Gaussians larger than SSS/1000 farther than D from every training camera
 #   _bk           black background
 #   _seed<S>      seed S for warmup and joint
 set -Eeuo pipefail
@@ -48,8 +50,23 @@ GAUSS_VARIANTS=()
 for base in B0 B0_chroma100 B0_chroma100_scov3e3; do
   for cap in 500 700 1000; do GAUSS_VARIANTS+=("${base}_g${cap}k_bk" "${base}_g${cap}k_bk_seed43"); done
 done
+# Pruning of large Gaussians far from the cameras (they fill open water), on the
+# default + seabed coverage 3e-3 at up to 700k Gaussians: distance x scale grid,
+# and seabed coverage 5e-3 / 1e-2 at (15, 0.05); two seeds. The unpruned control is
+# B0_chroma100_scov3e3_g700k_bk from the gauss set.
+FAR_VARIANTS=()
+for distance in 10 15 20; do
+  for scale in 030 050 080; do
+    FAR_VARIANTS+=("B0_chroma100_scov3e3_g700k_far${distance}s${scale}_bk")
+  done
+done
+FAR_VARIANTS+=("B0_chroma100_scov5e3_g700k_far15s050_bk" "B0_chroma100_scov1e2_g700k_far15s050_bk")
+SEEDED=()
+for variant in "${FAR_VARIANTS[@]}"; do SEEDED+=("$variant" "${variant}_seed43"); done
+FAR_VARIANTS=("${SEEDED[@]}")
 case "${FS_VARIANT_SET:-gauss}" in
   gauss) VARIANTS=("${GAUSS_VARIANTS[@]}") ;;
+  far) VARIANTS=("${FAR_VARIANTS[@]}") ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 
@@ -68,6 +85,13 @@ variant_overrides() {
     variant_overrides "${BASH_REMATCH[1]}" || return
     echo "warmup.background=[0.0, 0.0, 0.0]"
     echo "joint.background=[0.0, 0.0, 0.0]"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_far([0-9]+)s([0-9]{3})$ ]]; then
+    local distance=${BASH_REMATCH[2]} scale=${BASH_REMATCH[3]}
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "joint.gaussian_adaptation.far_prune_distance=${distance}.0"
+    echo "joint.gaussian_adaptation.far_prune_scale=0.${scale}"
     return 0
   fi
   if [[ "$name" =~ ^(.+)_g([0-9]+)k$ ]]; then

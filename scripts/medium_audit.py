@@ -9,7 +9,10 @@ Writes <run>/audit/<checkpoint>.json (or --output-dir). Metrics (test views, eve
 - cell ablation: PSNR drop when Voronoi cells within 5 units of the Gaussians are
   replaced by open-water parameters (median of cells farther than 10 units);
 - medium statistics near/far from the surface;
-- backscatter hue angle on seabed rays vs the open-water backscatter direction.
+- backscatter hue angle on seabed rays vs the open-water backscatter direction;
+- open water taken by Gaussians: Gaussian-only alpha on the frozen open-water mask
+  (configs/iui3_open_water.npz, see scripts/open_water_mask.py);
+- opaque seabed (alpha > 0.99 on the lower 40%) in the central half of the width vs the borders.
 Backscatter and the ablation use an independent ray-marcher (nearest-site lookup)
 validated against the native renderer; the validation error is reported.
 """
@@ -33,6 +36,38 @@ from training.trainer import Trainer  # noqa: E402
 BOTTOM_FRACTION = 0.4
 NEAR_DISTANCE = 5.0
 FAR_DISTANCE = 10.0
+OPEN_WATER = ROOT / "configs/iui3_open_water.npz"
+
+
+def load_open_water(path):
+    """Per-view boolean open-water masks (full resolution), or {} when absent."""
+    if path is None or not Path(path).is_file():
+        return {}
+    with np.load(path) as data:
+        return {name: data[name] for name in data.files if name != "meta"}
+
+
+def coverage_metrics(alpha, bottom_fraction, open_water=None):
+    """Gaussian coverage of the seabed (center vs borders) and of open water.
+
+    alpha: [H, W] Gaussian-only alpha; open_water: [H, W] boolean or None.
+    The seabed is the lower bottom_fraction of the frame; its center is the
+    middle half of the width, the borders the outer quarters.
+    """
+    height, width = alpha.shape
+    seabed = alpha[int(height * (1 - bottom_fraction)):]
+    columns = torch.arange(width, device=alpha.device)
+    center = (columns >= width // 4) & (columns < width - width // 4)
+    opaque = (seabed > 0.99).float()
+    row = {"bottom_center_alpha_gt_0.99": float(opaque[:, center].mean()),
+           "bottom_border_alpha_gt_0.99": float(opaque[:, ~center].mean())}
+    if open_water is not None and open_water.any():
+        water = alpha[open_water]
+        row["open_water_alpha_mean"] = float(water.mean())
+        row["open_water_alpha_gt_0.5"] = float((water > 0.5).float().mean())
+    else:
+        row["open_water_alpha_mean"] = row["open_water_alpha_gt_0.5"] = float("nan")
+    return row
 
 
 def nearest_cell(points, sites):
@@ -55,6 +90,8 @@ def main():
     parser.add_argument("--checkpoint", default="best", help="name in joint/checkpoints without .pt")
     parser.add_argument("--stride", type=int, default=4)
     parser.add_argument("--output-dir", type=Path, help="default: <run>/audit")
+    parser.add_argument("--open-water", type=Path, default=OPEN_WATER,
+                        help="frozen open-water masks of the test views")
     args = parser.parse_args()
     joint = args.run.resolve() / "joint"
     checkpoint = joint / "checkpoints" / f"{args.checkpoint}.pt"
@@ -99,6 +136,7 @@ def main():
     edges = torch.cat((dense, tail))
     mids, deltas = 0.5 * (edges[1:] + edges[:-1]), edges[1:] - edges[:-1]
 
+    open_water = load_open_water(args.open_water)
     views = []
     with torch.no_grad():
         for view_index, camera in enumerate(trainer.dataset.test):
@@ -173,6 +211,12 @@ def main():
             for threshold in (0.5, 0.9, 0.99):
                 row[f"bottom_alpha_gt_{threshold}"] = float((gaussian_alpha[bottom] > threshold).float().mean())
             row["water_alpha_lt_0.01"] = float((gaussian_alpha[~bottom] < 0.01).float().mean())
+            mask = open_water.get(camera.name)
+            if mask is not None:
+                mask = torch.as_tensor(mask[::args.stride, ::args.stride], device=device)
+                if mask.shape != (height, width):
+                    raise ValueError(f"open-water mask of {camera.name} does not match the test view")
+            row.update(coverage_metrics(gaussian_alpha.reshape(height, width), BOTTOM_FRACTION, mask))
             if reference.backscatter is not None:
                 # Hue of the backscatter on seabed rays vs open-water rays of this view.
                 # Not "backscatter": that name holds the per-cell coefficients used below.
