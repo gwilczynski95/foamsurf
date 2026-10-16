@@ -424,12 +424,23 @@ def seed_table(runs):
                     f"<td class='num'>{stats([m.get('best_psnr', float('nan')) for m in members])}</td>"
                     f"<td class='num'>{stats([m.get('final_psnr', float('nan')) for m in members])}</td>"
                     f"<td class='num'>{stats([audit_value(m, 'clean_near/delta_psnr_bottom') for m in members])}</td>"
-                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_alpha_gt_0.99') for m in members])}</td></tr>")
+                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_alpha_gt_0.99') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_center_alpha_gt_0.99') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_border_alpha_gt_0.99') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'open_water_alpha_gt_0.5') for m in members])}</td>"
+                    f"<td class='num'>{stats([gaussian_count(m) / 1000 for m in members])}</td></tr>")
     if not rows:
         return "<p>Brak wariantów z więcej niż jednym seedem.</p>"
     return ("<div class='tw'><table><tr><th>Wariant</th><th class='num'>best PSNR</th><th class='num'>final PSNR</th>"
-            "<th class='num'>ΔPSNR dna (czyszczenie ≤5 j.)</th><th class='num'>dno α&gt;0,99 [%]</th></tr>"
+            "<th class='num'>ΔPSNR dna (czyszczenie ≤5 j.)</th><th class='num'>dno α&gt;0,99 [%]</th>"
+            "<th class='num'>dno środek [%]</th><th class='num'>dno brzegi [%]</th>"
+            "<th class='num'>otwarta woda zajęta, α&gt;0,5 [%]</th><th class='num'>Gaussy [tys.]</th></tr>"
             + "".join(rows) + "</table></div>")
+
+
+def gaussian_count(run):
+    count = ((run.get("best") or {}).get("gaussians") or {}).get("count")
+    return float("nan") if count is None else float(count)
 
 
 def main():
