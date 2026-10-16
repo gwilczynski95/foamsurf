@@ -9,13 +9,13 @@
 #SBATCH --qos=batch
 #SBATCH --exclude=c22,c11
 #SBATCH --time=24:00:00
-#SBATCH --array=0-17%7
+#SBATCH --array=0-23%7
 # IUI3 sweeps over named variants of the B0 recipe (configs/iui3_5k.yaml with
 # sigmoid RGB for Gaussians and cells). Each task trains, then audits best.pt and
 # last.pt (scripts/medium_audit.py).
 #
 #   FS_VARIANT_SET=gauss sbatch --array=0-17%7 scripts/sweep_medium_fix.sbatch
-#   FS_VARIANT_SET=far sbatch --array=0-21%7 scripts/sweep_medium_fix.sbatch
+#   FS_VARIANT_SET=far sbatch --array=0-23%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
 #   FS_SEED_VARIANTS="B0_chroma100_bk" FS_SEEDS="44 45" sbatch --array=0-1%7 scripts/sweep_medium_fix.sbatch
 # Resume a set (finished stages are skipped, the audits run again):
@@ -52,9 +52,9 @@ for base in B0 B0_chroma100 B0_chroma100_scov3e3; do
 done
 # Pruning of large Gaussians far from the cameras (they fill open water), on the
 # default + seabed coverage 3e-3 at up to 700k Gaussians: distance x scale grid,
-# and seabed coverage 5e-3 / 1e-2 at (15, 0.05); two seeds. The unpruned control is
-# B0_chroma100_scov3e3_g700k_bk from the gauss set.
-FAR_VARIANTS=()
+# and seabed coverage 5e-3 / 1e-2 at (15, 0.05); two seeds. The unpruned control
+# B0_chroma100_scov3e3_g700k_bk runs in the same set (same renderer and code).
+FAR_VARIANTS=("B0_chroma100_scov3e3_g700k_bk")
 for distance in 10 15 20; do
   for scale in 030 050 080; do
     FAR_VARIANTS+=("B0_chroma100_scov3e3_g700k_far${distance}s${scale}_bk")
@@ -144,6 +144,10 @@ cd "$ROOT"
 mkdir -p slurm_logs
 export TORCH_EXTENSIONS_DIR="$ROOT/outputs/build_medfix_${SLURM_ARRAY_JOB_ID}_${TASK}"
 mkdir -p "$TORCH_EXTENSIONS_DIR"
+# Temporary files (W&B media) on shared storage: a node's local /tmp filled up in 533795_21.
+export TMPDIR="$ROOT/outputs/tmp/${SLURM_ARRAY_JOB_ID}_${TASK}"
+mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT
 RUN_ID="${FS_RUN_ID:-${SLURM_ARRAY_JOB_ID}}"
 OUTPUT="${FS_OUTPUT_ROOT:-outputs/iui3_medium_fix}/${RUN_ID}/${VARIANT}"
 

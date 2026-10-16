@@ -99,12 +99,13 @@ def test_sweep_and_report_name_far_variants():
     root = Path(__file__).resolve().parents[1]
     script = (root / "scripts/sweep_medium_fix.sbatch").read_text()
     function = script[script.index("variant_overrides() {"):script.index("\n}\n", script.index("variant_overrides() {")) + 3]
-    names = script[script.index("FAR_VARIANTS=()"):script.index('FAR_VARIANTS=("${SEEDED[@]}")') + 30]
+    names = script[script.index("FAR_VARIANTS=("):script.index('FAR_VARIANTS=("${SEEDED[@]}")') + 30]
     out = subprocess.run(["bash", "-c", function + names + '\nprintf "%s\\n" "${FAR_VARIANTS[@]}"\n'
                           'variant_overrides B0_chroma100_scov5e3_g700k_far15s050_bk_seed43'],
                          capture_output=True, text=True, check=True).stdout.splitlines()
-    variants, overrides = out[:22], out[22:]
-    assert len(set(variants)) == 22 and sum(v.endswith("_seed43") for v in variants) == 11
+    variants, overrides = out[:24], out[24:]
+    assert len(set(variants)) == 24 and sum(v.endswith("_seed43") for v in variants) == 12
+    assert "B0_chroma100_scov3e3_g700k_bk" in variants
     assert "joint.gaussian_adaptation.far_prune_distance=15.0" in overrides
     assert "joint.gaussian_adaptation.far_prune_scale=0.050" in overrides
     assert "medium_fix.surface_coverage_weight=5.0e-3" in overrides and "joint.seed=43" in overrides
