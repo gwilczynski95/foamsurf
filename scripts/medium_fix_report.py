@@ -185,22 +185,26 @@ def load_run(path):
         audit = path / "audit" / f"{checkpoint}.json"
         run[checkpoint] = json.loads(audit.read_text()) if audit.is_file() else None
     run["complete"] = (path / "joint_done.json").is_file()
+    run["mask"] = mask_coverage(run)
     return run
 
 
 WATER_BAND = 30  # pixels on each side of the open-water mask boundary
+# Open water vs seabed of the test views, segmented from the images (scripts/sam_water_mask.py).
+WATER_MASK = Path(__file__).resolve().parents[1] / "configs/iui3_water_sam.npz"
 _REGIONS = {}
 
 
 def water_regions():
-    """Per test view: open water, water within WATER_BAND px of the seabed, seabed within it."""
+    """Per test view: water, seabed, water within WATER_BAND px of the seabed, seabed within it."""
     if not _REGIONS:
         import numpy as np
         from scipy.ndimage import distance_transform_edt
-        with np.load(Path(__file__).resolve().parents[1] / "configs/iui3_open_water.npz") as data:
+        with np.load(WATER_MASK) as data:
             for view in (name for name in data.files if name != "meta"):
                 water = data[view]
-                _REGIONS[view] = dict(water=water, band=water & (distance_transform_edt(water) <= WATER_BAND),
+                _REGIONS[view] = dict(water=water, seabed=~water,
+                                      band=water & (distance_transform_edt(water) <= WATER_BAND),
                                       seabed_band=~water & (distance_transform_edt(~water) <= WATER_BAND))
     return _REGIONS
 
@@ -209,7 +213,7 @@ def water_history(run, every=1000):
     """Gaussian coverage of open water, of the water band and of the seabed band at every
     ``every``-th evaluation, from the saved Gaussian-only alpha maps; cached in the run's audit/."""
     import numpy as np
-    cache = run["path"] / "audit" / f"water_history_{every}.json"
+    cache = run["path"] / "audit" / f"water_history_{every}_sam.json"
     folders = sorted(path for path in (run["path"] / "joint/evaluation").glob("iteration_*")
                      if int(path.name[-6:]) % every == 0)
     if cache.is_file():
@@ -235,6 +239,40 @@ def water_history(run, every=1000):
     return rows
 
 
+def alpha_coverage(folder):
+    """Gaussian coverage of the SAM water and seabed regions in one evaluation folder (mean of views)."""
+    import numpy as np
+    values = {key: [] for key in ("sam_water_gt_0.5", "sam_water_mean", "sam_seabed_gt_0.99", "sam_seabed_gt_0.5",
+                                  "sam_band_water_gt_0.5", "sam_band_seabed_gt_0.99")}
+    for path in folder.glob("*_gaussian_alpha.npz"):
+        regions = water_regions().get(path.name.split("_", 1)[1].split("_gaussian")[0])
+        if regions is None:
+            continue
+        alpha = np.load(path)["alpha"][..., 0]
+        values["sam_water_gt_0.5"].append(float((alpha[regions["water"]] > 0.5).mean()))
+        values["sam_water_mean"].append(float(alpha[regions["water"]].mean()))
+        values["sam_seabed_gt_0.99"].append(float((alpha[regions["seabed"]] > 0.99).mean()))
+        values["sam_seabed_gt_0.5"].append(float((alpha[regions["seabed"]] > 0.5).mean()))
+        values["sam_band_water_gt_0.5"].append(float((alpha[regions["band"]] > 0.5).mean()))
+        values["sam_band_seabed_gt_0.99"].append(float((alpha[regions["seabed_band"]] > 0.99).mean()))
+    return {key: float(np.mean(v)) for key, v in values.items() if v}
+
+
+def mask_coverage(run):
+    """alpha_coverage at the best iteration (empty when its alpha maps were not kept); cached."""
+    if "best_iteration" not in run:
+        return {}
+    folder = run["path"] / "joint/evaluation" / f"iteration_{run['best_iteration']:06d}"
+    cache = run["path"] / "audit" / f"mask_coverage_sam_{run['best_iteration']:06d}.json"
+    if cache.is_file():
+        return json.loads(cache.read_text())
+    result = alpha_coverage(folder) if folder.is_dir() else {}
+    if result:
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_text(json.dumps(result))
+    return result
+
+
 def water_history_charts(runs):
     """Line charts of the water history for the water-clearing comparison (needs >= 3 evaluations)."""
     members = [r for r in runs if r["variant"] == WATER_BASE or baseline_name(r["variant"]) == WATER_BASE]
@@ -255,6 +293,8 @@ def water_history_charts(runs):
 
 
 def audit_value(run, key, checkpoint="best"):
+    if checkpoint == "best" and key in run.get("mask", {}):
+        return run["mask"][key]
     audit = run.get(checkpoint)
     if not audit:
         return float("nan")
@@ -278,13 +318,13 @@ def select_winner(runs, baseline_variant="B0"):
     if baseline is None or "best_psnr" not in baseline or not baseline.get("best"):
         return None, f"Brak kompletnego {baseline_variant} – nie da się zastosować reguły wyboru."
     b_drop = abs(audit_value(baseline, "clean_near/delta_psnr_bottom"))
-    b_cover = audit_value(baseline, "bottom_alpha_gt_0.99")
+    b_cover = seabed_cover(baseline)
     eligible = []
     for run in runs:
         if run is baseline or run["seed"] is not None or "best_psnr" not in run or not run.get("best"):
             continue
         drop = abs(audit_value(run, "clean_near/delta_psnr_bottom"))
-        cover = audit_value(run, "bottom_alpha_gt_0.99")
+        cover = seabed_cover(run)
         if (run["best_psnr"] >= baseline["best_psnr"] - 0.5 and drop <= 0.5 * b_drop and cover >= b_cover):
             eligible.append(run)
     b = baseline_variant
@@ -415,8 +455,8 @@ def matrix(title, rows, columns, lookup):
                 f"<td class='num' title='{html.escape(run['name'])}'><b>{fmt(run['best_psnr'], 2)}</b><br>"
                 f"<span class='small'>woda {fmt(audit_value(run, 'original/psnr_water'), 1)} · "
                 f"ΔPSNR dna {fmt(audit_value(run, 'clean_near/delta_psnr_bottom'), 1, signed=True)}<br>"
-                f"dno α&gt;0,99 {fmt(audit_value(run, 'bottom_alpha_gt_0.99'), 0, percent=True)} · "
-                f"woda bez G {fmt(audit_value(run, 'water_alpha_lt_0.01'), 0, percent=True)}"
+                f"dno α&gt;0,99 {fmt(seabed_cover(run), 0, percent=True)} · "
+                f"woda zajęta (α&gt;0,5) {fmt(audit_value(run, 'sam_water_gt_0.5'), 1, percent=True)}"
                 f"{hue_text(run)}</span></td>")
         body.append(f"<tr><th>{html.escape(row_label)}</th>{''.join(cells)}</tr>")
     if not filled:
@@ -427,14 +467,12 @@ def matrix(title, rows, columns, lookup):
 def hue_text(run):
     angle = audit_value(run, "backscatter_hue_angle_bottom")
     text = "" if math.isnan(angle) else f"<br>kąt barwy backscatteru dna {fmt(angle, 1)}°"
-    partial = audit_value(run, "bottom_alpha_gt_0.5") - audit_value(run, "bottom_alpha_gt_0.99")
+    partial = audit_value(run, "sam_seabed_gt_0.5") - audit_value(run, "sam_seabed_gt_0.99")
     text += "" if math.isnan(partial) else f"<br>dno półprzezroczyste (α 0,5–0,99) {fmt(partial, 0, percent=True)}"
-    water = audit_value(run, "open_water_alpha_gt_0.5")
-    if not math.isnan(water):
-        text += f"<br>otwarta woda zajęta przez G (α&gt;0,5) {fmt(water, 1, percent=True)}"
-    center, border = audit_value(run, "bottom_center_alpha_gt_0.99"), audit_value(run, "bottom_border_alpha_gt_0.99")
-    if not math.isnan(center):
-        text += f"<br>dno α&gt;0,99: środek {fmt(center, 0, percent=True)} · brzegi {fmt(border, 0, percent=True)}"
+    band_water, band_seabed = audit_value(run, "sam_band_water_gt_0.5"), audit_value(run, "sam_band_seabed_gt_0.99")
+    if not math.isnan(band_water):
+        text += (f"<br>pas {WATER_BAND} px przy granicy: woda zajęta {fmt(band_water, 0, percent=True)} · "
+                 f"dno pokryte {fmt(band_seabed, 0, percent=True)}")
     count = ((run.get("best") or {}).get("gaussians") or {}).get("count")
     fps = run.get("best_fps")
     if count:
@@ -525,18 +563,25 @@ def seed_table(runs):
                     f"<td class='num'>{stats([m.get('best_psnr', float('nan')) for m in members])}</td>"
                     f"<td class='num'>{stats([m.get('final_psnr', float('nan')) for m in members])}</td>"
                     f"<td class='num'>{stats([audit_value(m, 'clean_near/delta_psnr_bottom') for m in members])}</td>"
-                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_alpha_gt_0.99') for m in members])}</td>"
-                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_center_alpha_gt_0.99') for m in members])}</td>"
-                    f"<td class='num'>{stats([100 * audit_value(m, 'bottom_border_alpha_gt_0.99') for m in members])}</td>"
-                    f"<td class='num'>{stats([100 * audit_value(m, 'open_water_alpha_gt_0.5') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * seabed_cover(m) for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'sam_water_gt_0.5') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'sam_band_water_gt_0.5') for m in members])}</td>"
+                    f"<td class='num'>{stats([100 * audit_value(m, 'sam_band_seabed_gt_0.99') for m in members])}</td>"
                     f"<td class='num'>{stats([gaussian_count(m) / 1000 for m in members])}</td></tr>")
     if not rows:
         return "<p>Brak wariantów z więcej niż jednym seedem.</p>"
     return ("<div class='tw'><table><tr><th>Wariant</th><th class='num'>best PSNR</th><th class='num'>final PSNR</th>"
             "<th class='num'>ΔPSNR dna (czyszczenie ≤5 j.)</th><th class='num'>dno α&gt;0,99 [%]</th>"
-            "<th class='num'>dno środek [%]</th><th class='num'>dno brzegi [%]</th>"
-            "<th class='num'>otwarta woda zajęta, α&gt;0,5 [%]</th><th class='num'>Gaussy [tys.]</th></tr>"
+            "<th class='num'>woda zajęta, α&gt;0,5 [%]</th><th class='num'>pas: woda zajęta [%]</th>"
+            "<th class='num'>pas: dno pokryte [%]</th><th class='num'>Gaussy [tys.]</th></tr>"
             + "".join(rows) + "</table></div>")
+
+
+def seabed_cover(run):
+    """Seabed covered by Gaussians (alpha > 0.99): on the SAM seabed when the best alpha maps
+    exist, otherwise the audit's lower 40% of the frame."""
+    value = audit_value(run, "sam_seabed_gt_0.99")
+    return audit_value(run, "bottom_alpha_gt_0.99") if math.isnan(value) else value
 
 
 def gaussian_count(run):
@@ -581,7 +626,7 @@ def main():
             f"<td class='num'>{fmt(run.get('final_psnr', float('nan')), 3)}</td>"
             f"<td class='num'>{fmt(audit_value(run, 'original/psnr_bottom'))}</td>"
             f"<td class='num'>{fmt(audit_value(run, 'gaussian_only_black_psnr_bottom'))}</td>"
-            f"<td class='num'>{fmt(audit_value(run, 'bottom_alpha_gt_0.99'), 1, percent=True)}</td>"
+            f"<td class='num'>{fmt(seabed_cover(run), 1, percent=True)}</td>"
             f"<td class='num'>{fmt(audit_value(run, 'behind_share_bottom_mean'), 1, percent=True)}</td>"
             f"<td class='num'>{fmt(audit_value(run, 'clean_anomalous/delta_psnr_bottom'), signed=True)}</td>"
             f"<td class='num'>{fmt(audit_value(run, 'clean_near/delta_psnr_bottom'), signed=True)}</td>"
@@ -632,10 +677,11 @@ def main():
                    for r in main_runs if r["variant"] not in ("B0", "B0_bk")], 3,
                   note="Reguła wyboru dopuszcza spadek do −0,5 dB względem swojej bazy.")
         + bar_chart("Otwarta woda zajęta przez Gaussy: udział pikseli maski wody z α > 0,5 (best; im mniej, tym lepiej)",
-                    [(r["name"], audit_value(r, "open_water_alpha_gt_0.5")) for r in main_runs], 1, percent=True,
-                    note="Maska otwartej wody: configs/iui3_open_water.npz (α Gaussów domyślnego runu < 0,01).")
+                    [(r["name"], audit_value(r, "sam_water_gt_0.5")) for r in main_runs], 1, percent=True,
+                    note="Maska wody: segmentacja obrazów testowych SAM (configs/iui3_water_sam.npz), α z ewaluacji best.")
         + bar_chart("Pokrycie dna Gaussami: udział pikseli z α > 0,99 (best)",
-                    [(r["name"], audit_value(r, "bottom_alpha_gt_0.99")) for r in main_runs], 1, percent=True)
+                    [(r["name"], seabed_cover(r)) for r in main_runs], 1, percent=True,
+                    note="Na całym dnie wg maski SAM; runy bez zapisanych map α: dolne 40% kadru z audytu.")
         + bar_chart("Udział backscatteru zza powierzchni na dnie (best; im mniej, tym lepiej)",
                     [(r["name"], audit_value(r, "behind_share_bottom_mean")) for r in main_runs], 1, percent=True)
         + bar_chart("ΔPSNR dna po zastąpieniu komórek ≤5 j. od Gaussów czystą wodą (best; bliżej 0 = lepsze rozdzielenie)",

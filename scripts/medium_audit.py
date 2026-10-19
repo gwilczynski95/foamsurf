@@ -10,8 +10,8 @@ Writes <run>/audit/<checkpoint>.json (or --output-dir). Metrics (test views, eve
   replaced by open-water parameters (median of cells farther than 10 units);
 - medium statistics near/far from the surface;
 - backscatter hue angle on seabed rays vs the open-water backscatter direction;
-- open water taken by Gaussians: Gaussian-only alpha on the frozen open-water mask
-  (configs/iui3_open_water.npz, see scripts/open_water_mask.py);
+- open water taken by Gaussians and seabed covered by them, on the water/seabed
+  segmentation of the test images (configs/iui3_water_sam.npz, scripts/sam_water_mask.py);
 - opaque seabed (alpha > 0.99 on the lower 40%) in the central half of the width vs the borders.
 Backscatter and the ablation use an independent ray-marcher (nearest-site lookup)
 validated against the native renderer; the validation error is reported.
@@ -36,7 +36,7 @@ from training.trainer import Trainer  # noqa: E402
 BOTTOM_FRACTION = 0.4
 NEAR_DISTANCE = 5.0
 FAR_DISTANCE = 10.0
-OPEN_WATER = ROOT / "configs/iui3_open_water.npz"
+OPEN_WATER = ROOT / "configs/iui3_water_sam.npz"
 
 
 def load_open_water(path):
@@ -51,8 +51,9 @@ def coverage_metrics(alpha, bottom_fraction, open_water=None):
     """Gaussian coverage of the seabed (center vs borders) and of open water.
 
     alpha: [H, W] Gaussian-only alpha; open_water: [H, W] boolean or None.
-    The seabed is the lower bottom_fraction of the frame; its center is the
-    middle half of the width, the borders the outer quarters.
+    bottom_*: the lower bottom_fraction of the frame, center = middle half of
+    the width, borders = outer quarters. open_water_* and seabed_* use the mask
+    (seabed = not water).
     """
     height, width = alpha.shape
     seabed = alpha[int(height * (1 - bottom_fraction)):]
@@ -63,10 +64,14 @@ def coverage_metrics(alpha, bottom_fraction, open_water=None):
            "bottom_border_alpha_gt_0.99": float(opaque[:, ~center].mean())}
     if open_water is not None and open_water.any():
         water = alpha[open_water]
+        seabed = alpha[~open_water]
         row["open_water_alpha_mean"] = float(water.mean())
         row["open_water_alpha_gt_0.5"] = float((water > 0.5).float().mean())
+        row["seabed_alpha_gt_0.99"] = float((seabed > 0.99).float().mean())
+        row["seabed_alpha_gt_0.5"] = float((seabed > 0.5).float().mean())
     else:
-        row["open_water_alpha_mean"] = row["open_water_alpha_gt_0.5"] = float("nan")
+        for key in ("open_water_alpha_mean", "open_water_alpha_gt_0.5", "seabed_alpha_gt_0.99", "seabed_alpha_gt_0.5"):
+            row[key] = float("nan")
     return row
 
 
@@ -91,7 +96,7 @@ def main():
     parser.add_argument("--stride", type=int, default=4)
     parser.add_argument("--output-dir", type=Path, help="default: <run>/audit")
     parser.add_argument("--open-water", type=Path, default=OPEN_WATER,
-                        help="frozen open-water masks of the test views")
+                        help="water/seabed masks of the test views (True = water)")
     args = parser.parse_args()
     joint = args.run.resolve() / "joint"
     checkpoint = joint / "checkpoints" / f"{args.checkpoint}.pt"

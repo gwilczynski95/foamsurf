@@ -124,7 +124,7 @@ def test_report_water_history_from_alpha_maps(tmp_path):
     assert [row["iteration"] for row in history] == [1000, 2000]  # every 1000 iterations
     assert history[0] == dict(iteration=1000, water=1.0, band=1.0, seabed_band=1.0)
     assert history[1] == dict(iteration=2000, water=0.0, band=0.0, seabed_band=0.0)
-    assert (run / "audit/water_history_1000.json").is_file()
+    assert (run / "audit/water_history_1000_sam.json").is_file()
     assert report.water_history(dict(path=run)) == history  # cached
     regions = report.water_regions()[views[0]]
     assert not (regions["band"] & regions["seabed_band"]).any() and (regions["band"] <= regions["water"]).all()
@@ -164,3 +164,31 @@ def test_report_water_matrix_finds_every_run():
     html = report.matrices(runs, runs)
     for name in names:
         assert f"title='{name}'" in html, name
+
+
+def test_report_mask_coverage_at_best_iteration(tmp_path):
+    import medium_fix_report as report
+    regions = report.water_regions()
+    run = tmp_path / "run"
+    folder = run / "joint/evaluation/iteration_002000"
+    folder.mkdir(parents=True)
+    for index, (view, region) in enumerate(regions.items()):
+        alpha = region["seabed"].astype(np.float32)[..., None]  # Gaussians exactly on the SAM seabed
+        np.savez(folder / f"{index:04d}_{view}_gaussian_alpha.npz", alpha=alpha)
+    coverage = report.mask_coverage(dict(path=run, best_iteration=2000))
+    assert coverage["sam_water_gt_0.5"] == 0 and coverage["sam_seabed_gt_0.99"] == 1
+    assert coverage["sam_band_water_gt_0.5"] == 0 and coverage["sam_band_seabed_gt_0.99"] == 1
+    assert (run / "audit/mask_coverage_sam_002000.json").is_file()
+    assert report.mask_coverage(dict(path=run, best_iteration=3000)) == {}  # alpha maps not kept
+    seen = dict(mask=coverage, best=dict(mean={"bottom_alpha_gt_0.99": 0.3}))
+    assert report.seabed_cover(seen) == 1 and report.seabed_cover(dict(mask={}, best=seen["best"])) == 0.3
+
+
+def test_sam_masks_cover_the_test_views():
+    import medium_fix_report as report
+    regions = report.water_regions()
+    assert sorted(regions) == ["MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928"]
+    for region in regions.values():
+        assert region["water"].shape == (917, 1383) and 0.2 < region["water"].mean() < 0.65
+        assert region["water"][:50].mean() > 0.9  # the top rows are water in every view
+        assert region["seabed"][-50:].mean() > 0.99  # the bottom rows are seabed

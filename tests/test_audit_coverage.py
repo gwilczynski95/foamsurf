@@ -31,6 +31,7 @@ def test_open_water_share_taken_by_gaussians():
     alpha[3] = 1.0  # seabed outside the mask does not count
     row = coverage_metrics(alpha, 0.25, water)
     assert row["open_water_alpha_gt_0.5"] == 0.25
+    assert row["seabed_alpha_gt_0.99"] == 0.5 and row["seabed_alpha_gt_0.5"] == 0.5  # row 3 of rows 2-3
     assert row["open_water_alpha_mean"] == torch.tensor(0.2).item()
 
 
