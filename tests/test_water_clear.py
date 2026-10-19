@@ -73,10 +73,12 @@ def sweep_function():
 def test_water_sweep_names_and_overrides(tmp_path):
     command = sweep_function() + '\nprintf "%s\\n" "${WATER_VARIANTS[@]}"\n'
     variants = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=True).stdout.split()
-    assert len(variants) == 14 and len(set(variants)) == 14 and variants[0] == "B0_chroma100_g700k_bk"
-    assert sum(v.endswith("_seed43") for v in variants) == 7
+    assert len(variants) == 22 and len(set(variants)) == 22 and variants[0] == "B0_chroma100_g700k_bk"
+    assert sum(v.endswith("_seed43") for v in variants) == 11
+    assert sum("_wstart13k" in v for v in variants) == 8
     weights = {}
     for variant in ("B0_chroma100_g700k_water1e3_bk", "B0_chroma100_g700k_water1e0_bk",
+                    "B0_chroma100_g700k_water1e1_wstart13k_bk",
                     "B0_chroma100_scov3e3_cthr90_g700k_water1e2_bk", "B0_chroma100_scov3e3_send15k_g700k_bk"):
         lines = subprocess.run(["bash", "-c", sweep_function() + f"\nvariant_overrides {variant}"],
                                capture_output=True, text=True, check=True).stdout.splitlines()
@@ -91,6 +93,10 @@ def test_water_sweep_names_and_overrides(tmp_path):
     seabed = weights["B0_chroma100_scov3e3_cthr90_g700k_water1e2_bk"]
     assert (seabed["surface_coverage_threshold"], seabed["water_clear_weight"]) == (pytest.approx(0.9), pytest.approx(1e-2))
     assert weights["B0_chroma100_scov3e3_send15k_g700k_bk"]["surface_coverage_end"] == 15000
+    late = weights["B0_chroma100_g700k_water1e1_wstart13k_bk"]
+    assert (late["water_clear_start"], late["water_clear_ramp"]) == (13000, 2000)
+    assert late["water_clear_weight"] == pytest.approx(0.1)
+    assert weights["B0_chroma100_g700k_water1e0_bk"]["water_clear_start"] == 4000
 
 
 def test_report_names_water_variants():
@@ -98,7 +104,9 @@ def test_report_names_water_variants():
     assert parse_variant("B0_chroma100_scov3e3_cthr90_g700k_water1e2_bk")[4] == "_chroma100_scov3e3_cthr90_g700k_water1e2"
     for variant in ("B0_chroma100_g700k_water1e3_bk", "B0_chroma100_scov3e3_send15k_g700k_bk"):
         assert baseline_name(variant) == WATER_BASE == "B0_chroma100_g700k_bk"
-    assert "strata wodna 1e-3" in describe("B0_chroma100_g700k_water1e3_bk")
+    assert "strata wodna 1e-3 (α < 0,3 → 0, od 4k, pełna od 6k)" in describe("B0_chroma100_g700k_water1e3_bk")
+    assert "od 13k, pełna od 15k" in describe("B0_chroma100_g700k_water1e2_wstart13k_bk")
+    assert baseline_name("B0_chroma100_g700k_water1e2_wstart13k_bk_seed43".split("_seed")[0]) == WATER_BASE
     assert "wyłączone od 15k" in describe("B0_chroma100_scov3e3_send15k_g700k_bk")
 
 
@@ -145,3 +153,14 @@ def test_water_clear_short_real_training(tmp_path):
     assert all(math.isfinite(float(row["medium_fix/water_clear_raw"])) for row in rows)
     assert all(0 <= float(row["medium_fix/water_clear_ray_fraction"]) <= 1 for row in rows)
     assert "medium_fix/surface_coverage_weight" not in rows[0]  # only enabled priors add columns
+
+
+def test_report_water_matrix_finds_every_run():
+    import medium_fix_report as report
+    names = ["B0_chroma100_g700k_bk", "B0_chroma100_g700k_bk_seed43"] + [
+        f"B0_chroma100_g700k_water{w}{s}_bk{seed}" for w in ("1e3", "1e2", "1e1", "1e0")
+        for s in ("", "_wstart13k") for seed in ("", "_seed43")]
+    runs = [dict(name=n, variant=n.split("_seed")[0], best_psnr=28.0, path=Path("/nonexistent")) for n in names]
+    html = report.matrices(runs, runs)
+    for name in names:
+        assert f"title='{name}'" in html, name

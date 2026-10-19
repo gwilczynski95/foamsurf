@@ -52,13 +52,14 @@ PROX = (("", "1 (brak)"), ("_prox50", "0,5"), ("_prox30", "0,3"), ("_prox10", "0
 
 def parse_variant(variant):
     """Split <base>[_in..][_chroma..][_csmooth..][seabed][_cthr..][_send..k][_g..k][_far..][_water..]
-    [_prox..][_ring][_bk] into (base, layout, prox, black, regularizer)."""
+    [_wstart..k][_prox..][_ring][_bk] into (base, layout, prox, black, regularizer)."""
     match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
                          r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_cthr\d\d)?(_send\d+k)?"
-                         r"(_g\d+k)?(_far\d+s\d{3})?(_water\de\d)?(_prox\d\d)?(_ring)?(_bk)?", variant)
-    base, layout, chroma, smooth, seabed, threshold, end, gauss, far, water, prox, ring, black = match.groups()
+                         r"(_g\d+k)?(_far\d+s\d{3})?(_water\de\d)?(_wstart\d+k)?(_prox\d\d)?(_ring)?(_bk)?", variant)
+    (base, layout, chroma, smooth, seabed, threshold, end, gauss, far, water, water_start,
+     prox, ring, black) = match.groups()
     return (base, layout or "", (prox or "") + (ring or ""), bool(black),
-            "".join(part or "" for part in (chroma, smooth, seabed, threshold, end, gauss, far, water)))
+            "".join(part or "" for part in (chroma, smooth, seabed, threshold, end, gauss, far, water, water_start)))
 
 
 def regularizer_label(code):
@@ -73,9 +74,11 @@ def regularizer_label(code):
         parts.append(f"pokrycie dna tylko dla α > 0,{threshold}")
     for end in re.findall(r"_send(\d+)k", code):
         parts.append(f"pokrycie dna wyłączone od {end}k")
+    start = re.search(r"_wstart(\d+)k", code)
     for digit, exponent in re.findall(r"_water(\d)e(\d)", code):
-        parts.append(f"strata wodna {digit}e-{exponent} (α < 0,3 → 0, od 4k)")
-    code = re.sub(r"_cthr\d\d|_send\d+k|_water\de\d", "", code)
+        begin = int(start.group(1)) if start else 4
+        parts.append(f"strata wodna {digit}e-{exponent} (α < 0,3 → 0, od {begin}k, pełna od {begin + 2}k)")
+    code = re.sub(r"_cthr\d\d|_send\d+k|_water\de\d|_wstart\d+k", "", code)
     for distance, scale in re.findall(r"_far(\d+)s(\d{3})", code):
         parts.append(f"usuwanie Gaussów o skali > {fmt(int(scale) / 1000, 2)} dalej niż {distance} j. od kamer")
     code = re.sub(r"_far\d+s\d{3}", "", code)
@@ -483,9 +486,12 @@ def matrices(runs, all_runs=()):
                       lambda code, seed: by_full.get(f"B0_chroma100{code}_g700k_far15s050_bk{seed}"))
     water_rows = [("", "bez straty wodnej")] + [(f"_water{code}", f"strata wodna {code.replace('e', 'e-')}")
                                                  for code in ("1e3", "1e2", "1e1", "1e0")]
-    water = matrix("Do 700 tys. Gaussów, bez pokrycia dna: waga straty wodnej × seed", water_rows,
-                   (("", "seed 42"), ("_seed43", "seed 43")),
-                   lambda code, seed: by_full.get(f"B0_chroma100_g700k{code}_bk{seed}"))
+    water = matrix("Do 700 tys. Gaussów, bez pokrycia dna: waga straty wodnej × start × seed", water_rows,
+                   ((("", ""), "od 4k, seed 42"), (("", "_seed43"), "od 4k, seed 43"),
+                    (("_wstart13k", ""), "od 13k, seed 42"), (("_wstart13k", "_seed43"), "od 13k, seed 43")),
+                   # The control has no water loss, hence no late-start variant.
+                   lambda code, column: by_full.get(
+                       f"B0_chroma100_g700k{code}{column[0] if code else ''}_bk{column[1]}"))
     water_seabed = matrix("Pokrycie dna 3e-3 bez rozlewania na wodę × seed",
                           (("_scov3e3_cthr90_g700k_water1e2", "pokrycie tylko dla α > 0,9 + strata wodna 1e-2"),
                            ("_scov3e3_send15k_g700k", "pokrycie wyłączone od 15k")),

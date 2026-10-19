@@ -16,14 +16,14 @@
 #
 #   FS_VARIANT_SET=gauss sbatch --array=0-17%7 scripts/sweep_medium_fix.sbatch
 #   FS_VARIANT_SET=far sbatch --array=0-23%7 scripts/sweep_medium_fix.sbatch
-#   FS_VARIANT_SET=water sbatch --array=0-13%7 scripts/sweep_medium_fix.sbatch
+#   FS_VARIANT_SET=water sbatch --array=0-21%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
 #   FS_SEED_VARIANTS="B0_chroma100_bk" FS_SEEDS="44 45" sbatch --array=0-1%7 scripts/sweep_medium_fix.sbatch
 # Resume a set (finished stages are skipped, the audits run again):
 #   FS_RUN_ID=<job id> FS_RESUME=1 FS_VARIANT_SET=... sbatch --array=... scripts/sweep_medium_fix.sbatch
 #
 # Variant names: B0[_chroma<NNN>][_scov<NNN>|_scov<D>e<E>][_cthr<NN>][_send<N>k][_under<NNN>][_g<N>k]
-#                [_far<D>s<SSS>][_water<D>e<E>][_bk][_seed<S>]
+#                [_far<D>s<SSS>][_water<D>e<E>][_wstart<N>k][_bk][_seed<S>]
 #   _chroma<NNN>  backscatter chroma prior weight NNN/100 (B0_chroma100_bk = configs/iui3_default.yaml)
 #   _scov...      one-sided seabed coverage weight NNN/100 or D*10^-E
 #   _under<NNN>   under-seabed medium penalty weight NNN/100
@@ -32,6 +32,7 @@
 #   _cthr<NN>     seabed coverage only on rays with Gaussian alpha above 0.NN
 #   _send<N>k     seabed coverage off from N thousand iterations
 #   _water<D>e<E> water clearing weight D*10^-E (Gaussian alpha below 0.3 pushed to 0, from 4k)
+#   _wstart<N>k   water clearing from N thousand iterations (full weight 2k later)
 #   _bk           black background
 #   _seed<S>      seed S for warmup and joint
 set -Eeuo pipefail
@@ -70,11 +71,14 @@ SEEDED=()
 for variant in "${FAR_VARIANTS[@]}"; do SEEDED+=("$variant" "${variant}_seed43"); done
 FAR_VARIANTS=("${SEEDED[@]}")
 # Water clearing on the default at up to 700k Gaussians (no seabed coverage): weights
-# 1e-3..1; seabed coverage 3e-3 only on rays above alpha 0.9 + water clearing 1e-2;
-# seabed coverage 3e-3 switched off at 15k. Control B0_chroma100_g700k_bk; two seeds.
+# 1e-3..1 from 4k and from 13k (full at 15k, when densification ends); seabed coverage
+# 3e-3 only on rays above alpha 0.9 + water clearing 1e-2; seabed coverage 3e-3
+# switched off at 15k. Control B0_chroma100_g700k_bk; two seeds.
 WATER_VARIANTS=()
 for variant in B0_chroma100_g700k_bk B0_chroma100_g700k_water1e3_bk B0_chroma100_g700k_water1e2_bk \
     B0_chroma100_g700k_water1e1_bk B0_chroma100_g700k_water1e0_bk \
+    B0_chroma100_g700k_water1e3_wstart13k_bk B0_chroma100_g700k_water1e2_wstart13k_bk \
+    B0_chroma100_g700k_water1e1_wstart13k_bk B0_chroma100_g700k_water1e0_wstart13k_bk \
     B0_chroma100_scov3e3_cthr90_g700k_water1e2_bk B0_chroma100_scov3e3_send15k_g700k_bk; do
   WATER_VARIANTS+=("$variant" "${variant}_seed43")
 done
@@ -113,6 +117,12 @@ variant_overrides() {
     local digit=${BASH_REMATCH[2]} exponent=${BASH_REMATCH[3]}
     variant_overrides "${BASH_REMATCH[1]}" || return
     echo "medium_fix.water_clear_weight=${digit}.0e-${exponent}"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_wstart([0-9]+)k$ ]]; then
+    local start=$(( BASH_REMATCH[2] * 1000 ))
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "medium_fix.water_clear_start=$start"
     return 0
   fi
   if [[ "$name" =~ ^(.+)_cthr([0-9]{2})$ ]]; then
