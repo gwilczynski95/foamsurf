@@ -120,6 +120,9 @@ class GaussianAdaptationController:
         if config.far_prune_distance is not None and camera_centers is None:
             raise ValueError("far_prune_distance needs the training camera centers")
         self.camera_centers = camera_centers
+        # Per-channel attenuation of the water, set by the trainer when
+        # config.gradient_attenuation_compensation is on.
+        self.medium_attenuation: torch.Tensor | None = None
         self.model = model
         self.optimizer = optimizer
         self.config = config
@@ -242,6 +245,16 @@ class GaussianAdaptationController:
         self.total_opacity_resets += 1
         self.last_opacity_reset_changed = changed
         return changed
+
+    @torch.no_grad()
+    def attenuation_compensation(self, camera_origin: torch.Tensor) -> torch.Tensor:
+        """1 / T for every Gaussian, T = mean_c exp(-a_c * distance to the camera), capped."""
+        if self.medium_attenuation is None:
+            raise RuntimeError("gradient compensation needs medium_attenuation")
+        distance = torch.linalg.vector_norm(self.model.means - camera_origin, dim=-1)
+        attenuation = self.medium_attenuation.to(distance)
+        transmittance = torch.exp(-distance[:, None] * attenuation[None, :]).mean(-1)
+        return (1.0 / transmittance.clamp_min(1e-12)).clamp(max=self.config.gradient_compensation_max)
 
     @torch.no_grad()
     def far_from_cameras(self, points: torch.Tensor) -> torch.Tensor:
@@ -380,9 +393,10 @@ class GaussianAdaptationController:
         # occluded surfel still contributes to the denominator.
         radii = self.projected_radii(camera)
         visible = radii > 0
-        self.gradient_sum[visible] += screen_gradient.detach()[visible].norm(
-            dim=-1
-        )
+        gradient = screen_gradient.detach().norm(dim=-1)
+        if self.config.gradient_attenuation_compensation:
+            gradient = gradient * self.attenuation_compensation(camera.origin)
+        self.gradient_sum[visible] += gradient[visible]
         self.gradient_denom[visible] += 1
         self.max_radii2d[visible] = torch.maximum(
             self.max_radii2d[visible], radii[visible]

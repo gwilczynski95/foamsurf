@@ -51,15 +51,16 @@ PROX = (("", "1 (brak)"), ("_prox50", "0,5"), ("_prox30", "0,3"), ("_prox10", "0
 
 
 def parse_variant(variant):
-    """Split <base>[_in..][_chroma..][_csmooth..][seabed][_cthr..][_send..k][_g..k][_far..][_water..]
-    [_wstart..k][_prox..][_ring][_bk] into (base, layout, prox, black, regularizer)."""
-    match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
+    """Split <base>[_in..][_chroma..][_chthr..][_csmooth..][seabed][_cthr..][_send..k][_g..k][_far..][_tden]
+    [_water..][_wstart..k][_prox..][_ring][_bk] into (base, layout, prox, black, regularizer)."""
+    match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3,4})?(_chthr\d\d)?(_csmooth\d+)?"
                          r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_cthr\d\d)?(_send\d+k)?"
-                         r"(_g\d+k)?(_far\d+s\d{3})?(_water\de\d)?(_wstart\d+k)?(_prox\d\d)?(_ring)?(_bk)?", variant)
-    (base, layout, chroma, smooth, seabed, threshold, end, gauss, far, water, water_start,
-     prox, ring, black) = match.groups()
+                         r"(_g\d+k)?(_far\d+s\d{3})?(_tden)?(_water\de\d)?(_wstart\d+k)?(_prox\d\d)?(_ring)?(_bk)?", variant)
+    (base, layout, chroma, chroma_threshold, smooth, seabed, threshold, end, gauss, far, compensation, water,
+     water_start, prox, ring, black) = match.groups()
     return (base, layout or "", (prox or "") + (ring or ""), bool(black),
-            "".join(part or "" for part in (chroma, smooth, seabed, threshold, end, gauss, far, water, water_start)))
+            "".join(part or "" for part in (chroma, chroma_threshold, smooth, seabed, threshold, end, gauss, far,
+                                            compensation, water, water_start)))
 
 
 def regularizer_label(code):
@@ -70,6 +71,11 @@ def regularizer_label(code):
     for cap in re.findall(r"_g(\d+)k", code):
         parts.append(f"do {cap} tys. Gaussów (próg zagęszczania 2e-4)")
     code = re.sub(r"_g\d+k", "", code)
+    for threshold in re.findall(r"_chthr(\d\d)", code):
+        parts.append(f"kara barwy na promieniach z α > 0,{threshold}")
+    if "_tden" in code:
+        parts.append("densyfikacja kompensowana tłumieniem wody")
+    code = re.sub(r"_chthr\d\d|_tden", "", code)
     for threshold in re.findall(r"_cthr(\d\d)", code):
         parts.append(f"pokrycie dna tylko dla α > 0,{threshold}")
     for end in re.findall(r"_send(\d+)k", code):
@@ -120,11 +126,15 @@ SEABED_CODES = ("_kappa", "_scov", "_under", "_scale0dens2")
 FAR_BASE = "B0_chroma100_scov3e3_g700k_bk"
 WATER_BASE = "B0_chroma100_g700k_bk"
 WATER_CODES = ("_water", "_cthr", "_send")
+CHROMA_BASE = "B0_chroma100_scov3e3_cthr90_g700k_water1e2_bk"
+CHROMA_CODES = ("_chthr", "_tden")
 
 
 def baseline_name(variant):
     """Far-pruning variants vs FAR_BASE, seabed variants vs the default
     B0_chroma100_bk, other black-background runs vs B0_bk, the rest vs B0."""
+    if any(code in variant for code in CHROMA_CODES):
+        return CHROMA_BASE
     if any(code in variant for code in WATER_CODES):
         return WATER_BASE
     if "_far" in variant:
@@ -535,7 +545,16 @@ def matrices(runs, all_runs=()):
                            ("_scov3e3_send15k_g700k", "pokrycie wyłączone od 15k")),
                           (("", "seed 42"), ("_seed43", "seed 43")),
                           lambda code, seed: by_full.get(f"B0_chroma100{code}_bk{seed}"))
-    gauss = water + water_seabed + far + far_scov + gauss
+    tail = "_scov3e3_cthr90_g700k"
+    chroma_rows = [("", "baza: chroma 1 tylko dla α > 0,5")] + [
+        (f"_chroma{code}_chthr02", f"chroma {label} na wszystkich promieniach")
+        for code, label in (("010", "0,1"), ("030", "0,3"), ("100", "1"), ("300", "3"), ("1000", "10"))]
+    chroma_all = matrix(
+        "Pokrycie dna α > 0,9 + woda 1e-2: chroma na wszystkich promieniach × densyfikacja kompensowana × seed",
+        chroma_rows, ((("", ""), "bez kompensacji, seed 42"), (("", "_seed43"), "bez kompensacji, seed 43"),
+                      (("_tden", ""), "kompensacja, seed 42"), (("_tden", "_seed43"), "kompensacja, seed 43")),
+        lambda code, column: by_full.get(f"B0{code or '_chroma100'}{tail}{column[0]}_water1e2_bk{column[1]}"))
+    gauss = chroma_all + water + water_seabed + far + far_scov + gauss
     if not (stage_a or prox or chroma or seabed or gauss):
         return ""
     legend = ("<p class='small'>W komórce: <b>best test PSNR</b>; PSNR wody; ΔPSNR dna po zastąpieniu komórek ≤5 j. "
@@ -603,7 +622,7 @@ def main():
     runs.sort(key=family_order)
     main_runs = [r for r in runs if r["seed"] is None]
     winners, rules = [], []
-    for baseline in ("B0", "B0_bk", "B0_chroma100_bk", FAR_BASE, WATER_BASE):
+    for baseline in ("B0", "B0_bk", "B0_chroma100_bk", FAR_BASE, WATER_BASE, CHROMA_BASE):
         compared = [r for r in main_runs if baseline_name(r["variant"]) == baseline and r["variant"] != baseline]
         if compared and any(r["variant"] == baseline for r in main_runs):
             found, text = select_winner(main_runs, baseline)

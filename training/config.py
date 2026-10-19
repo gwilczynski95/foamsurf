@@ -235,6 +235,12 @@ class GaussianAdaptationConfig:
     # open water. None disables.
     far_prune_distance: float | None = None
     far_prune_scale: float = 0.05
+    # Divide each Gaussian's densification gradient by the medium transmittance
+    # to the camera, T = mean_c exp(-a_c d) (a: median attenuation of the cells,
+    # d: distance), capped at gradient_compensation_max: Gaussians far behind
+    # water otherwise receive gradients attenuated by it and are never densified.
+    gradient_attenuation_compensation: bool = False
+    gradient_compensation_max: float = 20.0
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
@@ -773,6 +779,8 @@ class ExperimentConfig:
             raise ValueError(
                 "gaussian_adaptation.far_prune_distance and far_prune_scale must be positive"
             )
+        if not adaptation.gradient_compensation_max >= 1.0:
+            raise ValueError("gaussian_adaptation.gradient_compensation_max must be at least 1")
         medium_adaptation = self.voronoi_adaptation
         if medium_adaptation.enabled and self.representation_mode == "gaussian_only":
             raise ValueError("Voronoi adaptation cannot run in gaussian_only mode")

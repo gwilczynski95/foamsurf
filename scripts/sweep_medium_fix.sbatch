@@ -17,19 +17,22 @@
 #   FS_VARIANT_SET=gauss sbatch --array=0-17%7 scripts/sweep_medium_fix.sbatch
 #   FS_VARIANT_SET=far sbatch --array=0-23%7 scripts/sweep_medium_fix.sbatch
 #   FS_VARIANT_SET=water sbatch --array=0-21%7 scripts/sweep_medium_fix.sbatch
+#   FS_VARIANT_SET=chroma sbatch --array=0-21%7 scripts/sweep_medium_fix.sbatch
 # Extra seeds for chosen variants (array size = variants x seeds):
 #   FS_SEED_VARIANTS="B0_chroma100_bk" FS_SEEDS="44 45" sbatch --array=0-1%7 scripts/sweep_medium_fix.sbatch
 # Resume a set (finished stages are skipped, the audits run again):
 #   FS_RUN_ID=<job id> FS_RESUME=1 FS_VARIANT_SET=... sbatch --array=... scripts/sweep_medium_fix.sbatch
 #
-# Variant names: B0[_chroma<NNN>][_scov<NNN>|_scov<D>e<E>][_cthr<NN>][_send<N>k][_under<NNN>][_g<N>k]
-#                [_far<D>s<SSS>][_water<D>e<E>][_wstart<N>k][_bk][_seed<S>]
-#   _chroma<NNN>  backscatter chroma prior weight NNN/100 (B0_chroma100_bk = configs/iui3_default.yaml)
+# Variant names: B0[_chroma<NNN>][_chthr<NN>][_scov<NNN>|_scov<D>e<E>][_cthr<NN>][_send<N>k][_under<NNN>]
+#                [_g<N>k][_far<D>s<SSS>][_tden][_water<D>e<E>][_wstart<N>k][_bk][_seed<S>]
+#   _chroma<NNN>  backscatter chroma prior weight NNN/100, 3-4 digits (B0_chroma100_bk = configs/iui3_default.yaml)
+#   _chthr<NN>    chroma prior on rays with Gaussian alpha above 0.NN (default 0.5)
 #   _scov...      one-sided seabed coverage weight NNN/100 or D*10^-E
 #   _under<NNN>   under-seabed medium penalty weight NNN/100
 #   _g<N>k        densify threshold 2e-4 and at most N thousand Gaussians
 #   _far<D>s<SSS> prune Gaussians larger than SSS/1000 farther than D from every training camera
 #   _cthr<NN>     seabed coverage only on rays with Gaussian alpha above 0.NN
+#   _tden         densification gradient divided by the water transmittance to the camera
 #   _send<N>k     seabed coverage off from N thousand iterations
 #   _water<D>e<E> water clearing weight D*10^-E (Gaussian alpha below 0.3 pushed to 0, from 4k)
 #   _wstart<N>k   water clearing from N thousand iterations (full weight 2k later)
@@ -82,10 +85,24 @@ for variant in B0_chroma100_g700k_bk B0_chroma100_g700k_water1e3_bk B0_chroma100
     B0_chroma100_scov3e3_cthr90_g700k_water1e2_bk B0_chroma100_scov3e3_send15k_g700k_bk; do
   WATER_VARIANTS+=("$variant" "${variant}_seed43")
 done
+# On the best water variant (coverage above alpha 0.9 + water clearing 1e-2): the
+# chroma prior on all rays (alpha > 0.02) with weights 0.1..10, the attenuation-
+# compensated densification, and both with weights 0.1..3; two seeds.
+CHROMA_VARIANTS=()
+tail=scov3e3_cthr90_g700k
+for variant in B0_chroma100_${tail}_water1e2_bk \
+    B0_chroma010_chthr02_${tail}_water1e2_bk B0_chroma030_chthr02_${tail}_water1e2_bk \
+    B0_chroma100_chthr02_${tail}_water1e2_bk B0_chroma300_chthr02_${tail}_water1e2_bk \
+    B0_chroma1000_chthr02_${tail}_water1e2_bk B0_chroma100_${tail}_tden_water1e2_bk \
+    B0_chroma010_chthr02_${tail}_tden_water1e2_bk B0_chroma030_chthr02_${tail}_tden_water1e2_bk \
+    B0_chroma100_chthr02_${tail}_tden_water1e2_bk B0_chroma300_chthr02_${tail}_tden_water1e2_bk; do
+  CHROMA_VARIANTS+=("$variant" "${variant}_seed43")
+done
 case "${FS_VARIANT_SET:-gauss}" in
   gauss) VARIANTS=("${GAUSS_VARIANTS[@]}") ;;
   far) VARIANTS=("${FAR_VARIANTS[@]}") ;;
   water) VARIANTS=("${WATER_VARIANTS[@]}") ;;
+  chroma) VARIANTS=("${CHROMA_VARIANTS[@]}") ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 
@@ -117,6 +134,17 @@ variant_overrides() {
     local digit=${BASH_REMATCH[2]} exponent=${BASH_REMATCH[3]}
     variant_overrides "${BASH_REMATCH[1]}" || return
     echo "medium_fix.water_clear_weight=${digit}.0e-${exponent}"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_tden$ ]]; then
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "joint.gaussian_adaptation.gradient_attenuation_compensation=true"
+    return 0
+  fi
+  if [[ "$name" =~ ^(.+)_chthr([0-9]{2})$ ]]; then
+    local threshold=${BASH_REMATCH[2]}
+    variant_overrides "${BASH_REMATCH[1]}" || return
+    echo "medium_fix.chroma_alpha_threshold=0.${threshold}"
     return 0
   fi
   if [[ "$name" =~ ^(.+)_wstart([0-9]+)k$ ]]; then
@@ -151,7 +179,7 @@ variant_overrides() {
     echo "medium_fix.surface_coverage_weight=${digit}.0e-${exponent}"
     return 0
   fi
-  if [[ "$name" =~ ^(.+)_(chroma|scov|under)([0-9]{3})$ ]]; then
+  if [[ "$name" =~ ^(.+)_(chroma|scov|under)([0-9]{3,4})$ ]]; then
     local value=$(( 10#${BASH_REMATCH[3]} )) key=${BASH_REMATCH[2]}
     case "$key" in
       chroma) key=chroma_weight ;;

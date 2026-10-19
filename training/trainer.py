@@ -326,6 +326,14 @@ class Trainer:
             "renderer/hit_buffer_full_fraction": 0.0,
         }
 
+    @torch.no_grad()
+    def _water_attenuation(self) -> torch.Tensor:
+        """Median attenuation per channel over the non-guard Voronoi cells."""
+        medium = self.model.medium
+        coefficients = medium.optical_coefficients
+        attenuation = coefficients[:, :3] if medium.is_rgb else coefficients
+        return attenuation[~medium.guard_mask].median(dim=0).values
+
     def _seed_everything(self, seed: int) -> None:
         random.seed(seed)
         np.random.seed(seed)
@@ -746,6 +754,8 @@ class Trainer:
         if collect_any and render.diagnostics is None:
             raise RuntimeError("adaptation statistics were not returned")
         if collect_gaussian:
+            if self.config.gaussian_adaptation.gradient_attenuation_compensation:
+                self.gaussian_adaptation.medium_attenuation = self._water_attenuation()
             self.gaussian_adaptation.collect_statistics(
                 screen_points.grad, render.diagnostics.gaussian, batch.camera
             )
