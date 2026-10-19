@@ -13,7 +13,7 @@ from training.disentanglement import undirected_edges
 from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
     CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency,
     MediumFixConfig, drop_legacy_medium_fix, water_direction, backscatter_chroma_loss,
-    surface_coverage_loss, under_surface_loss)
+    surface_coverage_loss, under_surface_loss, water_clear_loss)
 from training.surface_depth import nearest_sites, opaque_depth, sorted_hit_alphas
 from training.surface import LocalOverlap
 from training.surface import install_coverage
@@ -276,6 +276,8 @@ class CapacityTrainer(SurfaceTrainer):
 SURFACE_METRICS = tuple("medium_fix/" + name for name in (
     "surface_coverage_weight", "surface_coverage_raw", "surface_coverage_ray_fraction",
     "under_surface_weight", "under_surface_raw", "under_surface_ray_fraction"))
+WATER_METRICS = tuple("medium_fix/" + name for name in (
+    "water_clear_weight", "water_clear_raw", "water_clear_ray_fraction"))
 CHROMA_METRICS = tuple("medium_fix/" + name for name in (
     "chroma_weight", "chroma_raw", "chroma_angle_degrees",
     "water_direction_r", "water_direction_g", "water_direction_b"))
@@ -297,6 +299,8 @@ class MediumFixTrainer(CapacityTrainer):
                                         or self.medium_fix.under_surface_weight > 0)
         self.seabed_metrics = ({name: float("nan") for name in SURFACE_METRICS}
                                if self.surface_metrics_enabled else {})
+        self.water_metrics = ({name: float("nan") for name in WATER_METRICS}
+                              if self.medium_fix.water_clear_weight > 0 else {})
         super().__init__(config, *args, **kwargs)
         if self.medium_fix.chroma_weight > 0 and not self.model.medium.is_rgb:
             raise ValueError("Backscatter chroma prior requires the RGB medium")
@@ -336,7 +340,11 @@ class MediumFixTrainer(CapacityTrainer):
                 self.seabed_metrics = {name: float("nan") for name in SURFACE_METRICS}
                 self.seabed_metrics.update({"medium_fix/surface_coverage_weight": cover,
                                             "medium_fix/under_surface_weight": under})
-            if not (chroma or cover or under):
+            water = self.medium_fix.water_clear_weight_at(iteration)
+            if self.water_metrics:
+                self.water_metrics = {name: float("nan") for name in WATER_METRICS}
+                self.water_metrics["medium_fix/water_clear_weight"] = water
+            if not (chroma or cover or under or water):
                 return result
             if self._captured_prior is None:
                 raise RuntimeError("No hybrid training render captured")
@@ -372,6 +380,11 @@ class MediumFixTrainer(CapacityTrainer):
                 total = total + cover * cover_raw
                 self.seabed_metrics.update({"medium_fix/surface_coverage_raw": float(cover_raw.detach()),
                                             "medium_fix/surface_coverage_ray_fraction": fraction})
+            if water:
+                water_raw, fraction = water_clear_loss(only.alpha, self.medium_fix.water_clear_threshold)
+                total = total + water * water_raw
+                self.water_metrics.update({"medium_fix/water_clear_raw": float(water_raw.detach()),
+                                           "medium_fix/water_clear_ray_fraction": fraction})
             if under:
                 under_raw, fraction = self._under_surface(rays[selected], only, model)
                 total = total + under * under_raw
@@ -413,7 +426,8 @@ class MediumFixTrainer(CapacityTrainer):
             self._captured_prior = None
 
     def _training_row(self, *args):
-        return {**super()._training_row(*args), **self.chroma_metrics, **self.seabed_metrics}
+        return {**super()._training_row(*args), **self.chroma_metrics, **self.seabed_metrics,
+                **self.water_metrics}
 
     def _checkpoint(self, path, iteration):
         super()._checkpoint(path, iteration)

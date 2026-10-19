@@ -51,14 +51,14 @@ PROX = (("", "1 (brak)"), ("_prox50", "0,5"), ("_prox30", "0,3"), ("_prox10", "0
 
 
 def parse_variant(variant):
-    """Split <base>[_in..][_chroma..][_csmooth..][seabed][_g..k][_far..][_prox..][_ring][_bk] into
-    (base, layout, prox, black, regularizer)."""
+    """Split <base>[_in..][_chroma..][_csmooth..][seabed][_cthr..][_send..k][_g..k][_far..][_water..]
+    [_prox..][_ring][_bk] into (base, layout, prox, black, regularizer)."""
     match = re.fullmatch(r"(.+?)(_in\d\d[rn])?(_chroma\d{3})?(_csmooth\d+)?"
-                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_g\d+k)?(_far\d+s\d{3})?"
-                         r"(_prox\d\d)?(_ring)?(_bk)?", variant)
-    base, layout, chroma, smooth, seabed, gauss, far, prox, ring, black = match.groups()
+                         r"(_kappa\d+|_scov\de\d|_scov\d{3}|_under\d{3}|_scale0dens2)?(_cthr\d\d)?(_send\d+k)?"
+                         r"(_g\d+k)?(_far\d+s\d{3})?(_water\de\d)?(_prox\d\d)?(_ring)?(_bk)?", variant)
+    base, layout, chroma, smooth, seabed, threshold, end, gauss, far, water, prox, ring, black = match.groups()
     return (base, layout or "", (prox or "") + (ring or ""), bool(black),
-            (chroma or "") + (smooth or "") + (seabed or "") + (gauss or "") + (far or ""))
+            "".join(part or "" for part in (chroma, smooth, seabed, threshold, end, gauss, far, water)))
 
 
 def regularizer_label(code):
@@ -69,6 +69,13 @@ def regularizer_label(code):
     for cap in re.findall(r"_g(\d+)k", code):
         parts.append(f"do {cap} tys. Gaussów (próg zagęszczania 2e-4)")
     code = re.sub(r"_g\d+k", "", code)
+    for threshold in re.findall(r"_cthr(\d\d)", code):
+        parts.append(f"pokrycie dna tylko dla α > 0,{threshold}")
+    for end in re.findall(r"_send(\d+)k", code):
+        parts.append(f"pokrycie dna wyłączone od {end}k")
+    for digit, exponent in re.findall(r"_water(\d)e(\d)", code):
+        parts.append(f"strata wodna {digit}e-{exponent} (α < 0,3 → 0, od 4k)")
+    code = re.sub(r"_cthr\d\d|_send\d+k|_water\de\d", "", code)
     for distance, scale in re.findall(r"_far(\d+)s(\d{3})", code):
         parts.append(f"usuwanie Gaussów o skali > {fmt(int(scale) / 1000, 2)} dalej niż {distance} j. od kamer")
     code = re.sub(r"_far\d+s\d{3}", "", code)
@@ -108,11 +115,15 @@ SEABED_CODES = ("_kappa", "_scov", "_under", "_scale0dens2")
 
 
 FAR_BASE = "B0_chroma100_scov3e3_g700k_bk"
+WATER_BASE = "B0_chroma100_g700k_bk"
+WATER_CODES = ("_water", "_cthr", "_send")
 
 
 def baseline_name(variant):
     """Far-pruning variants vs FAR_BASE, seabed variants vs the default
     B0_chroma100_bk, other black-background runs vs B0_bk, the rest vs B0."""
+    if any(code in variant for code in WATER_CODES):
+        return WATER_BASE
     if "_far" in variant:
         return FAR_BASE
     if variant.startswith("B0_chroma100_") and any(code in variant for code in SEABED_CODES):
@@ -174,6 +185,72 @@ def load_run(path):
     return run
 
 
+WATER_BAND = 30  # pixels on each side of the open-water mask boundary
+_REGIONS = {}
+
+
+def water_regions():
+    """Per test view: open water, water within WATER_BAND px of the seabed, seabed within it."""
+    if not _REGIONS:
+        import numpy as np
+        from scipy.ndimage import distance_transform_edt
+        with np.load(Path(__file__).resolve().parents[1] / "configs/iui3_open_water.npz") as data:
+            for view in (name for name in data.files if name != "meta"):
+                water = data[view]
+                _REGIONS[view] = dict(water=water, band=water & (distance_transform_edt(water) <= WATER_BAND),
+                                      seabed_band=~water & (distance_transform_edt(~water) <= WATER_BAND))
+    return _REGIONS
+
+
+def water_history(run, every=1000):
+    """Gaussian coverage of open water, of the water band and of the seabed band at every
+    ``every``-th evaluation, from the saved Gaussian-only alpha maps; cached in the run's audit/."""
+    import numpy as np
+    cache = run["path"] / "audit" / f"water_history_{every}.json"
+    folders = sorted(path for path in (run["path"] / "joint/evaluation").glob("iteration_*")
+                     if int(path.name[-6:]) % every == 0)
+    if cache.is_file():
+        saved = json.loads(cache.read_text())
+        if [row["iteration"] for row in saved] == [int(path.name[-6:]) for path in folders]:
+            return saved
+    rows = []
+    for folder in folders:
+        values = {key: [] for key in ("water", "band", "seabed_band")}
+        for path in folder.glob("*_gaussian_alpha.npz"):
+            regions = water_regions().get(path.name.split("_", 1)[1].split("_gaussian")[0])
+            if regions is None:
+                continue
+            alpha = np.load(path)["alpha"][..., 0]
+            values["water"].append(float((alpha[regions["water"]] > 0.5).mean()))
+            values["band"].append(float((alpha[regions["band"]] > 0.5).mean()))
+            values["seabed_band"].append(float((alpha[regions["seabed_band"]] > 0.99).mean()))
+        if values["water"]:
+            rows.append(dict(iteration=int(folder.name[-6:]), **{k: float(np.mean(v)) for k, v in values.items()}))
+    if rows:
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_text(json.dumps(rows))
+    return rows
+
+
+def water_history_charts(runs):
+    """Line charts of the water history for the water-clearing comparison (needs >= 3 evaluations)."""
+    members = [r for r in runs if r["variant"] == WATER_BASE or baseline_name(r["variant"]) == WATER_BASE]
+    histories = [(r, water_history(r)) for r in members]
+    histories = [(r, h) for r, h in histories if len(h) >= 3]
+    if len(histories) < 2:
+        return ""
+    charts = []
+    for key, title in (("water", "Otwarta woda zajęta przez Gaussy (α > 0,5) [%]"),
+                       ("band", f"Woda w pasie {WATER_BAND} px przy dnie zajęta przez Gaussy (α > 0,5) [%]"),
+                       ("seabed_band", f"Dno w pasie {WATER_BAND} px przy wodzie pokryte (α > 0,99) [%]")):
+        series = [dict(r, curve=[(row["iteration"], 100 * row[key]) for row in h]) for r, h in histories]
+        charts.append(line_chart(f"water_{key}", f"{title}, w trakcie treningu", series, curve_from=0,
+                                 unit="%", digits=1))
+    return ("<h3>Woda w trakcie treningu</h3><p class='small'>Z map α Gaussów zapisywanych przy ewaluacji co "
+            "1000 iteracji; maska otwartej wody jak w audycie. Do 3–4k Gaussy z inicjalizacji pokrywają prawie "
+            "cały kadr, czyści je rampa progu opacity.</p>" + "".join(charts))
+
+
 def audit_value(run, key, checkpoint="best"):
     audit = run.get(checkpoint)
     if not audit:
@@ -218,20 +295,28 @@ def select_winner(runs, baseline_variant="B0"):
     return winner, rule + f" Spełniają: {names}."
 
 
-def line_chart(chart_id, title, runs):
+def nice_step(span, ticks=6):
+    """Grid step of 1, 2 or 5 x 10^k giving at most about ``ticks`` intervals."""
+    raw = max(span, 1e-9) / ticks
+    magnitude = 10 ** math.floor(math.log10(raw))
+    return next(m * magnitude for m in (1, 2, 5, 10) if m * magnitude >= raw)
+
+
+def line_chart(chart_id, title, runs, curve_from=CURVE_FROM, unit="dB", digits=3):
     width, height, left, right, top, bottom = 760, 300, 52, 16, 16, 34
-    series = [(dict(run, curve=[p for p in run["curve"] if p[0] >= CURVE_FROM]), i + 1)
+    series = [(dict(run, curve=[p for p in run["curve"] if p[0] >= curve_from]), i + 1)
               for i, run in enumerate(runs) if run["curve"]][:len(SERIES)]
     if not series:
         return ""
     xs = [x for run, _ in series for x, _ in run["curve"]]
     ys = [y for run, _ in series for _, y in run["curve"]]
     x0, x1 = min(xs), max(xs)
-    y0, y1 = math.floor(min(ys) * 2) / 2, math.ceil(max(ys) * 2) / 2
+    tick = nice_step(max(ys) - min(ys))
+    y0, y1 = math.floor(min(ys) / tick) * tick, math.ceil(max(ys) / tick) * tick
+    y1 = y1 if y1 > y0 else y0 + tick
     sx = lambda x: left + (x - x0) / max(x1 - x0, 1) * (width - left - right)  # noqa: E731
     sy = lambda y: top + (y1 - min(max(y, y0), y1)) / max(y1 - y0, 1e-6) * (height - top - bottom)  # noqa: E731
     parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" role="img" aria-label="{html.escape(title)}">']
-    tick = 0.5 if y1 - y0 <= 4 else 1.0
     y = y0
     while y <= y1 + 1e-9:
         parts.append(f'<line class="grid" x1="{left}" x2="{width - right}" y1="{sy(y):.1f}" y2="{sy(y):.1f}"/>'
@@ -246,7 +331,7 @@ def line_chart(chart_id, title, runs):
     parts.append(f'<line class="crosshair" x1="0" x2="0" y1="{top}" y2="{height - bottom}" visibility="hidden"/>')
     parts.append(f'<rect class="hit" x="{left}" y="{top}" width="{width - left - right}" '
                  f'height="{height - top - bottom}" fill="transparent"/></svg>')
-    data = dict(left=left, right=right, width=width, x0=x0, x1=x1,
+    data = dict(left=left, right=right, width=width, x0=x0, x1=x1, unit=unit, digits=digits,
                 series=[dict(name=run["name"], slot=slot, curve=run["curve"]) for run, slot in series])
     legend = "".join(f'<span class="key"><i class="sw s{slot}"></i>{html.escape(run["name"])}</span>'
                      for run, slot in series)
@@ -396,7 +481,17 @@ def matrices(runs, all_runs=()):
                       (("_scov3e3", "pokrycie 3e-3"), ("_scov5e3", "pokrycie 5e-3"), ("_scov1e2", "pokrycie 1e-2")),
                       (("", "seed 42"), ("_seed43", "seed 43")),
                       lambda code, seed: by_full.get(f"B0_chroma100{code}_g700k_far15s050_bk{seed}"))
-    gauss = far + far_scov + gauss
+    water_rows = [("", "bez straty wodnej")] + [(f"_water{code}", f"strata wodna {code.replace('e', 'e-')}")
+                                                 for code in ("1e3", "1e2", "1e1", "1e0")]
+    water = matrix("Do 700 tys. Gaussów, bez pokrycia dna: waga straty wodnej × seed", water_rows,
+                   (("", "seed 42"), ("_seed43", "seed 43")),
+                   lambda code, seed: by_full.get(f"B0_chroma100_g700k{code}_bk{seed}"))
+    water_seabed = matrix("Pokrycie dna 3e-3 bez rozlewania na wodę × seed",
+                          (("_scov3e3_cthr90_g700k_water1e2", "pokrycie tylko dla α > 0,9 + strata wodna 1e-2"),
+                           ("_scov3e3_send15k_g700k", "pokrycie wyłączone od 15k")),
+                          (("", "seed 42"), ("_seed43", "seed 43")),
+                          lambda code, seed: by_full.get(f"B0_chroma100{code}_bk{seed}"))
+    gauss = water + water_seabed + far + far_scov + gauss
     if not (stage_a or prox or chroma or seabed or gauss):
         return ""
     legend = ("<p class='small'>W komórce: <b>best test PSNR</b>; PSNR wody; ΔPSNR dna po zastąpieniu komórek ≤5 j. "
@@ -457,7 +552,7 @@ def main():
     runs.sort(key=family_order)
     main_runs = [r for r in runs if r["seed"] is None]
     winners, rules = [], []
-    for baseline in ("B0", "B0_bk", "B0_chroma100_bk", FAR_BASE):
+    for baseline in ("B0", "B0_bk", "B0_chroma100_bk", FAR_BASE, WATER_BASE):
         compared = [r for r in main_runs if baseline_name(r["variant"]) == baseline and r["variant"] != baseline]
         if compared and any(r["variant"] == baseline for r in main_runs):
             found, text = select_winner(main_runs, baseline)
@@ -518,10 +613,13 @@ def main():
                     or (parse_variant(r["variant"])[4] and parse_variant(r["variant"])[0] == "B0"
                         and not parse_variant(r["variant"])[1]
                         and not any(c in r["variant"] for c in seabed_codes))]))
-    charts = "".join(line_chart(f"curve_{i}", f"Test hybrid PSNR [dB] od 2k iteracji: {title}", members)
-                     for i, (title, members) in enumerate(groups)
-                     if len(members) >= 2 and any(parse_variant(r["variant"])[0] != "B0" or r["variant"] not in ("B0", "B0_bk")
-                                                  for r in members))
+    groups.append(("strata wodna i pokrycie dna bez rozlewania",
+                   [r for r in main_runs if r["variant"] == WATER_BASE or baseline_name(r["variant"]) == WATER_BASE]))
+    charts = water_history_charts(main_runs) + "".join(
+        line_chart(f"curve_{i}", f"Test hybrid PSNR [dB] od 2k iteracji: {title}", members)
+        for i, (title, members) in enumerate(groups)
+        if len(members) >= 2 and any(parse_variant(r["variant"])[0] != "B0" or r["variant"] not in ("B0", "B0_bk")
+                                     for r in members))
     bars = (
         bar_chart("Best test hybrid PSNR względem bazy (B0; czarne tło: B0_bk; warianty dna: B0_chroma100_bk) [dB]",
                   [(r["name"], r.get("best_psnr", float("nan")) - psnr_of.get(baseline_name(r["variant"]), float("nan")))
@@ -634,7 +732,7 @@ Kolorowy kwadrat = nauczony globalny kolor wody c. MAE marchera = zgodność nie
       const rows = data.series.map(s => [s, (s.curve.find(p => p[0] === it) || [])[1]]).filter(r => r[1] !== undefined)
         .sort((a, b) => b[1] - a[1]);
       tip.innerHTML = `<b>iteracja ${it}</b><br>` + rows.map(([s, v]) =>
-        `<i class="s${s.slot}"></i>${s.name}: ${v.toFixed(3).replace('.', ',')} dB`).join('<br>');
+        `<i class="s${s.slot}"></i>${s.name}: ${v.toFixed(data.digits ?? 3).replace('.', ',')} ${data.unit ?? 'dB'}`).join('<br>');
       tip.hidden = false;
       const fbox = fig.getBoundingClientRect(); let left = event.clientX - fbox.left + 14;
       if (left + tip.offsetWidth > fbox.width) left = event.clientX - fbox.left - tip.offsetWidth - 14;

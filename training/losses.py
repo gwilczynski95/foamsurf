@@ -311,6 +311,15 @@ class MediumFixConfig:
     surface_coverage_start: int = 1000
     surface_coverage_ramp: int = 1000
     surface_coverage_threshold: float = 0.5
+    # Iteration from which the coverage loss is off again (None: never).
+    surface_coverage_end: int | None = None
+    # Water clearing, the mirror of the coverage loss: on rays whose Gaussian-only
+    # alpha is still below water_clear_threshold, penalize that alpha (push it to 0).
+    # Starts after the opacity-pruning ramp has removed the initial Gaussians from the water.
+    water_clear_weight: float = 0.0
+    water_clear_start: int = 4000
+    water_clear_ramp: int = 2000
+    water_clear_threshold: float = 0.3
     # Medium under the seabed: render the medium alone from just behind the depth
     # where Gaussians become opaque and penalize any backscatter produced there.
     under_surface_weight: float = 0.0
@@ -322,7 +331,7 @@ class MediumFixConfig:
     def __post_init__(self):
         if type(self.prior_rays) is not int or self.prior_rays < 1:
             raise ValueError('Invalid medium_fix.prior_rays')
-        for prefix in ('chroma', 'surface_coverage', 'under_surface'):
+        for prefix in ('chroma', 'surface_coverage', 'under_surface', 'water_clear'):
             weight = getattr(self, f'{prefix}_weight')
             if not math.isfinite(weight) or weight < 0:
                 raise ValueError(f'Invalid medium_fix.{prefix}_weight')
@@ -335,9 +344,16 @@ class MediumFixConfig:
             raise ValueError('medium_fix needs 0 < chroma_water_alpha < chroma_alpha_threshold < 1')
         if not 0 <= self.chroma_ema < 1:
             raise ValueError('medium_fix.chroma_ema must be in [0, 1)')
-        for prefix in ('surface_coverage', 'under_surface'):
+        for prefix in ('surface_coverage', 'under_surface', 'water_clear'):
             if not 0 < getattr(self, f'{prefix}_threshold') < 1:
                 raise ValueError(f'medium_fix.{prefix}_threshold must be in (0, 1)')
+        end = self.surface_coverage_end
+        if end is not None and (type(end) is not int or end <= self.surface_coverage_start):
+            raise ValueError('medium_fix.surface_coverage_end must be an iteration after surface_coverage_start')
+        if (self.water_clear_weight > 0 and self.surface_coverage_weight > 0
+                and self.water_clear_threshold >= self.surface_coverage_threshold):
+            # Both losses would pull the same rays in opposite directions.
+            raise ValueError('medium_fix.water_clear_threshold must be below surface_coverage_threshold')
         if not math.isfinite(self.under_surface_offset) or self.under_surface_offset < 0:
             raise ValueError('medium_fix.under_surface_offset must be non-negative')
 
@@ -348,8 +364,13 @@ class MediumFixConfig:
         return ramp_weight(self.chroma_weight, iteration, self.chroma_start, self.chroma_ramp)
 
     def surface_coverage_weight_at(self, iteration):
+        if self.surface_coverage_end is not None and iteration >= self.surface_coverage_end:
+            return 0.0
         return ramp_weight(self.surface_coverage_weight, iteration, self.surface_coverage_start,
                            self.surface_coverage_ramp)
+
+    def water_clear_weight_at(self, iteration):
+        return ramp_weight(self.water_clear_weight, iteration, self.water_clear_start, self.water_clear_ramp)
 
     def under_surface_weight_at(self, iteration):
         return ramp_weight(self.under_surface_weight, iteration, self.under_surface_start,
@@ -402,6 +423,20 @@ def surface_coverage_loss(alpha, threshold=0.5):
     if not bool(selected.any()):
         return alpha.sum() * 0, 0.0
     return (1 - alpha[selected]).mean(), float(selected.float().mean())
+
+
+def water_clear_loss(alpha, threshold=0.3):
+    """Mean A over rays whose Gaussian-only alpha A is still below ``threshold``.
+
+    Mirror of surface_coverage_loss: pushes Gaussians off open-water rays;
+    rays at or above the threshold (seabed, its silhouette) get no gradient.
+    Returns (loss, fraction of rays selected).
+    """
+    alpha = alpha.reshape(-1)
+    selected = alpha.detach() < threshold
+    if not bool(selected.any()):
+        return alpha.sum() * 0, 0.0
+    return alpha[selected].mean(), float(selected.float().mean())
 
 
 def under_surface_loss(backscatter):
