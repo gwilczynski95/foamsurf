@@ -8,6 +8,7 @@ from dataclasses import replace, dataclass
 from functools import lru_cache
 import itertools
 import json
+import math
 from pathlib import Path
 import random
 import time
@@ -584,6 +585,36 @@ def sample_spatial(points, cameras, count, fraction, extent):
     return sites, dict(center=center.tolist(),std=scale.tolist(),colmap_count=n,
                        spatial_count=count-n,jitter=jitter,robust_lower=lo.tolist(),robust_upper=hi.tolist())
 
+def sample_view_volume(points, cameras, count, depth_factor):
+    """``count`` sites uniform in the volume seen by the cameras.
+
+    cameras: dicts with origin, right, down, forward (unit vectors) and fov_x, fov_y.
+    A camera is drawn uniformly, then a point of its frustum between 0.05 and
+    depth_factor x the median distance of the COLMAP points to their nearest camera,
+    with the depth drawn so that the density is uniform in volume (not crowded at
+    the camera).
+    """
+    points = np.asarray(points, dtype=np.float64)
+    origins = np.stack([np.asarray(c["origin"], dtype=np.float64) for c in cameras])
+    if count < 0 or depth_factor <= 0 or len(cameras) == 0:
+        raise ValueError("Invalid view-volume sampling")
+    from scipy.spatial import cKDTree
+    reference = float(np.median(cKDTree(origins).query(points)[0]))
+    near, far = 0.05 * reference, depth_factor * reference
+    index = np.random.randint(len(cameras), size=count)
+    u, v = np.random.uniform(-1, 1, size=(2, count))
+    depth = np.cbrt(near ** 3 + np.random.uniform(size=count) * (far ** 3 - near ** 3))
+    sites = np.empty((count, 3))
+    for i, camera in enumerate(cameras):
+        chosen = index == i
+        direction = (np.asarray(camera["forward"], dtype=np.float64)[None]
+                     + u[chosen, None] * math.tan(camera["fov_x"] / 2) * np.asarray(camera["right"], dtype=np.float64)
+                     + v[chosen, None] * math.tan(camera["fov_y"] / 2) * np.asarray(camera["down"], dtype=np.float64))
+        sites[chosen] = origins[i] + depth[chosen, None] * direction
+    return sites.astype(np.float32), dict(view_count=count, view_near=near, view_far=far,
+                                           view_reference_distance=reference)
+
+
 @torch.no_grad()
 def initialize_spatial_medium(medium,dataset,config,profile):
     if dataset.__class__.__name__ != 'ColmapDataset':
@@ -592,8 +623,15 @@ def initialize_spatial_medium(medium,dataset,config,profile):
         raise ValueError('Spatial initialization must not have manual bounds')
     points,_ = dataset.initial_point_cloud()
     cameras = torch.stack([c.origin for c in dataset.train]).cpu().numpy()
-    sites, report = sample_spatial(points,cameras,profile.spatial_count,
+    view = int(round(profile.spatial_count * profile.spatial_view_fraction))
+    sites, report = sample_spatial(points,cameras,profile.spatial_count - view,
                                   profile.spatial_colmap_fraction,profile.spatial_extent)
+    if view:
+        frames = [dict(origin=c.origin.cpu().numpy(), right=c.right.cpu().numpy(), down=c.down.cpu().numpy(),
+                       forward=c.forward.cpu().numpy(), fov_x=c.fov_x, fov_y=c.fov_y) for c in dataset.train]
+        inside, view_report = sample_view_volume(points, frames, view, profile.spatial_view_depth)
+        sites = np.concatenate((sites, inside))
+        report.update(view_report)
     device=medium.sites.device
     medium.sites=nn.Parameter(torch.as_tensor(sites,device=device))
     # All are ordinary learnable medium cells, with identical density law.

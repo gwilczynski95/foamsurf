@@ -18,6 +18,10 @@
 # One scene / other seeds:  FS_SCENES="Curasao-Undistorted" FS_SEEDS="42" sbatch --array=0 ...
 # Resume:                   FS_RUN_ID=<job id> FS_RESUME=1 sbatch scripts/train_seathru.sbatch
 # Another config:           FS_CONFIG=configs/<file>.yaml sbatch scripts/train_seathru.sbatch
+# Voronoi layout x colour smoothing on IUI3 and Panama, seed 42 (18 tasks):
+#   FS_VARIANT_SET=cells sbatch --array=0-17%7 scripts/train_seathru.sbatch
+# Variant suffixes (on top of the config): _view75 = 75% of the cells uniform in the volume the
+# training cameras see, _c20k = 20000 cells, _cs<N> = medium colour smoothing weight N (default 1).
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -35,15 +39,48 @@ export OMP_NUM_THREADS=4
 export OPENBLAS_NUM_THREADS=4
 
 # Panama's directory name is misspelled in the dataset.
-read -r -a SCENES <<< "${FS_SCENES:-IUI3-RedSea-Undistorted Curasao-Undistorted JapaneseGradens-RedSea-Undistorted Panama-Undisorted}"
-read -r -a SEEDS <<< "${FS_SEEDS:-42 43}"
+ALL_SCENES="IUI3-RedSea-Undistorted Curasao-Undistorted JapaneseGradens-RedSea-Undistorted Panama-Undisorted"
+case "${FS_VARIANT_SET:-default}" in
+  default) VARIANTS=(""); DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  cells)
+    VARIANTS=("" _cs5 _cs10 _view75 _view75_cs5 _view75_cs10 _view75_c20k _view75_c20k_cs5 _view75_c20k_cs10)
+    DEFAULT_SCENES="IUI3-RedSea-Undistorted Panama-Undisorted"; DEFAULT_SEEDS="42" ;;
+  *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
+esac
+read -r -a SCENES <<< "${FS_SCENES:-$DEFAULT_SCENES}"
+read -r -a SEEDS <<< "${FS_SEEDS:-$DEFAULT_SEEDS}"
+
+# Prints one manifest override per line for a variant suffix.
+variant_overrides() {
+  local rest=$1
+  while [[ -n "$rest" ]]; do
+    if [[ "$rest" =~ ^_view([0-9]{2})(.*)$ ]]; then
+      echo "profile.spatial_view_fraction=0.${BASH_REMATCH[1]}"
+    elif [[ "$rest" =~ ^_c([0-9]+)k(.*)$ ]]; then
+      echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
+      echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"
+    elif [[ "$rest" =~ ^_cs([0-9]+)(.*)$ ]]; then
+      echo "rgb_smoothing.color=${BASH_REMATCH[1]}.0"
+    else
+      echo "Unknown variant suffix: $rest" >&2
+      return 2
+    fi
+    rest=${BASH_REMATCH[2]}
+  done
+}
+
 TASK=${SLURM_ARRAY_TASK_ID:?run through sbatch}
-(( TASK < ${#SCENES[@]} * ${#SEEDS[@]} )) || { echo "Array index $TASK out of range" >&2; exit 2; }
-SCENE=${SCENES[TASK / ${#SEEDS[@]}]}
+PER_SCENE=$(( ${#VARIANTS[@]} * ${#SEEDS[@]} ))
+(( TASK < ${#SCENES[@]} * PER_SCENE )) || { echo "Array index $TASK out of range" >&2; exit 2; }
+SCENE=${SCENES[TASK / PER_SCENE]}
+VARIANT=${VARIANTS[(TASK % PER_SCENE) / ${#SEEDS[@]}]}
 SEED=${SEEDS[TASK % ${#SEEDS[@]}]}
 [[ -d "$DATASETS/$SCENE" ]] || { echo "Missing dataset $DATASETS/$SCENE" >&2; exit 2; }
-NAME=$SCENE
-[[ "$SEED" == 42 ]] || NAME="${SCENE}_seed${SEED}"
+variant_overrides "$VARIANT" > /dev/null  # fail loudly on an unknown suffix
+OVERRIDES=()
+mapfile -t OVERRIDES < <(variant_overrides "$VARIANT")
+NAME="${SCENE}${VARIANT}"
+[[ "$SEED" == 42 ]] || NAME="${NAME}_seed${SEED}"
 
 cd "$ROOT"
 mkdir -p slurm_logs
@@ -64,9 +101,11 @@ ARGS=(
   --set "joint.dataset.source_path=$DATASETS/$SCENE"
   --set "variant.seed=$SEED" --set "warmup.seed=$SEED" --set "joint.seed=$SEED"
 )
+for item in "${OVERRIDES[@]}"; do ARGS+=(--set "$item"); done
 if [[ "${FS_RESUME:-0}" == 1 ]]; then ARGS+=(--resume); fi
 
-echo "scene=$SCENE seed=$SEED output=$OUTPUT"
+echo "scene=$SCENE variant=${VARIANT:-none} seed=$SEED output=$OUTPUT"
+if (( ${#OVERRIDES[@]} )); then printf '  --set %s\n' "${OVERRIDES[@]}"; fi
 if [[ "${FS_DRY_RUN:-0}" == 1 ]]; then
   python train.py "${ARGS[@]}" --dry-run > /dev/null
   echo "dry run ok"
