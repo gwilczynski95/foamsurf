@@ -1,8 +1,14 @@
-# Current IUI3 default (2026-10-13): run B0_chroma100_bk of sweep 530646.
-# Per-cell medium color, sigmoid RGB for Gaussians and cells, BLACK background,
-# original normal Voronoi layout, and the backscatter chroma prior with weight 1
-# (on rays hitting opaque Gaussians, backscatter must have the water's hue).
-# Override --output-dir for each new experiment to avoid reusing outputs.
+# Current IUI3 default (2026-10-20): run B0_chroma100_chthr02_scov3e3_cthr90_g700k_tden_water1e2_bk
+# of sweep 542092. On top of the previous default (per-cell medium color, sigmoid RGB for
+# Gaussians and cells, BLACK background, normal Voronoi layout):
+# - backscatter chroma prior, weight 1, on all rays with Gaussian alpha > 0.02 (backscatter
+#   must have the water's hue, brightness is free);
+# - one-sided seabed coverage 3e-3 on rays with Gaussian alpha > 0.9;
+# - water clearing 1e-2: Gaussian alpha below 0.3 pushed to 0 from 4k (full at 6k);
+# - densification gradient divided by the water transmittance to the camera;
+# - densification threshold 2e-4, at most 700k Gaussians.
+# Override --output-dir for each new experiment to avoid reusing outputs; on another
+# scene also --set warmup.dataset.source_path=... --set joint.dataset.source_path=...
 base_config: iui3_5k.yaml
 output_dir: outputs/iui3_default/run
 gaussian_rgb_activation: sigmoid
@@ -10,5 +16,12 @@ medium_color_activation: sigmoid
 wandb_project: foamsurf_iui3_medium_color
 overrides:
   - medium_fix.chroma_weight=1.0
+  - medium_fix.chroma_alpha_threshold=0.02
+  - medium_fix.surface_coverage_weight=3.0e-3
+  - medium_fix.surface_coverage_threshold=0.9
+  - medium_fix.water_clear_weight=1.0e-2
+  - joint.gaussian_adaptation.gradient_threshold=0.0002
+  - joint.gaussian_adaptation.max_points=700000
+  - joint.gaussian_adaptation.gradient_attenuation_compensation=true
   - warmup.background=[0.0, 0.0, 0.0]
   - joint.background=[0.0, 0.0, 0.0]

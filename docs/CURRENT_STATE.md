@@ -1,4 +1,4 @@
-# FoamSurf — aktualny stan (2026-10-15)
+# FoamSurf — aktualny stan (2026-10-20)
 
 Hybryda: Gaussy 3D (powierzchnia/dno) + medium w komórkach Voronoi (woda). Scena referencyjna: IUI3 (SeaThru-NeRF).
 
@@ -11,7 +11,17 @@ Hybryda: Gaussy 3D (powierzchnia/dno) + medium w komórkach Voronoi (woda). Scen
 
 ## Konfiguracja domyślna
 
-`configs/iui3_default.yaml` = `B0_chroma100_bk`: `configs/iui3_5k.yaml` + sigmoid na RGB Gaussów i komórek, czarne tło, prior chromy backscatteru o wadze 1,0.
+`configs/iui3_default.yaml` = `B0_chroma100_chthr02_scov3e3_cthr90_g700k_tden_water1e2_bk` ze sweepu 542092: `configs/iui3_5k.yaml` + sigmoid na RGB Gaussów i komórek, czarne tło, oraz:
+
+- prior chromy backscatteru, waga 1, na wszystkich promieniach z α Gaussów > 0,02;
+- jednostronne pokrycie dna 3e-3 na promieniach z α > 0,9;
+- strata wodna 1e-2: α Gaussów < 0,3 pchana do 0, od 4k (pełna od 6k);
+- densyfikacja kompensowana tłumieniem wody (gradient / transmitancja do kamery, maks. 20×);
+- próg densyfikacji 2e-4, maks. 700k Gaussów.
+
+Wynik na IUI3 (2 seedy): best PSNR 29,32 dB, otwarta woda zajęta przez Gaussy 0,0%, dno 0–30 px od wody pokryte (α > 0,5) w 25%, 30–60 px w 64%, całe dno α > 0,99 w 70%; raport `outputs/iui3_medium_fix/report_542092_seabed_focus.html`.
+
+Inna scena: dodaj `--set warmup.dataset.source_path=<scena> --set joint.dataset.source_path=<scena>`. Maski woda/dno (SAM) są tylko dla widoków testowych IUI3 — na innych scenach audyt zwraca dla nich NaN.
 
 ~~~bash
 python train.py --config configs/iui3_default.yaml --output-dir outputs/<nazwa>
@@ -26,14 +36,18 @@ Sweepy: `scripts/sweep_medium_fix.sbatch` (składnia nazw wariantów w nagłówk
 
 ## Priory medium (`medium_fix`, `training/losses.py`)
 
-- `chroma_*`: na rayach z alpha Gaussów > 0,5 barwa backscatteru ma mieć odcień wody (EMA z rayów otwartej wody), margines 5°.
-- `surface_coverage_*`: jednostronne pokrycie dna, kara (1 − A) na rayach z A > 0,5.
+- `chroma_*`: na rayach z alpha Gaussów > `chroma_alpha_threshold` barwa backscatteru ma mieć odcień wody (EMA z rayów otwartej wody), margines 5°.
+- `surface_coverage_*`: jednostronne pokrycie dna, kara (1 − A) na rayach z A > próg; `surface_coverage_end` wyłącza ją od danej iteracji.
+- `water_clear_*`: strata wodna, kara A na rayach z A < próg (domyślnie 0,3, od 4k); z pokryciem dna progi muszą zostawiać martwą strefę.
+- `joint.gaussian_adaptation.gradient_attenuation_compensation`: gradient do densyfikacji dzielony przez transmitancję wody do kamery (mediana tłumienia komórek), maks. `gradient_compensation_max`.
 - `under_surface_*`: kara za backscatter medium renderowanego zza nieprzezroczystego dna.
 
 ## Wyniki (skrót)
 
 - Domyślna konfiguracja + `scov 3e-3` + ok. 800k Gaussów: średnio **29,31 dB** PSNR test (WaterSplatting w artykule: ok. 29,3 dB; nasz pomiar WS: 29,93 dB, ok. 174 FPS na 4090).
-- Problem otwarty: przy dużej liczbie Gaussów część z nich (ok. 0,4%) wchodzi w otwartą wodę — duże i daleko od kamer. Następny krok: pruning Gaussów zbyt dużych względem odległości od najbliższej kamery treningowej.
+- Pruning dużych Gaussów daleko od kamer (`far_prune_*`) obniża PSNR i nie czyści wody — odrzucony (sweep 534880). Wodę czyści strata wodna, a granicę dna poprawia densyfikacja kompensowana tłumieniem (sweepy 541528 i 542092).
+- Problem otwarty: pas dna 0–30 px przy wodzie jest pokryty Gaussami tylko w ok. 25%.
+- Metryki wody i dna: maski SAM widoków testowych (`configs/iui3_water_sam.npz`, `scripts/sam_water_mask.py`); raport skupiony na dnie: `scripts/seabed_focus_report.py`.
 - Raporty: `outputs/iui3_medium_fix/report_*.html`.
 
 ## Testy

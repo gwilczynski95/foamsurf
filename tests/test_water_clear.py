@@ -54,7 +54,8 @@ def test_water_clear_validation(bad):
 
 def test_old_manifest_resolves_new_fields_to_inactive_defaults(tmp_path):
     from train import normalize_saved_manifest
-    manifest = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "run")
+    # The base config: water clearing and the coverage end are inactive there.
+    manifest = resolve_iui3(ROOT / "configs/iui3_5k.yaml", tmp_path / "run")
     old = json.loads(json.dumps(manifest))
     for key in ("water_clear_weight", "water_clear_start", "water_clear_ramp", "water_clear_threshold",
                 "surface_coverage_end"):

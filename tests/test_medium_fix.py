@@ -211,17 +211,29 @@ def test_backscatter_chroma_black_background_short_real_training(tmp_path):
     assert checkpoint["iteration"] == 4 and checkpoint["config"]["background"] == [0.0, 0.0, 0.0]
 
 
-def test_default_config_equals_sweep_run_b0_chroma100_bk(tmp_path):
-    """configs/iui3_default.yaml must stay identical to the sweep run it was chosen from."""
+DEFAULT_RUN = "B0_chroma100_chthr02_scov3e3_cthr90_g700k_tden_water1e2_bk"
+
+
+def test_default_config_equals_sweep_run(tmp_path):
+    """configs/iui3_default.yaml must stay identical to the sweep run it was chosen from
+    (sweep 542092, built by scripts/sweep_medium_fix.sbatch)."""
+    import subprocess
+    script = (ROOT / "scripts/sweep_medium_fix.sbatch").read_text()
+    start = script.index("variant_overrides() {")
+    function = script[start:script.index("\n}\n", start) + 3]
+    lines = subprocess.run(["bash", "-c", function + f"\nvariant_overrides {DEFAULT_RUN}"],
+                           capture_output=True, text=True, check=True).stdout.splitlines()
     output = tmp_path / "default"
     default = resolve_iui3(ROOT / "configs/iui3_default.yaml", output)
     sweep = resolve_iui3(ROOT / "configs/iui3_5k.yaml", output,
                          gaussian_rgb_activation="sigmoid", medium_color_activation="sigmoid",
-                         wandb_project="foamsurf_iui3_medium_color",
-                         overrides=["medium_fix.chroma_weight=1.0", "warmup.background=[0.0, 0.0, 0.0]",
-                                    "joint.background=[0.0, 0.0, 0.0]"])
+                         wandb_project="foamsurf_iui3_medium_color", overrides=lines)
     assert default == sweep
-    assert default["medium_fix"]["chroma_weight"] == 1.0
+    fix, adaptation = default["medium_fix"], default["joint"]["gaussian_adaptation"]
+    assert (fix["chroma_weight"], fix["chroma_alpha_threshold"]) == (1.0, 0.02)
+    assert (fix["surface_coverage_weight"], fix["surface_coverage_threshold"]) == (0.003, 0.9)
+    assert fix["water_clear_weight"] == 0.01
+    assert adaptation["gradient_attenuation_compensation"] is True and adaptation["max_points"] == 700000
     assert default["joint"]["background"] == [0.0, 0.0, 0.0]
     later = resolve_iui3(ROOT / "configs/iui3_default.yaml", output, overrides=["medium_fix.chroma_weight=3.0"])
     assert later["medium_fix"]["chroma_weight"] == 3.0  # command line wins over the file
