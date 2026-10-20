@@ -202,20 +202,25 @@ def load_run(path):
 WATER_BAND = 30  # pixels on each side of the open-water mask boundary
 # Open water vs seabed of the test views, segmented from the images (scripts/sam_water_mask.py).
 WATER_MASK = Path(__file__).resolve().parents[1] / "configs/iui3_water_sam.npz"
+SEABED_RINGS = ((0, 30), (30, 60), (60, 120))  # seabed by distance to the water [px]
 _REGIONS = {}
 
 
 def water_regions():
-    """Per test view: water, seabed, water within WATER_BAND px of the seabed, seabed within it."""
+    """Per test view: water, seabed, water within WATER_BAND px of the seabed, seabed within it,
+    and the seabed 0-30 / 30-60 / 60-120 px from the water (SEABED_RINGS)."""
     if not _REGIONS:
         import numpy as np
         from scipy.ndimage import distance_transform_edt
         with np.load(WATER_MASK) as data:
             for view in (name for name in data.files if name != "meta"):
                 water = data[view]
+                to_water = distance_transform_edt(~water)
                 _REGIONS[view] = dict(water=water, seabed=~water,
                                       band=water & (distance_transform_edt(water) <= WATER_BAND),
-                                      seabed_band=~water & (distance_transform_edt(~water) <= WATER_BAND))
+                                      seabed_band=~water & (to_water <= WATER_BAND))
+                for low, high in SEABED_RINGS:
+                    _REGIONS[view][f"seabed_{low}_{high}"] = ~water & (to_water > low) & (to_water <= high)
     return _REGIONS
 
 
@@ -265,6 +270,10 @@ def alpha_coverage(folder):
         values["sam_seabed_gt_0.5"].append(float((alpha[regions["seabed"]] > 0.5).mean()))
         values["sam_band_water_gt_0.5"].append(float((alpha[regions["band"]] > 0.5).mean()))
         values["sam_band_seabed_gt_0.99"].append(float((alpha[regions["seabed_band"]] > 0.99).mean()))
+        for low, high in SEABED_RINGS:
+            ring = alpha[regions[f"seabed_{low}_{high}"]]
+            if ring.size:
+                values.setdefault(f"sam_seabed_{low}_{high}_gt_0.5", []).append(float((ring > 0.5).mean()))
     return {key: float(np.mean(v)) for key, v in values.items() if v}
 
 
@@ -273,7 +282,7 @@ def mask_coverage(run):
     if "best_iteration" not in run:
         return {}
     folder = run["path"] / "joint/evaluation" / f"iteration_{run['best_iteration']:06d}"
-    cache = run["path"] / "audit" / f"mask_coverage_sam_{run['best_iteration']:06d}.json"
+    cache = run["path"] / "audit" / f"mask_coverage_sam_rings_{run['best_iteration']:06d}.json"
     if cache.is_file():
         return json.loads(cache.read_text())
     result = alpha_coverage(folder) if folder.is_dir() else {}
@@ -483,6 +492,10 @@ def hue_text(run):
     if not math.isnan(band_water):
         text += (f"<br>pas {WATER_BAND} px przy granicy: woda zajęta {fmt(band_water, 0, percent=True)} · "
                  f"dno pokryte {fmt(band_seabed, 0, percent=True)}")
+    rings = [audit_value(run, f"sam_seabed_{low}_{high}_gt_0.5") for low, high in SEABED_RINGS]
+    if not any(math.isnan(value) for value in rings):
+        text += "<br>dno α&gt;0,5 przy wodzie: " + " · ".join(
+            f"{low}–{high} px {fmt(value, 0, percent=True)}" for (low, high), value in zip(SEABED_RINGS, rings))
     count = ((run.get("best") or {}).get("gaussians") or {}).get("count")
     fps = run.get("best_fps")
     if count:
@@ -586,13 +599,17 @@ def seed_table(runs):
                     f"<td class='num'>{stats([100 * audit_value(m, 'sam_water_gt_0.5') for m in members])}</td>"
                     f"<td class='num'>{stats([100 * audit_value(m, 'sam_band_water_gt_0.5') for m in members])}</td>"
                     f"<td class='num'>{stats([100 * audit_value(m, 'sam_band_seabed_gt_0.99') for m in members])}</td>"
+                    + "".join(f"<td class='num'>{stats([100 * audit_value(m, f'sam_seabed_{low}_{high}_gt_0.5') for m in members])}</td>"
+                              for low, high in SEABED_RINGS) +
                     f"<td class='num'>{stats([gaussian_count(m) / 1000 for m in members])}</td></tr>")
     if not rows:
         return "<p>Brak wariantów z więcej niż jednym seedem.</p>"
     return ("<div class='tw'><table><tr><th>Wariant</th><th class='num'>best PSNR</th><th class='num'>final PSNR</th>"
             "<th class='num'>ΔPSNR dna (czyszczenie ≤5 j.)</th><th class='num'>dno α&gt;0,99 [%]</th>"
             "<th class='num'>woda zajęta, α&gt;0,5 [%]</th><th class='num'>pas: woda zajęta [%]</th>"
-            "<th class='num'>pas: dno pokryte [%]</th><th class='num'>Gaussy [tys.]</th></tr>"
+            "<th class='num'>pas: dno pokryte [%]</th>"
+            + "".join(f"<th class='num'>dno {low}–{high} px od wody, α&gt;0,5 [%]</th>" for low, high in SEABED_RINGS)
+            + "<th class='num'>Gaussy [tys.]</th></tr>"
             + "".join(rows) + "</table></div>")
 
 

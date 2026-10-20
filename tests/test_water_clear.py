@@ -178,7 +178,8 @@ def test_report_mask_coverage_at_best_iteration(tmp_path):
     coverage = report.mask_coverage(dict(path=run, best_iteration=2000))
     assert coverage["sam_water_gt_0.5"] == 0 and coverage["sam_seabed_gt_0.99"] == 1
     assert coverage["sam_band_water_gt_0.5"] == 0 and coverage["sam_band_seabed_gt_0.99"] == 1
-    assert (run / "audit/mask_coverage_sam_002000.json").is_file()
+    assert (run / "audit/mask_coverage_sam_rings_002000.json").is_file()
+    assert coverage["sam_seabed_0_30_gt_0.5"] == 1 and coverage["sam_seabed_60_120_gt_0.5"] == 1
     assert report.mask_coverage(dict(path=run, best_iteration=3000)) == {}  # alpha maps not kept
     seen = dict(mask=coverage, best=dict(mean={"bottom_alpha_gt_0.99": 0.3}))
     assert report.seabed_cover(seen) == 1 and report.seabed_cover(dict(mask={}, best=seen["best"])) == 0.3
