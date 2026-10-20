@@ -116,7 +116,14 @@ class GaussianAdaptationController:
         scene_extent: float,
         support_radius: float = 3.0,
         camera_centers: torch.Tensor | None = None,
+        image_width: int | None = None,
     ) -> None:
+        reference = config.gradient_threshold_reference_width
+        if reference is not None and image_width is None:
+            raise ValueError("gradient_threshold_reference_width needs the image width")
+        # Densification threshold for this image width (see GaussianAdaptationConfig).
+        self.gradient_threshold = config.gradient_threshold * (
+            1.0 if reference is None else reference / image_width)
         if config.far_prune_distance is not None and camera_centers is None:
             raise ValueError("far_prune_distance needs the training camera centers")
         self.camera_centers = camera_centers
@@ -481,7 +488,7 @@ class GaussianAdaptationController:
         average_gradient = self.gradient_sum / self.gradient_denom
         average_gradient.nan_to_num_(0.0)
         gradient_candidates = (
-            average_gradient >= self.config.gradient_threshold
+            average_gradient >= self.gradient_threshold
         ) & densification_active
         densify = gradient_candidates.clone()
 

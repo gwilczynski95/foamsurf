@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from foamsurf import GaussianScene
 from training.config import ModelConfig
-from .sh import evaluate_sh, rgb_to_sh_dc
+from .sh import C0, evaluate_sh, rgb_to_sh_dc
 
 
 def _inverse_softplus(value: float) -> float:
@@ -92,7 +92,11 @@ class SurfaceGaussianModel(nn.Module):
             )
         else:
             coefficient_count = (self.sh_degree + 1) ** 2
-            appearance_dc = rgb_to_sh_dc(rgb)[..., None]
+            if self.rgb_activation == "sigmoid":
+                # sigmoid(C0 * dc) = rgb when the higher coefficients are zero.
+                appearance_dc = (torch.logit(rgb.clamp(1.0e-5, 1.0 - 1.0e-5)) / C0)[..., None]
+            else:
+                appearance_dc = rgb_to_sh_dc(rgb)[..., None]
             appearance_rest = torch.zeros(
                 points.shape[0], 3, coefficient_count - 1,
                 dtype=torch.float32,
@@ -164,9 +168,9 @@ class SurfaceGaussianModel(nn.Module):
         directions = F.normalize(
             camera_origin.reshape(1, 3) - self.means, dim=-1
         )
-        return 0.5 + evaluate_sh(
-            self.active_sh_degree, self.appearance, directions
-        )
+        value = evaluate_sh(self.active_sh_degree, self.appearance, directions)
+        # sigmoid: SH gives view-dependent logits, colours stay in (0, 1).
+        return torch.sigmoid(value) if self.rgb_activation == "sigmoid" else 0.5 + value
 
     def render_scene(
         self,

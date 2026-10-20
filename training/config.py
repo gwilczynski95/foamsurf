@@ -240,6 +240,9 @@ class GaussianAdaptationConfig:
     # d: distance), capped at gradient_compensation_max: Gaussians far behind
     # water otherwise receive gradients attenuated by it and are never densified.
     gradient_attenuation_compensation: bool = False
+    # gradient_threshold holds for images this wide; other widths use
+    # threshold * reference / width (larger images densify more). None: as given.
+    gradient_threshold_reference_width: int | None = None
     gradient_compensation_max: float = 20.0
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
@@ -457,8 +460,6 @@ class ExperimentConfig:
             raise ValueError("model.appearance must be rgb or sh")
         if self.model.gaussian_rgb_activation not in {"identity", "sigmoid"}:
             raise ValueError("model.gaussian_rgb_activation must be identity or sigmoid")
-        if self.model.gaussian_rgb_activation == "sigmoid" and self.model.appearance != "rgb":
-            raise ValueError("sigmoid Gaussian RGB requires model.appearance=rgb")
         if not 0 <= self.model.sh_degree <= 3:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:
@@ -779,6 +780,9 @@ class ExperimentConfig:
             raise ValueError(
                 "gaussian_adaptation.far_prune_distance and far_prune_scale must be positive"
             )
+        reference = adaptation.gradient_threshold_reference_width
+        if reference is not None and (type(reference) is not int or reference < 1):
+            raise ValueError("gaussian_adaptation.gradient_threshold_reference_width must be a positive integer")
         if not adaptation.gradient_compensation_max >= 1.0:
             raise ValueError("gaussian_adaptation.gradient_compensation_max must be at least 1")
         medium_adaptation = self.voronoi_adaptation

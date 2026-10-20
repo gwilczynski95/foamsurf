@@ -21,7 +21,12 @@
 # Voronoi layout x colour smoothing on IUI3 and Panama, seed 42 (18 tasks):
 #   FS_VARIANT_SET=cells sbatch --array=0-17%7 scripts/train_seathru.sbatch
 # Variant suffixes (on top of the config): _view75 = 75% of the cells uniform in the volume the
-# training cameras see, _c20k = 20000 cells, _cs<N> = medium colour smoothing weight N (default 1).
+# training cameras see, _c20k = 20000 cells, _cs<N> = medium colour smoothing weight N (default 1),
+# _sh3 = sigmoid(SH degree 3) Gaussian colour (degree +1 every 1000 iterations), _g<N>k = at most
+# N thousand Gaussians, _dres = densification threshold scaled to the image width (IUI3 = 1383).
+# Seed 42 on every scene for SH / capacity / resolution-scaled densification (20 tasks; the
+# control is the default run of the 'default' set):
+#   FS_VARIANT_SET=sh sbatch --array=0-19%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -45,6 +50,9 @@ case "${FS_VARIANT_SET:-default}" in
   cells)
     VARIANTS=("" _cs5 _cs10 _view75 _view75_cs5 _view75_cs10 _view75_c20k _view75_c20k_cs5 _view75_c20k_cs10)
     DEFAULT_SCENES="IUI3-RedSea-Undistorted Panama-Undisorted"; DEFAULT_SEEDS="42" ;;
+  sh)
+    VARIANTS=(_sh3 _g1200k _dres _sh3_g1200k _sh3_g1200k_dres)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42" ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 read -r -a SCENES <<< "${FS_SCENES:-$DEFAULT_SCENES}"
@@ -55,17 +63,24 @@ variant_overrides() {
   local rest=$1
   while [[ -n "$rest" ]]; do
     if [[ "$rest" =~ ^_view([0-9]{2})(.*)$ ]]; then
-      echo "profile.spatial_view_fraction=0.${BASH_REMATCH[1]}"
+      echo "profile.spatial_view_fraction=0.${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_c([0-9]+)k(.*)$ ]]; then
       echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
-      echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"
+      echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_cs([0-9]+)(.*)$ ]]; then
-      echo "rgb_smoothing.color=${BASH_REMATCH[1]}.0"
+      echo "rgb_smoothing.color=${BASH_REMATCH[1]}.0"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_sh([0-9])(.*)$ ]]; then
+      echo "joint.model.appearance=sh"
+      echo "joint.model.sh_degree=${BASH_REMATCH[1]}"
+      echo "joint.optimization.gaussian_sh_degree_interval=1000"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_g([0-9]+)k(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_dres(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.gradient_threshold_reference_width=1383"; rest=${BASH_REMATCH[1]}
     else
       echo "Unknown variant suffix: $rest" >&2
       return 2
     fi
-    rest=${BASH_REMATCH[2]}
   done
 }
 

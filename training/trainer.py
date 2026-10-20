@@ -226,6 +226,7 @@ class Trainer:
             config.gaussian_adaptation,
             self.scene_extent,
             camera_centers=torch.stack([camera.origin for camera in self.dataset.train]),
+            image_width=self.dataset.train[0].width,
         )
         if payload is not None and payload.get("gaussian_adaptation") is not None:
             self.gaussian_adaptation.load_state_dict(
