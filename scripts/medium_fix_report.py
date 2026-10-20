@@ -201,9 +201,18 @@ def load_run(path):
 
 WATER_BAND = 30  # pixels on each side of the open-water mask boundary
 # Open water vs seabed of the test views, segmented from the images (scripts/sam_water_mask.py).
-WATER_MASK = Path(__file__).resolve().parents[1] / "configs/iui3_water_sam.npz"
+WATER_MASK = Path(__file__).resolve().parents[1] / "configs/water_sam"  # one .npz per scene
 SEABED_RINGS = ((0, 30), (30, 60), (60, 120))  # seabed by distance to the water [px]
 _REGIONS = {}
+
+
+def mask_tag():
+    """Short fingerprint of the mask files, part of every cache name computed from them."""
+    import hashlib
+    digest = hashlib.sha1()
+    for path in sorted(WATER_MASK.glob("*.npz")):
+        digest.update(path.name.encode() + path.read_bytes())
+    return digest.hexdigest()[:8]
 
 
 def water_regions():
@@ -212,15 +221,15 @@ def water_regions():
     if not _REGIONS:
         import numpy as np
         from scipy.ndimage import distance_transform_edt
-        with np.load(WATER_MASK) as data:
-            for view in (name for name in data.files if name != "meta"):
-                water = data[view]
-                to_water = distance_transform_edt(~water)
-                _REGIONS[view] = dict(water=water, seabed=~water,
-                                      band=water & (distance_transform_edt(water) <= WATER_BAND),
-                                      seabed_band=~water & (to_water <= WATER_BAND))
-                for low, high in SEABED_RINGS:
-                    _REGIONS[view][f"seabed_{low}_{high}"] = ~water & (to_water > low) & (to_water <= high)
+        from sam_water_mask import load_masks
+        for view, water in load_masks(WATER_MASK).items():
+            # A view without open water: every pixel is infinitely far from it.
+            to_water = distance_transform_edt(~water) if water.any() else np.full(water.shape, np.inf)
+            _REGIONS[view] = dict(water=water, seabed=~water,
+                                  band=water & (distance_transform_edt(water) <= WATER_BAND),
+                                  seabed_band=~water & (to_water <= WATER_BAND))
+            for low, high in SEABED_RINGS:
+                _REGIONS[view][f"seabed_{low}_{high}"] = ~water & (to_water > low) & (to_water <= high)
     return _REGIONS
 
 
@@ -228,7 +237,7 @@ def water_history(run, every=1000):
     """Gaussian coverage of open water, of the water band and of the seabed band at every
     ``every``-th evaluation, from the saved Gaussian-only alpha maps; cached in the run's audit/."""
     import numpy as np
-    cache = run["path"] / "audit" / f"water_history_{every}_sam.json"
+    cache = run["path"] / "audit" / f"water_history_{every}_sam_{mask_tag()}.json"
     folders = sorted(path for path in (run["path"] / "joint/evaluation").glob("iteration_*")
                      if int(path.name[-6:]) % every == 0)
     if cache.is_file():
@@ -243,10 +252,10 @@ def water_history(run, every=1000):
             if regions is None:
                 continue
             alpha = np.load(path)["alpha"][..., 0]
-            values["water"].append(float((alpha[regions["water"]] > 0.5).mean()))
-            values["band"].append(float((alpha[regions["band"]] > 0.5).mean()))
-            values["seabed_band"].append(float((alpha[regions["seabed_band"]] > 0.99).mean()))
-        if values["water"]:
+            for key, threshold in (("water", 0.5), ("band", 0.5), ("seabed_band", 0.99)):
+                if regions[key].any():  # views without open water have no water or band
+                    values[key].append(float((alpha[regions[key]] > threshold).mean()))
+        if all(values.values()):
             rows.append(dict(iteration=int(folder.name[-6:]), **{k: float(np.mean(v)) for k, v in values.items()}))
     if rows:
         cache.parent.mkdir(exist_ok=True)
@@ -264,12 +273,13 @@ def alpha_coverage(folder):
         if regions is None:
             continue
         alpha = np.load(path)["alpha"][..., 0]
-        values["sam_water_gt_0.5"].append(float((alpha[regions["water"]] > 0.5).mean()))
-        values["sam_water_mean"].append(float(alpha[regions["water"]].mean()))
-        values["sam_seabed_gt_0.99"].append(float((alpha[regions["seabed"]] > 0.99).mean()))
-        values["sam_seabed_gt_0.5"].append(float((alpha[regions["seabed"]] > 0.5).mean()))
-        values["sam_band_water_gt_0.5"].append(float((alpha[regions["band"]] > 0.5).mean()))
-        values["sam_band_seabed_gt_0.99"].append(float((alpha[regions["seabed_band"]] > 0.99).mean()))
+        for key, region, threshold in (("sam_water_gt_0.5", "water", 0.5), ("sam_seabed_gt_0.99", "seabed", 0.99),
+                                       ("sam_seabed_gt_0.5", "seabed", 0.5), ("sam_band_water_gt_0.5", "band", 0.5),
+                                       ("sam_band_seabed_gt_0.99", "seabed_band", 0.99)):
+            if regions[region].any():  # views without open water have no water metrics
+                values[key].append(float((alpha[regions[region]] > threshold).mean()))
+        if regions["water"].any():
+            values["sam_water_mean"].append(float(alpha[regions["water"]].mean()))
         for low, high in SEABED_RINGS:
             ring = alpha[regions[f"seabed_{low}_{high}"]]
             if ring.size:
@@ -282,7 +292,7 @@ def mask_coverage(run):
     if "best_iteration" not in run:
         return {}
     folder = run["path"] / "joint/evaluation" / f"iteration_{run['best_iteration']:06d}"
-    cache = run["path"] / "audit" / f"mask_coverage_sam_rings_{run['best_iteration']:06d}.json"
+    cache = run["path"] / "audit" / f"mask_coverage_sam_{mask_tag()}_{run['best_iteration']:06d}.json"
     if cache.is_file():
         return json.loads(cache.read_text())
     result = alpha_coverage(folder) if folder.is_dir() else {}
@@ -714,7 +724,7 @@ def main():
                   note="Reguła wyboru dopuszcza spadek do −0,5 dB względem swojej bazy.")
         + bar_chart("Otwarta woda zajęta przez Gaussy: udział pikseli maski wody z α > 0,5 (best; im mniej, tym lepiej)",
                     [(r["name"], audit_value(r, "sam_water_gt_0.5")) for r in main_runs], 1, percent=True,
-                    note="Maska wody: segmentacja obrazów testowych SAM (configs/iui3_water_sam.npz), α z ewaluacji best.")
+                    note="Maska wody: segmentacja obrazów testowych SAM (configs/water_sam/), α z ewaluacji best.")
         + bar_chart("Pokrycie dna Gaussami: udział pikseli z α > 0,99 (best)",
                     [(r["name"], seabed_cover(r)) for r in main_runs], 1, percent=True,
                     note="Na całym dnie wg maski SAM; runy bez zapisanych map α: dolne 40% kadru z audytu.")

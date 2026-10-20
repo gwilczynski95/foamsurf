@@ -11,7 +11,7 @@ Writes <run>/audit/<checkpoint>.json (or --output-dir). Metrics (test views, eve
 - medium statistics near/far from the surface;
 - backscatter hue angle on seabed rays vs the open-water backscatter direction;
 - open water taken by Gaussians and seabed covered by them, on the water/seabed
-  segmentation of the test images (configs/iui3_water_sam.npz, scripts/sam_water_mask.py);
+  segmentation of the test images (configs/water_sam/<scene>.npz, scripts/sam_water_mask.py);
 - opaque seabed (alpha > 0.99 on the lower 40%) in the central half of the width vs the borders.
 Backscatter and the ablation use an independent ray-marcher (nearest-site lookup)
 validated against the native renderer; the validation error is reported.
@@ -36,15 +36,13 @@ from training.trainer import Trainer  # noqa: E402
 BOTTOM_FRACTION = 0.4
 NEAR_DISTANCE = 5.0
 FAR_DISTANCE = 10.0
-OPEN_WATER = ROOT / "configs/iui3_water_sam.npz"
+OPEN_WATER = ROOT / "configs/water_sam"
 
 
 def load_open_water(path):
-    """Per-view boolean open-water masks (full resolution), or {} when absent."""
-    if path is None or not Path(path).is_file():
-        return {}
-    with np.load(path) as data:
-        return {name: data[name] for name in data.files if name != "meta"}
+    """Per-view boolean open-water masks; see sam_water_mask.load_masks."""
+    from sam_water_mask import load_masks
+    return load_masks(path)
 
 
 def coverage_metrics(alpha, bottom_fraction, open_water=None):

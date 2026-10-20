@@ -63,3 +63,13 @@ def test_factor_chart_draws_points_for_psnr_and_bars_otherwise():
     assert bars.count('class="bar s') == 2 and 'class="dot' not in bars
     assert points.count('class="dot s') == 2 and 'class="bar' not in points
     assert "seedy: 29,10, 29,30" in points
+
+
+def test_sam_masks_show_only_the_scene_of_the_sweep():
+    import pytest
+    from sam_water_mask import DATASETS
+    dataset = Path(DATASETS) / "IUI3-RedSea-Undistorted"
+    if not dataset.is_dir():
+        pytest.skip("dataset not on this machine")
+    html = focus.sam_masks(str(dataset))
+    assert html.count('class="mask"') == 4 and "MTN_5894" in html and "MTN_1288" not in html

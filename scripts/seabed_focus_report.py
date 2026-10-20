@@ -4,7 +4,7 @@
 Usage: python scripts/seabed_focus_report.py --sweep outputs/iui3_medium_fix/<job> --baseline <variant>
        [--output report.html] [--top 3]
 
-Every water/seabed number uses the SAM masks of the test views (configs/iui3_water_sam.npz)
+Every water/seabed number uses the SAM masks of the test views (configs/water_sam/<scene>.npz)
 and the Gaussian-only alpha maps saved at each run's best iteration (see
 scripts/medium_fix_report.py, whose loaders and caches this script reuses). Variants are
 averaged over seeds. Factor charts expect the chroma / compensation naming of the
@@ -242,9 +242,11 @@ def visuals(entries, dataset):
 def sam_masks(dataset):
     from sam_water_mask import PROMPTS, overlay
     cells = []
-    for view, region in base.water_regions().items():
+    prompts = PROMPTS.get(Path(dataset).name, {})  # the masks of this sweep's scene
+    for view in prompts:
+        region = base.water_regions()[view]
         image = np.asarray(Image.open(Path(dataset) / "images" / f"{view}.png").convert("RGB"))
-        cells.append(f'<figure class="mask"><img loading="lazy" src="{thumbnail(overlay(image, region["water"], PROMPTS[view]), 520)}" '
+        cells.append(f'<figure class="mask"><img loading="lazy" src="{thumbnail(overlay(image, region["water"], prompts[view]), 520)}" '
                      f'alt="maska {view}"><figcaption>{view}: woda {100 * region["water"].mean():.1f}% kadru</figcaption></figure>')
     return "".join(cells)
 

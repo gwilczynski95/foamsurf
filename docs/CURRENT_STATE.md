@@ -21,7 +21,7 @@ Hybryda: Gaussy 3D (powierzchnia/dno) + medium w komórkach Voronoi (woda). Scen
 
 Wynik na IUI3 (2 seedy): best PSNR 29,32 dB, otwarta woda zajęta przez Gaussy 0,0%, dno 0–30 px od wody pokryte (α > 0,5) w 25%, 30–60 px w 64%, całe dno α > 0,99 w 70%; raport `outputs/iui3_medium_fix/report_542092_seabed_focus.html`.
 
-Inna scena: dodaj `--set warmup.dataset.source_path=<scena> --set joint.dataset.source_path=<scena>`. Maski woda/dno (SAM) są tylko dla widoków testowych IUI3 — na innych scenach audyt zwraca dla nich NaN.
+Inna scena: dodaj `--set warmup.dataset.source_path=<scena> --set joint.dataset.source_path=<scena>`. Maski woda/dno (SAM) są dla widoków testowych wszystkich czterech scen (`configs/water_sam/`); widoki bez otwartej wody mają metryki wody NaN.
 
 ~~~bash
 python train.py --config configs/iui3_default.yaml --output-dir outputs/<nazwa>
@@ -47,7 +47,7 @@ Sweepy: `scripts/sweep_medium_fix.sbatch` (składnia nazw wariantów w nagłówk
 - Domyślna konfiguracja + `scov 3e-3` + ok. 800k Gaussów: średnio **29,31 dB** PSNR test (WaterSplatting w artykule: ok. 29,3 dB; nasz pomiar WS: 29,93 dB, ok. 174 FPS na 4090).
 - Pruning dużych Gaussów daleko od kamer (`far_prune_*`) obniża PSNR i nie czyści wody — odrzucony (sweep 534880). Wodę czyści strata wodna, a granicę dna poprawia densyfikacja kompensowana tłumieniem (sweepy 541528 i 542092).
 - Problem otwarty: pas dna 0–30 px przy wodzie jest pokryty Gaussami tylko w ok. 25%.
-- Metryki wody i dna: maski SAM widoków testowych (`configs/iui3_water_sam.npz`, `scripts/sam_water_mask.py`); raport skupiony na dnie: `scripts/seabed_focus_report.py`.
+- Metryki wody i dna: maski SAM widoków testowych wszystkich czterech scen SeaThru (`configs/water_sam/<scena>.npz`, `scripts/sam_water_mask.py`; Panama MTN_1539 i MTN_1547 bez otwartej wody); raport skupiony na dnie: `scripts/seabed_focus_report.py`.
 - Raporty: `outputs/iui3_medium_fix/report_*.html`.
 
 ## Testy

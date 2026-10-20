@@ -125,7 +125,7 @@ def test_report_water_history_from_alpha_maps(tmp_path):
     assert [row["iteration"] for row in history] == [1000, 2000]  # every 1000 iterations
     assert history[0] == dict(iteration=1000, water=1.0, band=1.0, seabed_band=1.0)
     assert history[1] == dict(iteration=2000, water=0.0, band=0.0, seabed_band=0.0)
-    assert (run / "audit/water_history_1000_sam.json").is_file()
+    assert (run / f"audit/water_history_1000_sam_{report.mask_tag()}.json").is_file()
     assert report.water_history(dict(path=run)) == history  # cached
     regions = report.water_regions()[views[0]]
     assert not (regions["band"] & regions["seabed_band"]).any() and (regions["band"] <= regions["water"]).all()
@@ -179,7 +179,7 @@ def test_report_mask_coverage_at_best_iteration(tmp_path):
     coverage = report.mask_coverage(dict(path=run, best_iteration=2000))
     assert coverage["sam_water_gt_0.5"] == 0 and coverage["sam_seabed_gt_0.99"] == 1
     assert coverage["sam_band_water_gt_0.5"] == 0 and coverage["sam_band_seabed_gt_0.99"] == 1
-    assert (run / "audit/mask_coverage_sam_rings_002000.json").is_file()
+    assert (run / f"audit/mask_coverage_sam_{report.mask_tag()}_002000.json").is_file()
     assert coverage["sam_seabed_0_30_gt_0.5"] == 1 and coverage["sam_seabed_60_120_gt_0.5"] == 1
     assert report.mask_coverage(dict(path=run, best_iteration=3000)) == {}  # alpha maps not kept
     seen = dict(mask=coverage, best=dict(mean={"bottom_alpha_gt_0.99": 0.3}))
@@ -189,8 +189,8 @@ def test_report_mask_coverage_at_best_iteration(tmp_path):
 def test_sam_masks_cover_the_test_views():
     import medium_fix_report as report
     regions = report.water_regions()
-    assert sorted(regions) == ["MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928"]
-    for region in regions.values():
+    assert len(regions) == 13  # 4 IUI3 + 3 Curaçao + 3 JapaneseGradens + 3 Panama
+    for region in (regions[view] for view in ("MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928")):
         assert region["water"].shape == (917, 1383) and 0.2 < region["water"].mean() < 0.65
         assert region["water"][:50].mean() > 0.9  # the top rows are water in every view
         assert region["seabed"][-50:].mean() > 0.99  # the bottom rows are seabed

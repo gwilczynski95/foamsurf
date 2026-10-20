@@ -35,11 +35,11 @@ def test_open_water_share_taken_by_gaussians():
     assert row["open_water_alpha_mean"] == torch.tensor(0.2).item()
 
 
-def test_frozen_mask_covers_iui3_test_views(tmp_path):
+def test_audit_loads_the_masks_of_every_scene(tmp_path):
     masks = load_open_water(OPEN_WATER)
-    assert sorted(masks) == ["MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928"]
-    for mask in masks.values():
-        assert mask.dtype == bool and mask.shape == (917, 1383) and 0.1 < mask.mean() < 0.9
+    assert {"MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928", "MTN_1288", "MTN_1090", "MTN_1529"} <= set(masks)
+    for view in ("MTN_5894", "MTN_5903", "MTN_5911", "MTN_5928"):
+        assert masks[view].dtype == bool and masks[view].shape == (917, 1383) and 0.1 < masks[view].mean() < 0.9
     assert load_open_water(tmp_path / "missing.npz") == {}
     path = tmp_path / "m.npz"
     np.savez(path, meta="{}", A=np.ones((2, 2), bool))
