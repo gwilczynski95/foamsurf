@@ -63,13 +63,20 @@ def segment(predictor, image, prompts):
     return clean(masks[best].astype(bool)), float(scores[best])
 
 
+def boundary(mask):
+    """Pixels where the mask changes from the pixel above or to the left (no wrap-around)."""
+    edge = np.zeros_like(mask)
+    edge[1:] |= mask[1:] != mask[:-1]
+    edge[:, 1:] |= mask[:, 1:] != mask[:, :-1]
+    return edge
+
+
 def overlay(image, mask, prompts):
     """Image with the water mask tinted and the prompt points drawn."""
     from PIL import ImageDraw
     tinted = image.astype(np.float32)
     tinted[mask] = 0.45 * tinted[mask] + 0.55 * np.array([255, 60, 60])
-    edge = mask ^ np.roll(mask, 1, 0) | mask ^ np.roll(mask, 1, 1)
-    tinted[edge] = (255, 255, 0)
+    tinted[boundary(mask)] = (255, 255, 0)
     picture = Image.fromarray(tinted.clip(0, 255).astype(np.uint8))
     draw = ImageDraw.Draw(picture)
     height, width = mask.shape
