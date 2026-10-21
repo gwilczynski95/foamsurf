@@ -27,6 +27,11 @@
 # Seed 42 on every scene for SH / capacity / resolution-scaled densification (20 tasks; the
 # control is the default run of the 'default' set):
 #   FS_VARIANT_SET=sh sbatch --array=0-19%7 scripts/train_seathru.sbatch
+# _opt = 3DGS optimiser (Adam eps 1e-15, scales LR 0.005, quaternions LR 0.001, no scale
+# regularisation), _rel = WaterSplatting loss (L1 and SSIM divided by the detached prediction),
+# _noreg = no regularisers on the Gaussians (water clearing, seabed coverage, opacity binarisation).
+# Towards WaterSplatting on SH + resolution-scaled densification, seeds 42 and 43 (40 tasks):
+#   FS_VARIANT_SET=ws sbatch --array=0-39%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -53,6 +58,9 @@ case "${FS_VARIANT_SET:-default}" in
   sh)
     VARIANTS=(_sh3 _g1200k _dres _sh3_g1200k _sh3_g1200k_dres)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42" ;;
+  ws)
+    VARIANTS=(_sh3_dres _sh3_dres_opt _sh3_dres_rel _sh3_dres_opt_rel _sh3_dres_opt_rel_noreg)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
 read -r -a SCENES <<< "${FS_SCENES:-$DEFAULT_SCENES}"
@@ -75,6 +83,19 @@ variant_overrides() {
       echo "joint.optimization.gaussian_sh_degree_interval=1000"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_g([0-9]+)k(.*)$ ]]; then
       echo "joint.gaussian_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_opt(.*)$ ]]; then
+      echo "joint.optimization.gaussian_adam_eps=1.0e-15"
+      echo "joint.optimization.gaussian_scales_lr=0.005"
+      echo "joint.optimization.gaussian_scales_lr_final=0.005"
+      echo "joint.optimization.gaussian_quaternions_lr=0.001"
+      echo "joint.optimization.gaussian_quaternions_lr_final=0.001"
+      echo "joint.optimization.gaussian_scale_regularization=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_rel(.*)$ ]]; then
+      echo "joint.optimization.reconstruction_loss=reg_l1_reg_dssim"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_noreg(.*)$ ]]; then
+      echo "medium_fix.water_clear_weight=0.0"
+      echo "medium_fix.surface_coverage_weight=0.0"
+      echo "joint.disentanglement.opacity_binarization_weight=0.0"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_dres(.*)$ ]]; then
       echo "joint.gaussian_adaptation.gradient_threshold_reference_width=1383"; rest=${BASH_REMATCH[1]}
     else
