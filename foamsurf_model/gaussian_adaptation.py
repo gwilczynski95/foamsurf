@@ -57,6 +57,8 @@ def scheduled_opacity_threshold(
     iteration: int,
 ) -> float:
     """Return the opacity-pruning threshold at a given iteration."""
+    if config.min_opacity_late is not None and iteration >= config.min_opacity_late_from:
+        return float(config.min_opacity_late)
     initial = (
         config.min_opacity
         if config.min_opacity_initial is None

@@ -30,6 +30,9 @@
 # _opt = 3DGS optimiser (Adam eps 1e-15, scales LR 0.005, quaternions LR 0.001, no scale
 # regularisation), _rel = WaterSplatting loss (L1 and SSIM divided by the detached prediction),
 # _noreg = no regularisers on the Gaussians (water clearing, seabed coverage, opacity binarisation).
+# _wsop = WaterSplatting opacity schedule (reset to 0.5 every 500 and cull below 0.5 until 10000,
+# then below 0.1 every 100; densify until 10000), _c2f = coarse-to-fine resolution (1/4, 1/2, full
+# from 6000).
 # Towards WaterSplatting on SH + resolution-scaled densification, seeds 42 and 43 (40 tasks):
 #   FS_VARIANT_SET=ws sbatch --array=0-39%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
@@ -96,6 +99,20 @@ variant_overrides() {
       echo "medium_fix.water_clear_weight=0.0"
       echo "medium_fix.surface_coverage_weight=0.0"
       echo "joint.disentanglement.opacity_binarization_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wsop(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.densify_until=10000"
+      echo "joint.gaussian_adaptation.opacity_reset_interval=500"
+      echo "joint.gaussian_adaptation.opacity_reset_value=0.5"
+      echo "joint.gaussian_adaptation.min_opacity=0.5"
+      echo "joint.gaussian_adaptation.min_opacity_initial=0.5"
+      echo "joint.gaussian_adaptation.opacity_prune_ramp=0"
+      echo "joint.gaussian_adaptation.min_opacity_late=0.1"
+      echo "joint.gaussian_adaptation.min_opacity_late_from=10000"
+      echo "joint.gaussian_adaptation.opacity_prune_interval=100"
+      echo "joint.gaussian_adaptation.max_opacity_prune_fraction=1.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_c2f(.*)$ ]]; then
+      echo "joint.optimization.training_downscale_levels=2"
+      echo "joint.optimization.training_downscale_interval=3000"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_dres(.*)$ ]]; then
       echo "joint.gaussian_adaptation.gradient_threshold_reference_width=1383"; rest=${BASH_REMATCH[1]}
     else

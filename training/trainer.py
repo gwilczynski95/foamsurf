@@ -67,6 +67,12 @@ def training_source(config: ExperimentConfig) -> str:
     return selected
 
 
+def training_downscale(optimization, iteration: int) -> int:
+    """1, or 2^k while coarse-to-fine training is still below full resolution."""
+    levels = optimization.training_downscale_levels
+    return 2 ** max(levels - iteration // optimization.training_downscale_interval, 0) if levels else 1
+
+
 class Trainer:
     """End-to-end B0 trainer: joint optimization with RGB MSE only."""
 
@@ -665,6 +671,7 @@ class Trainer:
 
         torch.cuda.synchronize()
         started = time.perf_counter()
+        self.sampler.downscale = training_downscale(self.config.optimization, iteration)
         batch = self.sampler.next()
         collect_gaussian = (
             gaussian_trainable
@@ -727,7 +734,7 @@ class Trainer:
             render.image, batch.target,
             mode=self.config.optimization.reconstruction_loss,
             dssim_weight=self.config.optimization.dssim_weight,
-            image_size=(batch.camera.height, batch.camera.width),
+            image_size=batch.image_size or (batch.camera.height, batch.camera.width),
         )
         scale_weight = self.config.optimization.gaussian_scale_regularization
         if self.uses_gaussians and scale_weight > 0.0:

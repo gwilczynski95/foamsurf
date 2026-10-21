@@ -117,6 +117,10 @@ class OptimizationConfig:
     iterations: int = 35_000
     rays_per_batch: int = 65_536
     full_image_batch: bool = False
+    # Coarse-to-fine (WaterSplatting: 2 levels every 3000 steps = 1/4, 1/2, then full
+    # resolution from 6000): downscale 2^max(levels - iteration // interval, 0).
+    training_downscale_levels: int = 0
+    training_downscale_interval: int = 3000
     cameras_without_replacement: bool = False
     reconstruction_loss: str = "mse"
     dssim_weight: float = 0.2
@@ -213,6 +217,10 @@ class GaussianAdaptationConfig:
     gradient_threshold: float = 2.0e-4
     min_opacity: float = 0.005
     min_opacity_initial: float | None = None
+    # A second, usually lower threshold from min_opacity_late_from on (WaterSplatting:
+    # 0.5 while densifying, 0.1 from 10000). None: min_opacity throughout.
+    min_opacity_late: float | None = None
+    min_opacity_late_from: int = 10000
     opacity_prune_from: int = 500
     opacity_prune_ramp: int = 0
     opacity_prune_ramp_shape: str = "linear"
@@ -541,6 +549,11 @@ class ExperimentConfig:
             raise ValueError("gaussian_sh_degree_interval must be non-negative")
         if self.optimization.gaussian_freeze_until < 0:
             raise ValueError("gaussian_freeze_until must be non-negative")
+        levels, interval = self.optimization.training_downscale_levels, self.optimization.training_downscale_interval
+        if type(levels) is not int or levels < 0 or type(interval) is not int or interval < 1:
+            raise ValueError("training_downscale_levels must be >= 0 and training_downscale_interval >= 1")
+        if levels and not self.optimization.full_image_batch:
+            raise ValueError("training_downscale_levels requires full_image_batch")
         if self.optimization.gaussian_adam_eps <= 0:
             raise ValueError("gaussian_adam_eps must be positive")
         if self.optimization.gaussian_scale_regularization < 0:
@@ -685,6 +698,9 @@ class ExperimentConfig:
             raise ValueError(
                 "gaussian_adaptation.size_prune_from must be non-negative"
             )
+        late = adaptation.min_opacity_late
+        if late is not None and not 0.0 <= late < 1.0:
+            raise ValueError("gaussian_adaptation.min_opacity_late must be in [0, 1)")
         if adaptation.opacity_prune_from < 0:
             raise ValueError(
                 "gaussian_adaptation.opacity_prune_from must be non-negative"
