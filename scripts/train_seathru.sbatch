@@ -45,12 +45,19 @@
 # scale regularisation, no attenuation-compensated densification; pruning and densification as is.
 # Plain baseline on every scene, seeds 42 and 43 (8 tasks):
 #   FS_VARIANT_SET=plain sbatch --array=0-7%7 scripts/train_seathru.sbatch
+# _gonly = Gaussians alone (representation_mode=gaussian_only, no medium; needs _plain). Is our Gaussian
+# part as good as 2DGS/3DGS? Mip-NeRF 360 garden and bicycle (images_4, as 2DGS/3DGS) and Panama,
+# seeds 42 and 43, SH degree 3, no 700k cap (_g6000k) (6 tasks):
+#   FS_VARIANT_SET=gonly sbatch --array=0-5%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
 FS_ENV=/shared/results/gmwilczn/conda/envs/foamsurf
 DRIVER=/shared/results/gmwilczn/drivers/NVIDIA-Linux-x86_64-535.183.01
 DATASETS=/shared/sets/datasets/SeathruNeRF_dataset
+# Mip-NeRF 360 outdoor scenes, trained on images_4 like 3DGS and 2DGS.
+MIPNERF=/shared/sets/datasets/mipnerf_ds
+MIPNERF_OUTDOOR=" bicycle flowers garden stump treehill "
 export PATH="$FS_ENV/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CUDA_HOME="$FS_ENV"
 export FOAMSURF_DRIVER_LIBRARY_DIRECTORY="$DRIVER"
@@ -74,6 +81,9 @@ case "${FS_VARIANT_SET:-default}" in
   ws)
     VARIANTS=(_sh3_dres _sh3_dres_opt _sh3_dres_rel _sh3_dres_opt_rel _sh3_dres_opt_rel_noreg)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  gonly)
+    VARIANTS=(_plain_sh3_g6000k_gonly)
+    DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
   plain)
     VARIANTS=(_plain)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
@@ -143,6 +153,9 @@ variant_overrides() {
       echo "capacity_loss.direct_weight=0.0"
       echo "joint.optimization.gaussian_scale_regularization=0.0"
       echo "joint.gaussian_adaptation.gradient_attenuation_compensation=false"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_gonly(.*)$ ]]; then
+      echo "joint.representation_mode=gaussian_only"
+      echo "joint.voronoi_adaptation.enabled=false"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_abs([0-9]+)(.*)$ ]]; then
       echo "joint.gaussian_adaptation.absolute_gradient=true"
       echo "joint.gaussian_adaptation.gradient_threshold=${BASH_REMATCH[1]}.0e-4"; rest=${BASH_REMATCH[2]}
@@ -161,10 +174,15 @@ PER_SCENE=$(( ${#VARIANTS[@]} * ${#SEEDS[@]} ))
 SCENE=${SCENES[TASK / PER_SCENE]}
 VARIANT=${VARIANTS[(TASK % PER_SCENE) / ${#SEEDS[@]}]}
 SEED=${SEEDS[TASK % ${#SEEDS[@]}]}
-[[ -d "$DATASETS/$SCENE" ]] || { echo "Missing dataset $DATASETS/$SCENE" >&2; exit 2; }
+SOURCE="$DATASETS/$SCENE"
+[[ "$MIPNERF_OUTDOOR" == *" $SCENE "* ]] && SOURCE="$MIPNERF/$SCENE"
+[[ -d "$SOURCE" ]] || { echo "Missing dataset $SOURCE" >&2; exit 2; }
 variant_overrides "$VARIANT" > /dev/null  # fail loudly on an unknown suffix
 OVERRIDES=()
 mapfile -t OVERRIDES < <(variant_overrides "$VARIANT")
+if [[ "$SOURCE" == "$MIPNERF/"* ]]; then
+  OVERRIDES+=("warmup.dataset.resolution=4" "joint.dataset.resolution=4")
+fi
 NAME="${SCENE}${VARIANT}"
 [[ "$SEED" == 42 ]] || NAME="${NAME}_seed${SEED}"
 
@@ -183,8 +201,8 @@ ARGS=(
   --config "${FS_CONFIG:-configs/iui3_default.yaml}"
   --output-dir "$OUTPUT"
   --run-suffix "$NAME"
-  --set "warmup.dataset.source_path=$DATASETS/$SCENE"
-  --set "joint.dataset.source_path=$DATASETS/$SCENE"
+  --set "warmup.dataset.source_path=$SOURCE"
+  --set "joint.dataset.source_path=$SOURCE"
   --set "variant.seed=$SEED" --set "warmup.seed=$SEED" --set "joint.seed=$SEED"
 )
 for item in "${OVERRIDES[@]}"; do ARGS+=(--set "$item"); done
@@ -198,6 +216,9 @@ if [[ "${FS_DRY_RUN:-0}" == 1 ]]; then
   exit 0
 fi
 python train.py "${ARGS[@]}"
-for checkpoint in best last; do
-  python scripts/medium_audit.py --run "$OUTPUT" --checkpoint "$checkpoint"
-done
+# The medium audit needs the medium and the SAM masks of the SeaThru test views.
+if [[ "$VARIANT" != *_gonly* && "$SOURCE" == "$DATASETS/"* ]]; then
+  for checkpoint in best last; do
+    python scripts/medium_audit.py --run "$OUTPUT" --checkpoint "$checkpoint"
+  done
+fi

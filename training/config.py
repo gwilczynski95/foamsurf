@@ -422,7 +422,9 @@ class ExperimentConfig:
                 "gaussian_only": "lego",
                 "voronoi_only": "clouds",
             }[self.representation_mode]
-            if self.dataset.train_target != expected_target:
+            # Gaussians alone may also fit the whole photo (real scenes have no layer ground truth).
+            whole_photo = self.representation_mode == "gaussian_only" and self.dataset.train_target == "both"
+            if self.dataset.train_target != expected_target and not whole_photo:
                 raise ValueError(
                     f"{self.representation_mode} requires "
                     f"dataset.train_target={expected_target}"

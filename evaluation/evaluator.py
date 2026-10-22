@@ -143,6 +143,8 @@ class Evaluator:
         directory.mkdir(parents=True, exist_ok=True)
 
         medium_scene = self.model.medium.render_scene()
+        # gaussian_only never trains the medium: the main ("hybrid") image is the Gaussians alone.
+        hybrid_medium = None if self.config.representation_mode == "gaussian_only" else medium_scene
         self.topology.synchronize_renderer(
             self.renderer, self.model.medium
         )
@@ -176,7 +178,7 @@ class Evaluator:
                     lambda: self.renderer.render(
                         rays,
                         gaussians=gaussian_scene,
-                        voronoi=medium_scene,
+                        voronoi=hybrid_medium,
                         background=tuple(self.config.background),
                     )
                 )
@@ -187,7 +189,7 @@ class Evaluator:
                         lambda: self.renderer.render(
                             rays,
                             gaussians=gaussian_scene,
-                            voronoi=medium_scene,
+                            voronoi=hybrid_medium,
                             background=tuple(self.config.background),
                             collect_diagnostics=True,
                             diagnostic_target=target,

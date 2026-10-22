@@ -99,8 +99,12 @@ class SmoothJointTrainer(ColmapJointTrainer):
             saved=json.loads(Path(self.resume_path).with_suffix('.smooth.json').read_text())
             if saved!=self.smoothing.as_dict():raise ValueError('Resume smoothing settings mismatch')
         original=self.disentanglement.compute
+        if not self.uses_voronoi and any(self.smoothing.as_dict()[k] for k in ('attenuation','backscatter','color')):
+            raise ValueError('Medium smoothing needs the medium (representation_mode=gaussian_only)')
         def compute(iteration,model,topology,*args,**kwargs):
             result=original(iteration,model,topology,*args,**kwargs)
+            if not self.uses_voronoi:
+                return result
             key=(topology.revision,topology.adjacency.data_ptr(),topology.offsets.data_ptr(),model.medium.point_count)
             if key!=self._smooth_edge_key:
                 self._smooth_edges=undirected_edges(topology.adjacency,topology.offsets,model.medium.point_count)
@@ -136,6 +140,8 @@ class SurfaceTrainer(SmoothJointTrainer):
         if self.resume_path is not None:
             if json.loads(Path(self.resume_path).with_suffix('.surface.json').read_text()) != self.surface.as_dict():
                 raise ValueError('Resume overlap settings mismatch')
+        if not self.uses_voronoi and self.surface.weight:
+            raise ValueError('Medium/surface overlap needs the medium (representation_mode=gaussian_only)')
         native_render = self.renderer.render
 
         def capture(rays, *a, **kw):
@@ -149,6 +155,8 @@ class SurfaceTrainer(SmoothJointTrainer):
 
         def compute(iteration, model, topology, *a, **kw):
             result = compute_base(iteration, model, topology, *a, **kw)
+            if not self.uses_voronoi:
+                return result
             if self._captured_surface is None:
                 raise RuntimeError('No hybrid training render captured')
             extra, logs = self._overlap.compute(native_render, *self._captured_surface,
@@ -302,6 +310,10 @@ class MediumFixTrainer(CapacityTrainer):
         self.water_metrics = ({name: float("nan") for name in WATER_METRICS}
                               if self.medium_fix.water_clear_weight > 0 else {})
         super().__init__(config, *args, **kwargs)
+        if not self.uses_voronoi and (self.medium_fix.chroma_weight or self.medium_fix.surface_coverage_weight
+                                      or self.medium_fix.water_clear_weight or self.medium_fix.under_surface_weight
+                                      or self.capacity.repulsion_weight or self.capacity.direct_weight):
+            raise ValueError("Medium priors and capacity losses need the medium (representation_mode=gaussian_only)")
         if self.medium_fix.chroma_weight > 0 and not self.model.medium.is_rgb:
             raise ValueError("Backscatter chroma prior requires the RGB medium")
         if self.resume_path is not None:
