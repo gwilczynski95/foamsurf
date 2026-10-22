@@ -254,7 +254,7 @@ class _RgbCudaFunction(torch.autograd.Function):
             *ctx.settings,
             *ctx.screen,
         )
-        del ctx.bindings, ctx.screen
+        # ctx.bindings / ctx.screen stay: backward may run again (retain_graph).
         return (
             None,
             *gradients[:4],
