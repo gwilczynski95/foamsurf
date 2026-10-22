@@ -327,11 +327,12 @@ class Evaluator:
                         gaussian_statistics[:, 3],
                         diagnostics.gaussian[:, 3],
                     )
-                    medium_statistics[:, :4] += diagnostics.medium[:, :4]
-                    medium_statistics[:, 4] = torch.maximum(
-                        medium_statistics[:, 4],
-                        diagnostics.medium[:, 4],
-                    )
+                    if hybrid_medium is not None:  # gaussian_only renders no cells
+                        medium_statistics[:, :4] += diagnostics.medium[:, :4]
+                        medium_statistics[:, 4] = torch.maximum(
+                            medium_statistics[:, 4],
+                            diagnostics.medium[:, 4],
+                        )
                     gaussian_weight = diagnostics.gaussian_weight
                     medium_weight = diagnostics.medium_weight
                     total_weight = gaussian_weight + medium_weight
