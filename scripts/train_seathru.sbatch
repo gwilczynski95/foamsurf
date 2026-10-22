@@ -40,6 +40,11 @@
 # Absolute-gradient densification on the default config, seeds 42 and 43 (24 tasks; the control is
 # the 'default' set):
 #   FS_VARIANT_SET=abs sbatch --array=0-23%7 scripts/train_seathru.sbatch
+# _plain = plain baseline: only 0.8 L1 + 0.2 D-SSIM. No medium priors (chroma, seabed coverage, water
+# clearing), no opacity binarisation, no medium/surface overlap, no Voronoi smoothing, no Gaussian
+# scale regularisation, no attenuation-compensated densification; pruning and densification as is.
+# Plain baseline on every scene, seeds 42 and 43 (8 tasks):
+#   FS_VARIANT_SET=plain sbatch --array=0-7%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -68,6 +73,9 @@ case "${FS_VARIANT_SET:-default}" in
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42" ;;
   ws)
     VARIANTS=(_sh3_dres _sh3_dres_opt _sh3_dres_rel _sh3_dres_opt_rel _sh3_dres_opt_rel_noreg)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  plain)
+    VARIANTS=(_plain)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   abs)
     VARIANTS=(_abs8 _abs8_g1200k _abs6_g1200k)
@@ -121,6 +129,20 @@ variant_overrides() {
     elif [[ "$rest" =~ ^_c2f(.*)$ ]]; then
       echo "joint.optimization.training_downscale_levels=2"
       echo "joint.optimization.training_downscale_interval=3000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_plain(.*)$ ]]; then
+      echo "medium_fix.chroma_weight=0.0"
+      echo "medium_fix.surface_coverage_weight=0.0"
+      echo "medium_fix.water_clear_weight=0.0"
+      echo "medium_fix.under_surface_weight=0.0"
+      echo "joint.disentanglement.opacity_binarization_weight=0.0"
+      echo "rgb_surface.weight=0.0"
+      echo "rgb_smoothing.attenuation=0.0"
+      echo "rgb_smoothing.backscatter=0.0"
+      echo "rgb_smoothing.color=0.0"
+      echo "capacity_loss.repulsion_weight=0.0"
+      echo "capacity_loss.direct_weight=0.0"
+      echo "joint.optimization.gaussian_scale_regularization=0.0"
+      echo "joint.gaussian_adaptation.gradient_attenuation_compensation=false"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_abs([0-9]+)(.*)$ ]]; then
       echo "joint.gaussian_adaptation.absolute_gradient=true"
       echo "joint.gaussian_adaptation.gradient_threshold=${BASH_REMATCH[1]}.0e-4"; rest=${BASH_REMATCH[2]}
