@@ -130,6 +130,10 @@ struct RgbGradientTensors {
     float *gaussian_colors;
     float *opacity_logits;
     float *raw_kappa;
+    // Optional (nullptr = off): camera right/down [2,3] and the per-Gaussian
+    // sum over rays of |dL/dmean . right|, |dL/dmean . down| [N,2].
+    const float *screen_axes = nullptr;
+    float *means_screen_abs = nullptr;
 };
 
 void rgb_forward_cuda(

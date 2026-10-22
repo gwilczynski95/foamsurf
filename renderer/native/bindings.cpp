@@ -410,8 +410,12 @@ py::tuple rgb_backward(TensorList values,
                        float near_plane,
                        float far_plane,
                        float threshold,
-                       uint32_t max_intersections) {
+                       uint32_t max_intersections,
+                       c10::optional<torch::Tensor> screen_axes,
+                       c10::optional<torch::Tensor> means_screen_abs) {
     validate_rgb_inputs(values);
+    TORCH_CHECK(screen_axes.has_value() == means_screen_abs.has_value(),
+                "screen_axes and means_screen_abs go together");
     TORCH_CHECK(outputs.size() == 3 && output_grads.size() == 3,
                 "outputs and output_grads must be (direct, backscatter, "
                 "transmission)");
@@ -446,6 +450,20 @@ py::tuple rgb_backward(TensorList values,
         gradients[4].data_ptr<float>(), gradients[5].data_ptr<float>(),
         gradients[6].data_ptr<float>(), gradients[7].data_ptr<float>(),
         gradients[8].data_ptr<float>(), gradients[9].data_ptr<float>()};
+    if (means_screen_abs.has_value()) {
+        // Written in place: the caller owns and zeroes the [N,2] buffer.
+        require_float_cuda(*screen_axes, "screen_axes");
+        require_float_cuda(*means_screen_abs, "means_screen_abs");
+        TORCH_CHECK(screen_axes->is_contiguous() && screen_axes->numel() == 6,
+                    "screen_axes must be a contiguous [2,3] tensor");
+        TORCH_CHECK(means_screen_abs->is_contiguous() &&
+                        means_screen_abs->dim() == 2 &&
+                        means_screen_abs->size(0) == values[10].size(0) &&
+                        means_screen_abs->size(1) == 2,
+                    "means_screen_abs must be a contiguous [N,2] tensor");
+        gradient_pointers.screen_axes = screen_axes->data_ptr<float>();
+        gradient_pointers.means_screen_abs = means_screen_abs->data_ptr<float>();
+    }
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     foamsurf::rgb_backward_cuda(settings,
                                 rgb_scene(values),
@@ -511,7 +529,9 @@ void init_hybrid_bindings(py::module &module) {
                py::arg("near_plane"),
                py::arg("far_plane"),
                py::arg("threshold") = 0.001f,
-               py::arg("max_intersections") = 1024);
+               py::arg("max_intersections") = 1024,
+               py::arg("screen_axes") = py::none(),
+               py::arg("means_screen_abs") = py::none());
 }
 
 } // namespace foamsurf_bindings

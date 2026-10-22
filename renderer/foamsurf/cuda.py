@@ -211,6 +211,8 @@ class _RgbCudaFunction(torch.autograd.Function):
         far_plane,
         threshold,
         max_intersections,
+        screen_axes=None,
+        means_screen_abs=None,
     ):
         tensors = (
             points,
@@ -236,6 +238,8 @@ class _RgbCudaFunction(torch.autograd.Function):
         )
         ctx.bindings = bindings
         ctx.settings = (near_plane, far_plane, threshold, max_intersections)
+        # Not saved tensors: backward adds into the caller's buffer in place.
+        ctx.screen = (screen_axes, means_screen_abs)
         ctx.save_for_backward(*tensors, direct, scattered, transmission)
         ctx.mark_non_differentiable(num_intersections)
         return direct, scattered, transmission, num_intersections
@@ -248,8 +252,9 @@ class _RgbCudaFunction(torch.autograd.Function):
             [direct, scattered, transmission],
             [direct_gradient, scattered_gradient, transmission_gradient],
             *ctx.settings,
+            *ctx.screen,
         )
-        del ctx.bindings
+        del ctx.bindings, ctx.screen
         return (
             None,
             *gradients[:4],
@@ -260,6 +265,8 @@ class _RgbCudaFunction(torch.autograd.Function):
             None,
             None,
             *gradients[4:],
+            None,
+            None,
             None,
             None,
             None,
@@ -468,7 +475,11 @@ class NativeHybridRenderer:
         start_points: torch.Tensor | None = None,
         collect_diagnostics: bool = False,
         diagnostic_target: torch.Tensor | None = None,
+        screen_absolute: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> NativeHybridRender:
+        """screen_absolute=(axes [2,3] camera right/down, buffer [N,2] zeros):
+        backward adds sum over rays of |dL/dmean . axis| into buffer (AbsGS).
+        Needs an RGB medium and the fused backend."""
         if gaussians is None and voronoi is None:
             raise ValueError("at least one representation must be provided")
         if rays.shape[-1] != 6:
@@ -579,12 +590,24 @@ class NativeHybridRenderer:
 
         compositor = _HybridCudaFunction.apply
         rgb_parts = None
+        if screen_absolute is not None and (
+            not isinstance(voronoi, RGBVoronoiScene) or self.rgb_medium_backend != "fused"
+        ):
+            raise ValueError("screen_absolute needs an RGB medium and the fused backend")
         if isinstance(voronoi, RGBVoronoiScene):
             from .rgb_medium import compose_cuda, compose_fused
             if self.rgb_medium_backend == "six_pass":
                 compose, apply = compose_cuda, _HybridCudaFunction.apply
-            else:
+            elif screen_absolute is None:
                 compose, apply = compose_fused, _RgbCudaFunction.apply
+            else:
+                axes, buffer = screen_absolute
+                if axes.shape != (2, 3) or buffer.shape != (means.size(0), 2):
+                    raise ValueError("screen_absolute must be ([2,3] axes, [N,2] buffer)")
+                axes = axes.contiguous()
+                compose = compose_fused
+                def apply(*args):
+                    return _RgbCudaFunction.apply(*args, axes, buffer)
             def compositor(*args):
                 nonlocal rgb_parts
                 rgba_out, counts, rgb_parts = compose(

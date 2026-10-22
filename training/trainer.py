@@ -694,6 +694,14 @@ class Trainer:
         medium_scene = self.model.medium.render_scene() if self.uses_voronoi else None
         rays = torch.cat((batch.rays.origins, batch.rays.directions), dim=-1).contiguous()
 
+        screen_absolute = None
+        if collect_gaussian and self.config.gaussian_adaptation.absolute_gradient:
+            camera = batch.camera
+            screen_absolute = (
+                torch.stack((camera.right, camera.down)).to(rays),
+                rays.new_zeros((self.model.gaussians.point_count, 2)),
+            )
+
         self.gaussian_optimizer.zero_grad(set_to_none=True)
         self.medium_optimizer.zero_grad(set_to_none=True)
         render = self.renderer.render(
@@ -701,6 +709,7 @@ class Trainer:
             background=tuple(self.config.background),
             collect_diagnostics=collect_any,
             diagnostic_target=batch.target if collect_any else None,
+            screen_absolute=screen_absolute,
         )
         if (
             render.hit_indices.numel()
@@ -764,8 +773,12 @@ class Trainer:
         if collect_gaussian:
             if self.config.gaussian_adaptation.gradient_attenuation_compensation:
                 self.gaussian_adaptation.medium_attenuation = self._water_attenuation()
+            screen_gradient = screen_points.grad
+            if screen_absolute is not None:
+                # Same chain rule as screen_points: d offset / d screen = scale * axis.
+                screen_gradient = screen_absolute[1] * self.model.gaussians.world_per_viewport(batch.camera).abs()
             self.gaussian_adaptation.collect_statistics(
-                screen_points.grad, render.diagnostics.gaussian, batch.camera
+                screen_gradient, render.diagnostics.gaussian, batch.camera
             )
         if collect_voronoi:
             self.voronoi_adaptation.collect_statistics(render.diagnostics.medium)

@@ -1481,7 +1481,10 @@ __device__ inline void accumulate_gaussian_geometry_reverse(
     float *log_scales_grad,
     float *quaternions_grad,
     float *opacity_logits_grad,
-    float *raw_kappa_grad) {
+    float *raw_kappa_grad,
+    Vec3 screen_right,
+    Vec3 screen_down,
+    float *means_screen_abs) {
     Vec3 mean = make_vec3(means + 3 * index);
     const float *q = quaternions + 4 * index;
     float w = q[0], x = q[1], y = q[2], z = q[3];
@@ -1580,6 +1583,14 @@ __device__ inline void accumulate_gaussian_geometry_reverse(
     float raw_kappa_gradient = kappa_gradient * exp_raw * (1.0f / (1.0f + exp_raw));
 
     atomic_add_vec3(means_grad + 3 * index, mean_gradient);
+    if (means_screen_abs != nullptr) {
+        // Absolute per-ray gradient along the screen axes (AbsGS): opposite
+        // signs from different pixels do not cancel.
+        atomicAdd(means_screen_abs + 2 * index,
+                  fabsf(dot(mean_gradient, screen_right)));
+        atomicAdd(means_screen_abs + 2 * index + 1,
+                  fabsf(dot(mean_gradient, screen_down)));
+    }
     atomicAdd(log_scales_grad + 2 * index, log_scale_x_gradient);
     atomicAdd(log_scales_grad + 2 * index + 1, log_scale_y_gradient);
     atomicAdd(quaternions_grad + 4 * index, w_gradient);
@@ -1729,7 +1740,10 @@ __device__ inline void flush_endpoint(PendingEndpoint &pending,
                                       float *log_scales_grad,
                                       float *quaternions_grad,
                                       float *opacity_logits_grad,
-                                      float *raw_kappa_grad) {
+                                      float *raw_kappa_grad,
+                                      Vec3 screen_right,
+                                      Vec3 screen_down,
+                                      float *means_screen_abs) {
     const EndpointOwner &owner = pending.owner;
     if (owner.type == OwnerType::Gaussian) {
         accumulate_gaussian_geometry_reverse(owner.gaussian,
@@ -1747,7 +1761,10 @@ __device__ inline void flush_endpoint(PendingEndpoint &pending,
                                      log_scales_grad,
                                      quaternions_grad,
                                      opacity_logits_grad,
-                                     raw_kappa_grad);
+                                     raw_kappa_grad,
+                                     screen_right,
+                                     screen_down,
+                                     means_screen_abs);
     } else if (owner.type == OwnerType::Boundary &&
                pending.depth_coefficient != 0.0f) {
         Vec3 first = make_vec3(points + 3 * owner.first);
@@ -1802,13 +1819,21 @@ __global__ void rgb_backward_kernel(
     float *quaternions_grad,
     float *gaussian_colors_grad,
     float *opacity_logits_grad,
-    float *raw_kappa_grad) {
+    float *raw_kappa_grad,
+    const float *screen_axes,
+    float *means_screen_abs) {
     uint32_t ray_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (ray_index >= settings.num_rays) {
         return;
     }
     Vec3 origin = make_vec3(rays + 6 * ray_index);
     Vec3 direction = normalized(make_vec3(rays + 6 * ray_index + 3));
+    Vec3 screen_right = {0.0f, 0.0f, 0.0f};
+    Vec3 screen_down = {0.0f, 0.0f, 0.0f};
+    if (means_screen_abs != nullptr) {
+        screen_right = make_vec3(screen_axes);
+        screen_down = make_vec3(screen_axes + 3);
+    }
     RgbBackwardState state;
 #pragma unroll
     for (int channel = 0; channel < 3; ++channel) {
@@ -1855,7 +1880,8 @@ __global__ void rgb_backward_kernel(
     flush_endpoint(pending, carry, origin, direction, points, means,          \
                    log_scales, quaternions, opacity_logits, raw_kappa,         \
                    points_grad, means_grad, log_scales_grad, quaternions_grad, \
-                   opacity_logits_grad, raw_kappa_grad)
+                   opacity_logits_grad, raw_kappa_grad, screen_right,          \
+                   screen_down, means_screen_abs)
 
     while (!finished && cursor_depth < settings.far_plane && active &&
            steps < settings.max_intersections) {
@@ -2252,7 +2278,9 @@ void rgb_backward_cuda(
         gradients.quaternions,
         gradients.gaussian_colors,
         gradients.opacity_logits,
-        gradients.raw_kappa);
+        gradients.raw_kappa,
+        gradients.screen_axes,
+        gradients.means_screen_abs);
 }
 
 } // namespace foamsurf

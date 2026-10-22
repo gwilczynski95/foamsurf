@@ -197,27 +197,26 @@ class SurfaceGaussianModel(nn.Module):
             device=self.means.device,
             requires_grad=True,
         )
-        depth = (
-            (self.means.detach() - camera.origin) * camera.forward
-        ).sum(dim=-1)
-        x_world_per_viewport = depth * torch.tan(
-            self.means.new_tensor(0.5 * camera.fov_x)
-        )
-        y_world_per_viewport = depth * torch.tan(
-            self.means.new_tensor(0.5 * camera.fov_y)
-        )
+        world_per_viewport = self.world_per_viewport(camera)
         offsets = (
             screen_points[:, :1]
-            * x_world_per_viewport[:, None]
+            * world_per_viewport[:, :1]
             * camera.right[None]
             + screen_points[:, 1:]
-            * y_world_per_viewport[:, None]
+            * world_per_viewport[:, 1:]
             * camera.down[None]
         )
         return (
             self.render_scene(camera.origin, self.means + offsets),
             screen_points,
         )
+
+    @torch.no_grad()
+    def world_per_viewport(self, camera) -> torch.Tensor:
+        """[N,2] world offset along camera right/down per unit of screen_points."""
+        depth = ((self.means - camera.origin) * camera.forward).sum(dim=-1)
+        half_fov = self.means.new_tensor((0.5 * camera.fov_x, 0.5 * camera.fov_y))
+        return depth[:, None] * torch.tan(half_fov)[None]
 
     def named_primitive_parameters(self) -> dict[str, nn.Parameter]:
         return {

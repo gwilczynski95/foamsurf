@@ -35,6 +35,11 @@
 # from 6000).
 # Towards WaterSplatting on SH + resolution-scaled densification, seeds 42 and 43 (40 tasks):
 #   FS_VARIANT_SET=ws sbatch --array=0-39%7 scripts/train_seathru.sbatch
+# _abs<N> = absolute (AbsGS / WaterSplatting) densification gradient with threshold N x 1e-4
+# (plain gradient: 2e-4; WaterSplatting: abs 8e-4 = 4x its plain 2e-4).
+# Absolute-gradient densification on the default config, seeds 42 and 43 (24 tasks; the control is
+# the 'default' set):
+#   FS_VARIANT_SET=abs sbatch --array=0-23%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -63,6 +68,9 @@ case "${FS_VARIANT_SET:-default}" in
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42" ;;
   ws)
     VARIANTS=(_sh3_dres _sh3_dres_opt _sh3_dres_rel _sh3_dres_opt_rel _sh3_dres_opt_rel_noreg)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  abs)
+    VARIANTS=(_abs8 _abs8_g1200k _abs6_g1200k)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   *) echo "Unknown FS_VARIANT_SET: $FS_VARIANT_SET" >&2; exit 2 ;;
 esac
@@ -113,6 +121,9 @@ variant_overrides() {
     elif [[ "$rest" =~ ^_c2f(.*)$ ]]; then
       echo "joint.optimization.training_downscale_levels=2"
       echo "joint.optimization.training_downscale_interval=3000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_abs([0-9]+)(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.absolute_gradient=true"
+      echo "joint.gaussian_adaptation.gradient_threshold=${BASH_REMATCH[1]}.0e-4"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_dres(.*)$ ]]; then
       echo "joint.gaussian_adaptation.gradient_threshold_reference_width=1383"; rest=${BASH_REMATCH[1]}
     else

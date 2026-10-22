@@ -27,3 +27,5 @@ nvidia-smi --query-gpu=name --format=csv,noheader
 # Fail loudly if CUDA is missing: GPU tests would otherwise be skipped silently.
 python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"
 python -m pytest -q tests/ -rs
+# Renderer kernels (fused RGB vs six-pass and the autograd oracle).
+(cd renderer && python -m pytest -q tests/test_rgb_medium_renderer.py -rs)

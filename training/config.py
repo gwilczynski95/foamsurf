@@ -252,6 +252,10 @@ class GaussianAdaptationConfig:
     # threshold * reference / width (larger images densify more). None: as given.
     gradient_threshold_reference_width: int | None = None
     gradient_compensation_max: float = 20.0
+    # AbsGS / WaterSplatting: accumulate sum over pixels of |dL/dscreen| per axis
+    # instead of |sum over pixels|, so opposite pixel gradients do not cancel.
+    # Larger than the plain statistic: raise gradient_threshold (WS: 4x).
+    absolute_gradient: bool = False
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
@@ -801,6 +805,8 @@ class ExperimentConfig:
             raise ValueError("gaussian_adaptation.gradient_threshold_reference_width must be a positive integer")
         if not adaptation.gradient_compensation_max >= 1.0:
             raise ValueError("gaussian_adaptation.gradient_compensation_max must be at least 1")
+        if adaptation.absolute_gradient and self.model.medium_type != "rgb_backscatter":
+            raise ValueError("gaussian_adaptation.absolute_gradient needs model.medium_type=rgb_backscatter")
         medium_adaptation = self.voronoi_adaptation
         if medium_adaptation.enabled and self.representation_mode == "gaussian_only":
             raise ValueError("Voronoi adaptation cannot run in gaussian_only mode")
