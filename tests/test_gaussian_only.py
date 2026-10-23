@@ -52,6 +52,19 @@ def test_gonly_set_tasks_and_mipnerf_sources():
     assert "out of range" in dry_run(6).stderr  # 3 scenes x 2 seeds = tasks 0-5
 
 
+@pytest.mark.skipif(not (MIPNERF / "garden").is_dir(), reason="needs the Mip-NeRF 360 dataset")
+def test_sampler_keeps_no_second_copy_of_the_images():
+    """Mip-NeRF garden (185 photos) ran out of GPU memory on a stacked copy of every image."""
+    from foamsurf_data.colmap import ColmapDataset
+    from training.sampler import RandomCameraRaySampler
+    dataset = ColmapDataset(str(MIPNERF / "garden"), resolution=16, device="cpu", llffhold=8)
+    sampler = RandomCameraRaySampler(dataset, 1, (0.0, 0.0, 0.0), full_image=True, cameras_without_replacement=True)
+    assert "foreground" not in sampler.data and "alpha" not in sampler.data
+    batch = sampler.next()
+    assert batch.target.shape == (dataset.width * dataset.height, 3)
+    assert "foreground" in dataset.stacked_training_data()  # the warmup still gets the pixels
+
+
 def test_medium_losses_are_refused_without_the_medium():
     source = (ROOT / "training/colmap_joint_trainer.py").read_text()
     assert source.count("need the medium (representation_mode=gaussian_only)") == 1

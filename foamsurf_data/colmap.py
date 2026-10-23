@@ -313,8 +313,10 @@ class ColmapDataset:
             if (camera.height, camera.width) != (self.height, self.width):
                 raise ValueError("all COLMAP images must have the same resolution")
 
-    def stacked_training_data(self) -> dict[str, torch.Tensor]:
-        return {
+    def stacked_training_data(self, pixels: bool = True) -> dict[str, torch.Tensor]:
+        """Per-camera tensors of the training split; with pixels, also a second (stacked) copy of
+        every image, which the full-image sampler does not need (it reads camera.foreground)."""
+        data = {
             "intrinsics": torch.tensor([c.intrinsics for c in self.train], dtype=torch.float32, device=self.device),
             "origins": torch.stack([camera.origin for camera in self.train]),
             "rights": torch.stack([camera.right for camera in self.train]),
@@ -330,13 +332,11 @@ class ColmapDataset:
                 dtype=torch.float32,
                 device=self.device,
             ),
-            "foreground": torch.stack(
-                [camera.foreground for camera in self.train]
-            ).reshape(-1, 3),
-            "alpha": torch.stack(
-                [camera.alpha for camera in self.train]
-            ).reshape(-1, 1),
         }
+        if pixels:
+            data["foreground"] = torch.stack([camera.foreground for camera in self.train]).reshape(-1, 3)
+            data["alpha"] = torch.stack([camera.alpha for camera in self.train]).reshape(-1, 1)
+        return data
 
     def initial_point_cloud(
         self, _synthetic_count: int = 100_000

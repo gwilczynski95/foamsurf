@@ -17,6 +17,9 @@
 #   sbatch scripts/train_seathru.sbatch
 # One scene / other seeds:  FS_SCENES="Curasao-Undistorted" FS_SEEDS="42" sbatch --array=0 ...
 # Resume:                   FS_RUN_ID=<job id> FS_RESUME=1 sbatch scripts/train_seathru.sbatch
+# Only the audit (+ slimming) of finished runs: FS_RUN_ID=<job id> FS_AUDIT_ONLY=1 sbatch --array=<tasks> ...
+# Space: W&B is off unless FS_WANDB=online; after the audit each run is slimmed (scripts/slim_run.py:
+# evaluation renders every 5000 + last + best, no initialization.pt, no local W&B), unless FS_SLIM=0.
 # Another config:           FS_CONFIG=configs/<file>.yaml sbatch scripts/train_seathru.sbatch
 # Voronoi layout x colour smoothing on IUI3 and Panama, seed 42 (18 tasks):
 #   FS_VARIANT_SET=cells sbatch --array=0-17%7 scripts/train_seathru.sbatch
@@ -195,6 +198,7 @@ export TMPDIR="$ROOT/outputs/tmp/seathru_${SLURM_ARRAY_JOB_ID}_${TASK}"
 mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
 RUN_ID="${FS_RUN_ID:-${SLURM_ARRAY_JOB_ID}}"
+WANDB="${FS_WANDB:-disabled}"
 OUTPUT="outputs/seathru/${RUN_ID}/${NAME}"
 
 ARGS=(
@@ -204,6 +208,7 @@ ARGS=(
   --set "warmup.dataset.source_path=$SOURCE"
   --set "joint.dataset.source_path=$SOURCE"
   --set "variant.seed=$SEED" --set "warmup.seed=$SEED" --set "joint.seed=$SEED"
+  --set "warmup.wandb.mode=$WANDB" --set "joint.wandb.mode=$WANDB"
 )
 for item in "${OVERRIDES[@]}"; do ARGS+=(--set "$item"); done
 if [[ "${FS_RESUME:-0}" == 1 ]]; then ARGS+=(--resume); fi
@@ -215,10 +220,13 @@ if [[ "${FS_DRY_RUN:-0}" == 1 ]]; then
   echo "dry run ok"
   exit 0
 fi
-python train.py "${ARGS[@]}"
+[[ "${FS_AUDIT_ONLY:-0}" == 1 ]] || python train.py "${ARGS[@]}"
 # The medium audit needs the medium and the SAM masks of the SeaThru test views.
 if [[ "$VARIANT" != *_gonly* && "$SOURCE" == "$DATASETS/"* ]]; then
   for checkpoint in best last; do
     python scripts/medium_audit.py --run "$OUTPUT" --checkpoint "$checkpoint"
   done
+fi
+if [[ "${FS_SLIM:-1}" == 1 ]]; then
+  python scripts/slim_run.py --run "$OUTPUT" --apply
 fi

@@ -52,7 +52,8 @@ class RandomCameraRaySampler:
             dtype=torch.float32,
             device=dataset.device,
         )
-        self.data = dataset.stacked_training_data()
+        # Targets come from camera.foreground: no second copy of every image on the GPU.
+        self.data = dataset.stacked_training_data(pixels=False)
         # Full images are rendered and compared at 1/downscale of their resolution.
         self.downscale = 1
 

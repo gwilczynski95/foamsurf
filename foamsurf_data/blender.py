@@ -137,9 +137,9 @@ class BlenderDataset:
             if (camera.height, camera.width) != expected:
                 raise ValueError("all cameras must have the same resolution")
 
-    def stacked_training_data(self) -> dict[str, torch.Tensor]:
+    def stacked_training_data(self, pixels: bool = True) -> dict[str, torch.Tensor]:
         cameras = self.train
-        return {
+        data = {
             "origins": torch.stack([camera.origin for camera in cameras]),
             "rights": torch.stack([camera.right for camera in cameras]),
             "downs": torch.stack([camera.down for camera in cameras]),
@@ -154,13 +154,11 @@ class BlenderDataset:
                 device=self.device,
                 dtype=torch.float32,
             ),
-            "foreground": torch.stack(
-                [camera.foreground for camera in cameras]
-            ).reshape(-1, 3),
-            "alpha": torch.stack(
-                [camera.alpha for camera in cameras]
-            ).reshape(-1, 1),
         }
+        if pixels:
+            data["foreground"] = torch.stack([camera.foreground for camera in cameras]).reshape(-1, 3)
+            data["alpha"] = torch.stack([camera.alpha for camera in cameras]).reshape(-1, 1)
+        return data
 
     @staticmethod
     def legacy_initial_point_cloud(
