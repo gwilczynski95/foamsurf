@@ -52,6 +52,12 @@
 # part as good as 2DGS/3DGS? Mip-NeRF 360 garden and bicycle (images_4, as 2DGS/3DGS) and Panama,
 # seeds 42 and 43, SH degree 3, no 700k cap (_g6000k) (6 tasks):
 #   FS_VARIANT_SET=gonly sbatch --array=0-5%7 scripts/train_seathru.sbatch
+# Does the medium overfit the few training views? _cells<N> = N medium cells (fixed population,
+# default 5000), _ss<N> = attenuation/backscatter smoothing N (default 0.1). Default config, every scene,
+# seeds 42 and 43 (40 tasks):
+#   FS_VARIANT_SET=overfit sbatch --array=0-39%7 scripts/train_seathru.sbatch
+# Gaussians alone on the other SeaThru scenes (Panama is in 'gonly'), seeds 42 and 43 (6 tasks):
+#   FS_VARIANT_SET=gonly_seathru sbatch --array=0-5%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -87,6 +93,12 @@ case "${FS_VARIANT_SET:-default}" in
   gonly)
     VARIANTS=(_plain_sh3_g6000k_gonly)
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  overfit)
+    VARIANTS=(_cells1000 _cells250 _cells50 _ss1 _ss10)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  gonly_seathru)
+    VARIANTS=(_plain_sh3_g6000k_gonly)
+    DEFAULT_SCENES="IUI3-RedSea-Undistorted Curasao-Undistorted JapaneseGradens-RedSea-Undistorted"; DEFAULT_SEEDS="42 43" ;;
   plain)
     VARIANTS=(_plain)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
@@ -107,6 +119,15 @@ variant_overrides() {
     elif [[ "$rest" =~ ^_c([0-9]+)k(.*)$ ]]; then
       echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_cells([0-9]+)(.*)$ ]]; then
+      echo "profile.spatial_count=${BASH_REMATCH[1]}"
+      echo "warmup.model.medium_points=${BASH_REMATCH[1]}"
+      echo "joint.model.medium_points=${BASH_REMATCH[1]}"
+      echo "joint.voronoi_adaptation.max_points=${BASH_REMATCH[1]}"
+      echo "joint.voronoi_adaptation.min_points=${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_ss([0-9]+)(.*)$ ]]; then
+      echo "rgb_smoothing.attenuation=${BASH_REMATCH[1]}.0"
+      echo "rgb_smoothing.backscatter=${BASH_REMATCH[1]}.0"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_cs([0-9]+)(.*)$ ]]; then
       echo "rgb_smoothing.color=${BASH_REMATCH[1]}.0"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_sh([0-9])(.*)$ ]]; then
