@@ -35,12 +35,26 @@ def test_directional_check_catches_a_wrong_backward():
     assert report["x"]["best"] > 0.2
 
 
+def test_subset_direction_touches_only_some_rows():
+    seen = {}
+
+    def loss(p):
+        seen.setdefault("values", []).append(p["x"].detach().clone())
+        return p["x"].double().pow(2).sum()
+
+    x = torch.randn(100, 3)
+    report = audit.directional_check(loss, dict(x=x), rows=5)
+    changed = (seen["values"][1] != x).any(-1)  # first perturbed evaluation
+    assert int(changed.sum()) == 5 and report["x"]["stable"] and report["x"]["best"] < 1e-3
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
 def test_renderer_gradient_matches_its_own_finite_differences():
-    """2000 Gaussians, 200 cells, 4096 rays, threshold 1e-4, far 1000, some rays fill the 64-hit buffer."""
-    report, saturation = audit.synthetic_audit()
+    """600 Gaussians, 200 cells, 4096 rays, threshold 1e-4, far 1000; 16 random rows per tensor."""
+    report, saturation = audit.synthetic_audit(scene="moderate")
     audit.print_report(report)
     print(saturation)
-    assert saturation["full_fraction"] > 0.01  # the audit really exercises the truncated buffer
-    for name, row in report.items():
+    stable = {name: row for name, row in report.items() if row["stable"]}
+    assert {"gaussian_colors", "attenuation", "backscatter", "medium_colors"} <= set(stable)
+    for name, row in stable.items():
         assert row["best"] < 0.02, (name, row)

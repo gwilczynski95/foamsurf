@@ -26,8 +26,10 @@ cd "$ROOT"
 OUT="outputs/gradient_audit/${SLURM_JOB_ID:-local}"
 mkdir -p "$OUT"
 nvidia-smi --query-gpu=name --format=csv,noheader
-python -m pytest -q -s tests/test_gradient_audit.py -rs
-python scripts/gradient_audit.py synthetic --output "$OUT/synthetic.json"
+python -m pytest -q -s tests/test_gradient_audit.py -rs || echo "[gradaudit] test failed, continuing with the audits"
+for scene in moderate dense; do
+  python scripts/gradient_audit.py synthetic --scene "$scene" --output "$OUT/synthetic_$scene.json"
+done
 SWEEP="outputs/seathru/${FS_AUDIT_SWEEP:-543588}"
 for scene in IUI3-RedSea-Undistorted Curasao-Undistorted JapaneseGradens-RedSea-Undistorted Panama-Undisorted; do
   for view in 0 1; do

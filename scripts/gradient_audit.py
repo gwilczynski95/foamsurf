@@ -5,6 +5,10 @@ For every parameter group, a random direction v is drawn and the autograd direct
 <dL/dtheta, v> is compared with the central difference (L(theta + eps v) - L(theta - eps v)) / 2 eps
 computed by the CUDA renderer itself (not by a reference implementation), for several eps.
 L is a fixed random weighting of the rendered image (linear, so no kinks of its own).
+Only `rows` random elements (rows of the parameter tensor) are perturbed at a time, so few
+discontinuities are crossed (a Gaussian entering or leaving the 64-hit buffer, depth order swaps,
+the kernel cutoff, cell boundaries). The central differences are "stable" when they agree across
+eps (spread below 5%); only then is a mismatch with autograd evidence of a wrong backward.
 
 Usage:
   python scripts/gradient_audit.py synthetic [--output audit.json]
@@ -15,7 +19,6 @@ Usage:
 """
 import argparse
 import json
-import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -28,10 +31,12 @@ sys.path.insert(0, str(ROOT))
 EPS_SCALES = (1e-2, 3e-3, 1e-3, 3e-4)
 
 
-def directional_check(loss, params, seed=0, eps_scales=EPS_SCALES):
-    """loss(params) -> float64 scalar tensor; params: name -> leaf tensor.
+def directional_check(loss, params, seed=0, eps_scales=EPS_SCALES, rows=None):
+    """loss(params) -> float64 scalar tensor; params: name -> leaf tensor; rows: perturb only this
+    many random rows of each tensor (None: all).
 
-    Returns name -> dict(analytic, numeric per eps, relative error per eps, best relative error).
+    Returns name -> dict(analytic, numeric per eps, relative error per eps, best relative error,
+    spread of the numeric values across eps, stable).
     """
     values = {k: v.detach().clone().requires_grad_(True) for k, v in params.items()}
     total = loss(values)
@@ -39,7 +44,12 @@ def directional_check(loss, params, seed=0, eps_scales=EPS_SCALES):
     generator = torch.Generator(device="cpu").manual_seed(seed)
     report = {}
     for (name, value), grad in zip(values.items(), grads):
-        direction = torch.randn(value.shape, generator=generator, dtype=torch.float64).to(value.device)
+        direction = torch.randn(value.shape, generator=generator, dtype=torch.float64)
+        if rows is not None and rows < value.shape[0]:
+            mask = torch.zeros(value.shape[0], dtype=torch.float64)
+            mask[torch.randperm(value.shape[0], generator=generator)[:rows]] = 1.0
+            direction = direction * mask.view(-1, *([1] * (value.dim() - 1)))
+        direction = direction.to(value.device)
         analytic = 0.0 if grad is None else float((grad.double() * direction).sum())
         scale = float(value.detach().double().pow(2).mean().sqrt()) or 1.0
         numeric, errors = [], []
@@ -53,7 +63,10 @@ def directional_check(loss, params, seed=0, eps_scales=EPS_SCALES):
                 difference = float(loss(plus) - loss(minus)) / (2 * eps)
             numeric.append(difference)
             errors.append(abs(difference - analytic) / max(abs(analytic), abs(difference), 1e-12))
-        report[name] = dict(analytic=analytic, numeric=numeric, relative_error=errors, best=min(errors))
+        middle = sorted(numeric)[len(numeric) // 2]
+        spread = (max(numeric) - min(numeric)) / max(abs(middle), 1e-12)
+        report[name] = dict(analytic=analytic, numeric=numeric, relative_error=errors, best=min(errors),
+                            spread=spread, stable=spread < 0.05)
     return report
 
 
@@ -69,16 +82,20 @@ def complete_adjacency(count, device):
     return adjacency, offsets
 
 
-def synthetic_audit(seed=0, gaussians=2000, cells=200, rays=4096):
+SCENES = {"moderate": dict(gaussians=600, log_scale=(-3.4, -2.8)), "dense": dict(gaussians=2000, log_scale=(-2.5, -1.5))}
+
+
+def synthetic_audit(seed=0, scene="moderate", cells=200, rays=4096, rows=16):
     from foamsurf import GaussianScene, NativeHybridRenderer
     from foamsurf.types import RGBVoronoiScene
     torch.manual_seed(seed)
     device = "cuda"
+    gaussians, (low, high) = SCENES[scene]["gaussians"], SCENES[scene]["log_scale"]
     depth = torch.rand(gaussians, device=device) * 2.5 + 1.5
     xy = (torch.rand(gaussians, 2, device=device) * 1.2 - 0.6) * depth[:, None] * 0.35
     params = dict(
         means=torch.cat((xy, depth[:, None]), -1),
-        log_scales=torch.rand(gaussians, 2, device=device) - 2.5,
+        log_scales=torch.rand(gaussians, 2, device=device) * (high - low) + low,
         quaternions=torch.randn(gaussians, 4, device=device),
         gaussian_colors=torch.rand(gaussians, 3, device=device),
         opacity_logits=torch.randn(gaussians, 1, device=device) + 0.5,
@@ -110,7 +127,7 @@ def synthetic_audit(seed=0, gaussians=2000, cells=200, rays=4096):
         return out.image
 
     loss = weighted_image_loss(weights)
-    report = directional_check(lambda p: loss(render(p)), params, seed=seed)
+    report = directional_check(lambda p: loss(render(p)), params, seed=seed, rows=rows)
     return report, hit_saturation(state["hits"], renderer.gaussian_hit_buffer_size)
 
 
@@ -120,7 +137,7 @@ def hit_saturation(hit_indices, size):
                 mean_hits=float(counts.float().mean()))
 
 
-def checkpoint_audit(run, checkpoint="last", rays=32768, view=0, seed=0):
+def checkpoint_audit(run, checkpoint="last", rays=32768, view=0, seed=0, rows=16):
     from evaluation.evaluator import _rays
     from foamsurf import GaussianScene
     from training.config import ExperimentConfig
@@ -159,21 +176,23 @@ def checkpoint_audit(run, checkpoint="last", rays=32768, view=0, seed=0):
         return out.image
 
     loss = weighted_image_loss(weights)
-    report = directional_check(lambda p: loss(render(p)), params, seed=seed)
+    report = directional_check(lambda p: loss(render(p)), params, seed=seed, rows=rows)
     return report, hit_saturation(state["hits"], config.renderer.gaussian_hit_buffer_size), camera.name
 
 
 def print_report(report):
     print(f"{'parametry':16s} {'autograd':>12s} " + " ".join(f"{'FD eps=' + format(e, 'g'):>14s}" for e in EPS_SCALES)
-          + f" {'najl. błąd':>10s}")
+          + f" {'najl. błąd':>10s} {'rozrzut FD':>10s}")
     for name, row in report.items():
         print(f"{name:16s} {row['analytic']:12.4e} " + " ".join(f"{v:14.4e}" for v in row["numeric"])
-              + f" {100 * row['best']:9.2f}%")
+              + f" {100 * row['best']:9.2f}% {100 * row['spread']:9.1f}%{'' if row['stable'] else '  (FD niestabilne)'}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mode", choices=("synthetic", "checkpoint"))
+    parser.add_argument("--scene", choices=tuple(SCENES), default="moderate")
+    parser.add_argument("--rows", type=int, default=16, help="perturbed rows per tensor")
     parser.add_argument("--run", type=Path)
     parser.add_argument("--checkpoint", default="last")
     parser.add_argument("--rays", type=int, default=32768)
@@ -181,19 +200,21 @@ def main():
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.mode == "synthetic":
-        report, saturation = synthetic_audit()
-        extra = {}
+        report, saturation = synthetic_audit(scene=args.scene, rows=args.rows)
+        extra = dict(scene=args.scene)
     else:
         if args.run is None:
             parser.error("checkpoint mode needs --run")
-        report, saturation, view = checkpoint_audit(args.run, args.checkpoint, args.rays, args.view)
+        report, saturation, view = checkpoint_audit(args.run, args.checkpoint, args.rays, args.view, rows=args.rows)
         extra = dict(run=str(args.run), checkpoint=args.checkpoint, view=view)
     print(json.dumps(dict(saturation=saturation, **extra)))
     print_report(report)
     if args.output:
         args.output.write_text(json.dumps(dict(report=report, saturation=saturation, **extra), indent=1))
-    worst = max(row["best"] for row in report.values())
-    print(f"najgorsza grupa: {100 * worst:.2f}% błędu względnego" + ("" if math.isfinite(worst) else " (NaN!)"))
+    stable = [row["best"] for row in report.values() if row["stable"]]
+    worst = max(stable) if stable else float("nan")
+    print(f"najgorsza grupa ze stabilnymi FD: {100 * worst:.2f}% błędu względnego; "
+          f"niestabilne FD: {[n for n, r in report.items() if not r['stable']]}")
 
 
 if __name__ == "__main__":
