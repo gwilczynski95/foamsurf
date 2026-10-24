@@ -54,4 +54,11 @@ def test_sbatch_disables_wandb_and_slims_by_default():
     script = (ROOT / "scripts/train_seathru.sbatch").read_text()
     assert 'WANDB="${FS_WANDB:-disabled}"' in script
     assert '--set "warmup.wandb.mode=$WANDB" --set "joint.wandb.mode=$WANDB"' in script
-    assert 'python scripts/slim_run.py --run "$OUTPUT" --apply' in script
+    assert 'python scripts/slim_run.py --run "$OUTPUT" --keep-until "${FS_SLIM_KEEP_UNTIL:-0}" --apply' in script
+
+
+def test_keep_until_keeps_the_start_frame_by_frame(tmp_path):
+    run = fake_run(tmp_path / "r", {i: 10.0 + i / 1e4 for i in range(0, 8001, 500)})
+    keep = slim_run.kept_iterations(run, keep_until=5000)
+    assert keep == set(range(0, 5001, 500)) | {8000}  # every 500 up to 5000, then last (= best)
+    assert slim_run.kept_iterations(run) == {0, 5000, 8000}

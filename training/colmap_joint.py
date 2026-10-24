@@ -85,6 +85,9 @@ def run_stage(output,stage):
                 manifest.get('medium_color_activation','dc'))
             dataset=load_dataset(config.dataset.source_path,resolution=config.dataset.resolution,
                                  device=config.device,llffhold=config.dataset.llffhold)
+            if config.model.medium_initial_color_from_data:
+                mean=torch.stack([c.foreground.reshape(-1,3).mean(0) for c in dataset.train]).mean(0)
+                medium.set_uniform_color_(mean)
             points,colors=dataset.initial_point_cloud()
             gaussians=SurfaceGaussianModel(points,colors,config.model,config.device)
             config.model.gaussian_initial_points=len(points)

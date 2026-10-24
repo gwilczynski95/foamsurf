@@ -63,6 +63,11 @@
 # _nocomp = no attenuation-compensated densification. Default config (SH3 since 2026-10-24) and the four
 # variants, every scene, seeds 42, 43 (40 tasks):
 #   FS_VARIANT_SET=calm sbatch --array=0-39%7 scripts/train_seathru.sbatch
+# A calmer start (Gaussians covered the whole frame by iteration 500 to hide the grey initial medium):
+# _clamp<NN> = every Gaussian scale capped at 0.NN x scene extent from iteration 0, _minit = medium
+# starts with the mean colour of the photos, _scl005 = Gaussian scale LR 0.005 (3DGS). Control and 7
+# variants, every scene, seeds 42 and 43 (64 tasks); keep the evaluations every 500 up to 5000:
+#   FS_VARIANT_SET=start FS_SLIM_KEEP_UNTIL=5000 sbatch --array=0-63%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -98,6 +103,9 @@ case "${FS_VARIANT_SET:-default}" in
   gonly)
     VARIANTS=(_plain_sh3_g6000k_gonly)
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  start)
+    VARIANTS=("" _clamp10 _clamp05 _minit _clamp10_minit _clamp05_minit _clamp10_minit_scl005 _clamp05_minit_scl005)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   calm)
     VARIANTS=("" _ramp _pd01 _ramp_pd01 _nocomp)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
@@ -127,6 +135,13 @@ variant_overrides() {
     elif [[ "$rest" =~ ^_c([0-9]+)k(.*)$ ]]; then
       echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_clamp([0-9]{2})(.*)$ ]]; then
+      echo "joint.optimization.gaussian_max_scale_scene_fraction=0.${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_minit(.*)$ ]]; then
+      echo "joint.model.medium_initial_color_from_data=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_scl005(.*)$ ]]; then
+      echo "joint.optimization.gaussian_scales_lr=0.005"
+      echo "joint.optimization.gaussian_scales_lr_final=0.005"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_ramp(.*)$ ]]; then
       echo "joint.gaussian_adaptation.max_points_ramp_until=15000"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_pd01(.*)$ ]]; then
@@ -263,5 +278,5 @@ if [[ "$VARIANT" != *_gonly* && "$SOURCE" == "$DATASETS/"* ]]; then
   done
 fi
 if [[ "${FS_SLIM:-1}" == 1 ]]; then
-  python scripts/slim_run.py --run "$OUTPUT" --apply
+  python scripts/slim_run.py --run "$OUTPUT" --keep-until "${FS_SLIM_KEEP_UNTIL:-0}" --apply
 fi

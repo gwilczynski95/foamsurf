@@ -98,6 +98,9 @@ class ModelConfig:
     medium_initial_color: list[float] = field(
         default_factory=lambda: [0.5, 0.5, 0.5]
     )
+    # Joint stage: every cell starts with the mean colour of the training photos instead of the
+    # warmup's colour, so open water starts close to the water (not a grey wall).
+    medium_initial_color_from_data: bool = False
 
 
 @dataclass
@@ -153,6 +156,10 @@ class OptimizationConfig:
     gaussian_scale_regularization: float = 0.0
     gaussian_min_scale: float | None = None
     gaussian_max_scale_fraction: float | None = None
+    # Cap every Gaussian scale at this fraction of the scene extent (1.1 x camera radius, as 3DGS)
+    # from iteration 0, initial scales included. Replaces gaussian_max_scale_fraction, whose
+    # reference (the point cloud, outliers included) can be half the scene. None: off.
+    gaussian_max_scale_scene_fraction: float | None = None
     medium_sites_lr: float = 1.0e-4
     medium_density_lr: float = 1.0e-2
     medium_color_lr: float = 5.0e-3
@@ -496,6 +503,9 @@ class ExperimentConfig:
             raise ValueError("B0 supports either 0 or 8 guard points")
         if self.model.medium_initial_density <= 0:
             raise ValueError("medium_initial_density must be positive")
+        fraction = self.optimization.gaussian_max_scale_scene_fraction
+        if fraction is not None and not 0.0 < fraction <= 1.0:
+            raise ValueError("gaussian_max_scale_scene_fraction must be in (0, 1]")
         if len(self.model.medium_initial_color) != 3:
             raise ValueError("medium_initial_color must contain RGB")
         manual_bounds = (

@@ -73,6 +73,14 @@ def training_downscale(optimization, iteration: int) -> int:
     return 2 ** max(levels - iteration // optimization.training_downscale_interval, 0) if levels else 1
 
 
+def gaussian_scale_cap(optimization, scene_extent: float) -> tuple[float, float] | None:
+    """(min, max) Gaussian scale under gaussian_max_scale_scene_fraction, or None when it is off."""
+    fraction = optimization.gaussian_max_scale_scene_fraction
+    if fraction is None:
+        return None
+    return (optimization.gaussian_min_scale or 1e-7, fraction * scene_extent)
+
+
 class Trainer:
     """End-to-end B0 trainer: joint optimization with RGB MSE only."""
 
@@ -221,6 +229,8 @@ class Trainer:
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
 
         self.gaussian_point_extent = self._gaussian_point_extent()
+        if self.resume_path is None and config.optimization.gaussian_max_scale_scene_fraction is not None:
+            self._apply_gaussian_scale_guard()  # the cap holds from iteration 0, initial scales too
         if not self.uses_gaussians:
             self.model.gaussians.requires_grad_(False)
         if not self.uses_voronoi:
@@ -923,6 +933,10 @@ class Trainer:
     @torch.no_grad()
     def _apply_gaussian_scale_guard(self) -> None:
         optimization = self.config.optimization
+        cap = gaussian_scale_cap(optimization, self.scene_extent)
+        if cap is not None:
+            self.model.gaussians.clamp_scales_(*cap)
+            return
         if (
             optimization.gaussian_min_scale is None
             or optimization.gaussian_max_scale_fraction is None

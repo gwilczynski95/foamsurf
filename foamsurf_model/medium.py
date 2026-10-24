@@ -176,6 +176,16 @@ class VoronoiMediumModel(nn.Module):
             return (0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0)
         return torch.sigmoid(self.raw_color)
 
+    @torch.no_grad()
+    def set_uniform_color_(self, color: torch.Tensor) -> None:
+        """Every cell gets this RGB colour (in [0, 1]) through the colour activation."""
+        color = color.to(self.raw_color).clamp(1e-4, 1 - 1e-4)
+        if getattr(self, "color_activation", "sigmoid") == "dc":
+            raw = (color - 0.5) / 0.28209479177387814
+        else:
+            raw = torch.logit(color)
+        self.raw_color.copy_(raw.expand_as(self.raw_color))
+
     def render_scene(self) -> VoronoiScene:
         if self.is_rgb:
             from foamsurf.types import RGBVoronoiScene
