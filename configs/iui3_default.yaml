@@ -7,6 +7,8 @@
 # - water clearing 1e-2: Gaussian alpha below 0.3 pushed to 0 from 4k (full at 6k);
 # - densification gradient divided by the water transmittance to the camera;
 # - densification threshold 2e-4, at most 700k Gaussians.
+# Since 2026-10-24 Gaussian colour is sigmoid(SH degree 3), one degree more every 1000 iterations
+# (as 3DGS), so the Gaussians can model view-dependent surface appearance.
 # Override --output-dir for each new experiment to avoid reusing outputs; on another
 # scene also --set warmup.dataset.source_path=... --set joint.dataset.source_path=...
 base_config: iui3_5k.yaml
@@ -23,5 +25,8 @@ overrides:
   - joint.gaussian_adaptation.gradient_threshold=0.0002
   - joint.gaussian_adaptation.max_points=700000
   - joint.gaussian_adaptation.gradient_attenuation_compensation=true
+  - joint.model.appearance=sh
+  - joint.model.sh_degree=3
+  - joint.optimization.gaussian_sh_degree_interval=1000
   - warmup.background=[0.0, 0.0, 0.0]
   - joint.background=[0.0, 0.0, 0.0]

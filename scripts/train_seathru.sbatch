@@ -60,8 +60,9 @@
 #   FS_VARIANT_SET=gonly_seathru sbatch --array=0-5%7 scripts/train_seathru.sbatch
 # Calmer densification (the default fills the 700k cap by iteration 4-7k): _ramp = cap grows linearly
 # to max_points at 15000, _pd01 = percent_dense 0.01 (3DGS/2DGS: more splits, fewer clones),
-# _nocomp = no attenuation-compensated densification. Default config, every scene, seeds 42, 43 (32 tasks):
-#   FS_VARIANT_SET=calm sbatch --array=0-31%7 scripts/train_seathru.sbatch
+# _nocomp = no attenuation-compensated densification. Default config (SH3 since 2026-10-24) and the four
+# variants, every scene, seeds 42, 43 (40 tasks):
+#   FS_VARIANT_SET=calm sbatch --array=0-39%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -98,7 +99,7 @@ case "${FS_VARIANT_SET:-default}" in
     VARIANTS=(_plain_sh3_g6000k_gonly)
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
   calm)
-    VARIANTS=(_ramp _pd01 _ramp_pd01 _nocomp)
+    VARIANTS=("" _ramp _pd01 _ramp_pd01 _nocomp)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   overfit)
     VARIANTS=(_cells1000 _cells250 _cells50 _ss1 _ss10)

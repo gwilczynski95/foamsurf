@@ -85,9 +85,11 @@ def test_calm_set(tmp_path):
     adaptation = a["gaussian_adaptation"]
     assert adaptation["max_points_ramp_until"] == 15000 and adaptation["percent_dense"] == 0.01
     assert adaptation["max_points"] == 700000 and adaptation["gradient_attenuation_compensation"] is True
+    assert a["model"]["appearance"] == "sh" and a["model"]["sh_degree"] == 3  # default is SH3 since 2026-10-24
+    assert a["optimization"]["gaussian_sh_degree_interval"] == 1000
     b = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "s", overrides=overrides("_nocomp"))["joint"]
     assert b["gaussian_adaptation"]["gradient_attenuation_compensation"] is False
     run = subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True, text=True,
-                         env={"PATH": "/usr/bin:/bin", "FS_VARIANT_SET": "calm", "SLURM_ARRAY_TASK_ID": "32",
+                         env={"PATH": "/usr/bin:/bin", "FS_VARIANT_SET": "calm", "SLURM_ARRAY_TASK_ID": "40",
                               "SLURM_ARRAY_JOB_ID": "test"})
-    assert "out of range" in run.stderr  # 4 variants x 4 scenes x 2 seeds = tasks 0-31
+    assert "out of range" in run.stderr  # control + 4 variants x 4 scenes x 2 seeds = tasks 0-39
