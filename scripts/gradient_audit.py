@@ -8,7 +8,7 @@ L is a fixed random weighting of the rendered image (linear, so no kinks of its 
 Only `rows` random elements (rows of the parameter tensor) are perturbed at a time, so few
 discontinuities are crossed (a Gaussian entering or leaving the 64-hit buffer, depth order swaps,
 the kernel cutoff, cell boundaries). The central differences are "stable" when they agree across
-eps (spread below 5%); only then is a mismatch with autograd evidence of a wrong backward.
+eps (spread below 5%, the smallest eps left out: float32 rounding); only then is a mismatch with autograd evidence of a wrong backward.
 
 Usage:
   python scripts/gradient_audit.py synthetic [--output audit.json]
@@ -63,8 +63,10 @@ def directional_check(loss, params, seed=0, eps_scales=EPS_SCALES, rows=None):
                 difference = float(loss(plus) - loss(minus)) / (2 * eps)
             numeric.append(difference)
             errors.append(abs(difference - analytic) / max(abs(analytic), abs(difference), 1e-12))
-        middle = sorted(numeric)[len(numeric) // 2]
-        spread = (max(numeric) - min(numeric)) / max(abs(middle), 1e-12)
+        # The smallest eps is dominated by float32 rounding of the image: judge stability on the others.
+        judged = numeric[:-1] if len(numeric) > 2 else numeric
+        middle = sorted(judged)[len(judged) // 2]
+        spread = (max(judged) - min(judged)) / max(abs(middle), 1e-12)
         report[name] = dict(analytic=analytic, numeric=numeric, relative_error=errors, best=min(errors),
                             spread=spread, stable=spread < 0.05)
     return report
