@@ -58,6 +58,10 @@
 #   FS_VARIANT_SET=overfit sbatch --array=0-39%7 scripts/train_seathru.sbatch
 # Gaussians alone on the other SeaThru scenes (Panama is in 'gonly'), seeds 42 and 43 (6 tasks):
 #   FS_VARIANT_SET=gonly_seathru sbatch --array=0-5%7 scripts/train_seathru.sbatch
+# Calmer densification (the default fills the 700k cap by iteration 4-7k): _ramp = cap grows linearly
+# to max_points at 15000, _pd01 = percent_dense 0.01 (3DGS/2DGS: more splits, fewer clones),
+# _nocomp = no attenuation-compensated densification. Default config, every scene, seeds 42, 43 (32 tasks):
+#   FS_VARIANT_SET=calm sbatch --array=0-31%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
@@ -93,6 +97,9 @@ case "${FS_VARIANT_SET:-default}" in
   gonly)
     VARIANTS=(_plain_sh3_g6000k_gonly)
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  calm)
+    VARIANTS=(_ramp _pd01 _ramp_pd01 _nocomp)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   overfit)
     VARIANTS=(_cells1000 _cells250 _cells50 _ss1 _ss10)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
@@ -119,6 +126,12 @@ variant_overrides() {
     elif [[ "$rest" =~ ^_c([0-9]+)k(.*)$ ]]; then
       echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_ramp(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.max_points_ramp_until=15000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_pd01(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.percent_dense=0.01"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_nocomp(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.gradient_attenuation_compensation=false"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_cells([0-9]+)(.*)$ ]]; then
       echo "profile.spatial_count=${BASH_REMATCH[1]}"
       echo "warmup.model.medium_points=${BASH_REMATCH[1]}"

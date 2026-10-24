@@ -256,6 +256,10 @@ class GaussianAdaptationConfig:
     # instead of |sum over pixels|, so opposite pixel gradients do not cancel.
     # Larger than the plain statistic: raise gradient_threshold (WS: 4x).
     absolute_gradient: bool = False
+    # Budgeted densification: the cap grows linearly from the initial count at densify_from
+    # to max_points at this iteration, so the budget is spread over the window instead of
+    # being used up in the first few thousand iterations. None: max_points from the start.
+    max_points_ramp_until: int | None = None
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
@@ -807,6 +811,9 @@ class ExperimentConfig:
             raise ValueError("gaussian_adaptation.gradient_threshold_reference_width must be a positive integer")
         if not adaptation.gradient_compensation_max >= 1.0:
             raise ValueError("gaussian_adaptation.gradient_compensation_max must be at least 1")
+        ramp = adaptation.max_points_ramp_until
+        if ramp is not None and (adaptation.max_points is None or ramp <= adaptation.densify_from):
+            raise ValueError("gaussian_adaptation.max_points_ramp_until needs max_points and must exceed densify_from")
         if adaptation.absolute_gradient and self.model.medium_type != "rgb_backscatter":
             raise ValueError("gaussian_adaptation.absolute_gradient needs model.medium_type=rgb_backscatter")
         medium_adaptation = self.voronoi_adaptation

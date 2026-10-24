@@ -135,6 +135,8 @@ class GaussianAdaptationController:
         self.model = model
         self.optimizer = optimizer
         self.config = config
+        # Start of the max_points_ramp_until budget (saved in checkpoints).
+        self.initial_count = model.point_count
         self.scene_extent = float(scene_extent)
         self.support_radius = float(support_radius)
         self.total_cloned = 0
@@ -172,6 +174,16 @@ class GaussianAdaptationController:
             "radius_max": 0.0,
         }
         self._reset_statistics()
+
+    def max_points_at(self, iteration: int) -> int | None:
+        """Gaussian cap at this iteration: max_points, or its linear ramp (max_points_ramp_until)."""
+        config = self.config
+        if config.max_points is None or config.max_points_ramp_until is None:
+            return config.max_points
+        progress = (iteration - config.densify_from) / (config.max_points_ramp_until - config.densify_from)
+        progress = min(max(progress, 0.0), 1.0)
+        start = min(self.initial_count, config.max_points)
+        return int(round(start + (config.max_points - start) * progress))
 
     def _reset_statistics(self) -> None:
         count = self.model.point_count
@@ -530,12 +542,13 @@ class GaussianAdaptationController:
         candidate_costs = torch.cat((clone_costs, split_costs))
         provisional_count = base_count + int(candidate_costs.sum().item())
         budget_rejected = 0
+        cap = self.max_points_at(iteration)
         densification_skipped = (
-            self.config.max_points is not None
-            and provisional_count > self.config.max_points
+            cap is not None
+            and provisional_count > cap
         )
         if densification_skipped and candidate_indices.numel():
-            excess = provisional_count - self.config.max_points
+            excess = provisional_count - cap
             priorities = average_gradient[candidate_indices]
             rejection_order = torch.argsort(
                 priorities, descending=False, stable=True
@@ -792,6 +805,7 @@ class GaussianAdaptationController:
             "total_opacity_resets": self.total_opacity_resets,
             "last_opacity_reset_changed": self.last_opacity_reset_changed,
             "revision": self.revision,
+            "initial_count": self.initial_count,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -813,3 +827,4 @@ class GaussianAdaptationController:
             state.get("last_opacity_reset_changed", 0)
         )
         self.revision = int(state["revision"])
+        self.initial_count = int(state.get("initial_count", self.initial_count))
