@@ -186,6 +186,15 @@ class VoronoiMediumModel(nn.Module):
             raw = torch.logit(color)
         self.raw_color.copy_(raw.expand_as(self.raw_color))
 
+    @torch.no_grad()
+    def set_uniform_coefficients_(self, attenuation: torch.Tensor, backscatter: torch.Tensor) -> None:
+        """Every cell gets these RGB attenuation and backscatter coefficients (through softplus)."""
+        if not self.is_rgb:
+            raise ValueError("uniform RGB coefficients need the rgb_backscatter medium")
+        values = torch.cat((attenuation, backscatter)).to(self.raw_density).clamp_min(1e-6)
+        raw = values + torch.log(-torch.expm1(-values))  # inverse softplus
+        self.raw_density.copy_(raw.expand_as(self.raw_density))
+
     def render_scene(self) -> VoronoiScene:
         if self.is_rgb:
             from foamsurf.types import RGBVoronoiScene

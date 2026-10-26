@@ -78,6 +78,12 @@
 # _mdc = medium colour without the sigmoid (0.5 + C0 * raw, as before 2026-10-20). With _minit, same scenes
 # and seed, into the same folder as 'diag' (2 tasks):
 #   FS_VARIANT_SET=diag_mdc FS_SLIM=0 FS_RUN_ID=<diag job> sbatch --array=0-1 scripts/train_seathru.sbatch
+# Water fitted on the training photos (training/water_fit.py, COLMAP point tracks): _wfit = every cell
+# starts with the fitted attenuation and backscatter (colour: _minit mean), _wfitc = also the fitted
+# B_inf colour. Organic, calmer densification: _cmax<N> = attenuation compensation capped at N (default
+# 20), _gt<N> = gradient threshold N x 1e-4 (default 2e-4). 2 x 2 grid (water start x densification)
+# on _clamp05_minit (best so far), every scene, seeds 42 and 43 (32 tasks):
+#   FS_VARIANT_SET=water FS_SLIM_KEEP_UNTIL=5000 sbatch --array=0-31%7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 # Cluster paths by default; another machine (scripts/run_local.sh) sets FS_ROOT, FS_ENV, FS_DRIVER,
@@ -115,6 +121,9 @@ case "${FS_VARIANT_SET:-default}" in
   gonly)
     VARIANTS=(_plain_sh3_g6000k_gonly)
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  water)
+    VARIANTS=(_clamp05_minit _clamp05_minit_cmax5 _clamp05_minit_wfit _clamp05_minit_wfit_cmax5)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   diag)
     VARIANTS=(_minit_it10k _minit_nooverlap_it10k _minit_nochroma_it10k _minit_nocover_it10k
               _minit_noclear_it10k _minit_nobin_it10k _minit_nosmooth_it10k _plain_minit_it10k)
@@ -158,6 +167,14 @@ variant_overrides() {
       # Shorter training: the schedules that end at 30000 end with it (densification still stops at 15000).
       echo "joint.optimization.iterations=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.gaussian_adaptation.opacity_prune_until=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_wfitc(.*)$ ]]; then
+      echo "joint.model.medium_initial_water_fit=all"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wfit(.*)$ ]]; then
+      echo "joint.model.medium_initial_water_fit=coefficients"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_cmax([0-9]+)(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.gradient_compensation_max=${BASH_REMATCH[1]}.0"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_gt([0-9]+)(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.gradient_threshold=${BASH_REMATCH[1]}.0e-4"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_mdc(.*)$ ]]; then
       echo "medium_color_activation=dc"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_nooverlap(.*)$ ]]; then

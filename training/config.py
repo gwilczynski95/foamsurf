@@ -101,6 +101,10 @@ class ModelConfig:
     # Joint stage: every cell starts with the mean colour of the training photos instead of the
     # warmup's colour, so open water starts close to the water (not a grey wall).
     medium_initial_color_from_data: bool = False
+    # Joint stage: every cell starts with the water fitted on the training photos
+    # (training/water_fit.py): "coefficients" = attenuation beta_D and backscatter beta_B,
+    # "all" = also colour B_inf (overrides medium_initial_color_from_data). "off": as before.
+    medium_initial_water_fit: str = "off"
 
 
 @dataclass
@@ -506,6 +510,8 @@ class ExperimentConfig:
         fraction = self.optimization.gaussian_max_scale_scene_fraction
         if fraction is not None and not 0.0 < fraction <= 1.0:
             raise ValueError("gaussian_max_scale_scene_fraction must be in (0, 1]")
+        if self.model.medium_initial_water_fit not in ("off", "coefficients", "all"):
+            raise ValueError("model.medium_initial_water_fit must be off, coefficients or all")
         if len(self.model.medium_initial_color) != 3:
             raise ValueError("medium_initial_color must contain RGB")
         manual_bounds = (

@@ -88,6 +88,15 @@ def run_stage(output,stage):
             if config.model.medium_initial_color_from_data:
                 mean=torch.stack([c.foreground.reshape(-1,3).mean(0) for c in dataset.train]).mean(0)
                 medium.set_uniform_color_(mean)
+            if config.model.medium_initial_water_fit!='off':
+                from training.water_fit import fit_water_from_dataset
+                # Coefficients only: the cells keep their colour, so fit beta_B for that colour.
+                kept=None if config.model.medium_initial_water_fit=='all' else medium.colors[0].detach().cpu().numpy()
+                fit=fit_water_from_dataset(dataset,config.dataset.source_path,b_inf=kept)
+                medium.set_uniform_coefficients_(torch.tensor(fit['beta_d']),torch.tensor(fit['beta_b']))
+                if config.model.medium_initial_water_fit=='all':
+                    medium.set_uniform_color_(torch.tensor(fit['b_inf']))
+                atomic_json(output/'water_fit.json',fit)
             points,colors=dataset.initial_point_cloud()
             gaussians=SurfaceGaussianModel(points,colors,config.model,config.device)
             config.model.gaussian_initial_points=len(points)
