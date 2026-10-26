@@ -1,10 +1,24 @@
 """'overfit' set (fewer medium cells, stronger medium smoothing) and 'gonly_seathru'."""
+import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from train import resolve_iui3
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def sbatch_env(**extra):
+    """Environment for a dry run of train_seathru.sbatch on this machine (cluster paths by default)."""
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    return {**env, **extra}
+
+
+SEATHRU_PRESENT = Path(sbatch_env()["FS_DATASETS"]).is_dir()
 
 
 def overrides(variant):
@@ -17,9 +31,7 @@ def overrides(variant):
 
 def dry_run(variant_set, task):
     return subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True, text=True,
-                          env={"PATH": "/shared/results/gmwilczn/conda/envs/foamsurf/bin:/usr/bin:/bin",
-                               "FS_VARIANT_SET": variant_set, "SLURM_ARRAY_TASK_ID": str(task),
-                               "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1"})
+                          env=sbatch_env(FS_VARIANT_SET=variant_set, SLURM_ARRAY_TASK_ID=str(task)))
 
 
 def test_cells_and_smoothing_overrides(tmp_path):
@@ -31,6 +43,7 @@ def test_cells_and_smoothing_overrides(tmp_path):
     assert m["rgb_smoothing"]["color"] == 1.0  # colour smoothing unchanged
 
 
+@pytest.mark.skipif(not SEATHRU_PRESENT, reason="needs the SeaThru dataset (FS_DATASETS)")
 def test_sets_validate_and_cover_every_task():
     for variant_set, last in (("overfit", 39), ("gonly_seathru", 5)):
         for task in (0, last):

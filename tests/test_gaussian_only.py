@@ -1,7 +1,9 @@
 """Gaussians alone ('gonly' set): no medium, SH colour, Mip-NeRF 360 on images_4 and SeaThru."""
 import csv
 import math
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,16 @@ from train import fit_iui3, resolve_iui3
 
 ROOT = Path(__file__).resolve().parents[1]
 MIPNERF = Path("/shared/sets/datasets/mipnerf_ds")
+
+
+def sbatch_env(**extra):
+    """Environment for a dry run of train_seathru.sbatch on this machine (cluster paths by default)."""
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    return {**env, **extra}
+
+
+SEATHRU_PRESENT = Path(sbatch_env()["FS_DATASETS"]).is_dir()
 
 
 def overrides(variant):
@@ -24,9 +36,7 @@ def overrides(variant):
 def dry_run(task):
     """Run the sbatch for one 'gonly' task with FS_DRY_RUN=1: prints the task and validates the manifest."""
     return subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True, text=True,
-                          env={"PATH": "/shared/results/gmwilczn/conda/envs/foamsurf/bin:/usr/bin:/bin",
-                               "FS_VARIANT_SET": "gonly", "SLURM_ARRAY_TASK_ID": str(task),
-                               "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1"})
+                          env=sbatch_env(FS_VARIANT_SET="gonly", SLURM_ARRAY_TASK_ID=str(task)))
 
 
 def test_gonly_overrides(tmp_path):
@@ -39,7 +49,7 @@ def test_gonly_overrides(tmp_path):
     assert m["rgb_surface"]["weight"] == 0.0 and m["medium_fix"]["chroma_weight"] == 0.0
 
 
-@pytest.mark.skipif(not (MIPNERF / "garden").is_dir(), reason="needs the Mip-NeRF 360 dataset")
+@pytest.mark.skipif(not (MIPNERF / "garden").is_dir() or not SEATHRU_PRESENT, reason="needs Mip-NeRF 360 and SeaThru")
 def test_gonly_set_tasks_and_mipnerf_sources():
     garden = dry_run(0)
     assert garden.returncode == 0, garden.stderr

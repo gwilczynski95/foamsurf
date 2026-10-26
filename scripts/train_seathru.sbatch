@@ -68,21 +68,30 @@
 # starts with the mean colour of the photos, _scl005 = Gaussian scale LR 0.005 (3DGS). Control and 7
 # variants, every scene, seeds 42 and 43 (64 tasks); keep the evaluations every 500 up to 5000:
 #   FS_VARIANT_SET=start FS_SLIM_KEEP_UNTIL=5000 sbatch --array=0-63%7 scripts/train_seathru.sbatch
+# Which part pulls the medium towards transparency (diagnostic, 10k iterations, every evaluation kept)?
+# On top of _minit, one element off at a time: _nooverlap (medium/surface overlap), _nochroma
+# (backscatter chroma prior), _nocover (seabed coverage), _noclear (water clearing), _nobin (opacity
+# binarisation), _nosmooth (Voronoi smoothing); plus _plain_minit (all off) and _minit alone.
+# Japanese Gardens and Curaçao, seed 42 (16 tasks); measure with scripts/medium_attenuation.py:
+#   FS_VARIANT_SET=diag FS_SLIM=0 sbatch --array=0-15%7 scripts/train_seathru.sbatch
+#   (another machine: FS_VARIANT_SET=diag FS_SLIM=0 scripts/run_local.sh 0 15)
 set -Eeuo pipefail
 
-ROOT=/shared/results/gmwilczn/foamsurf/foamsurf
-FS_ENV=/shared/results/gmwilczn/conda/envs/foamsurf
-DRIVER=/shared/results/gmwilczn/drivers/NVIDIA-Linux-x86_64-535.183.01
-DATASETS=/shared/sets/datasets/SeathruNeRF_dataset
+# Cluster paths by default; another machine (scripts/run_local.sh) sets FS_ROOT, FS_ENV, FS_DRIVER,
+# FS_DATASETS, FS_MIPNERF and TORCH_CUDA_ARCH_LIST (e.g. 8.6 on an RTX 3090).
+ROOT=${FS_ROOT:-/shared/results/gmwilczn/foamsurf/foamsurf}
+FS_ENV=${FS_ENV:-/shared/results/gmwilczn/conda/envs/foamsurf}
+DRIVER=${FS_DRIVER:-/shared/results/gmwilczn/drivers/NVIDIA-Linux-x86_64-535.183.01}
+DATASETS=${FS_DATASETS:-/shared/sets/datasets/SeathruNeRF_dataset}
 # Mip-NeRF 360 outdoor scenes, trained on images_4 like 3DGS and 2DGS.
-MIPNERF=/shared/sets/datasets/mipnerf_ds
+MIPNERF=${FS_MIPNERF:-/shared/sets/datasets/mipnerf_ds}
 MIPNERF_OUTDOOR=" bicycle flowers garden stump treehill "
 export PATH="$FS_ENV/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CUDA_HOME="$FS_ENV"
 export FOAMSURF_DRIVER_LIBRARY_DIRECTORY="$DRIVER"
 export LD_LIBRARY_PATH="$DRIVER:$FS_ENV/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONUNBUFFERED=1
-export TORCH_CUDA_ARCH_LIST=8.9
+export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.9}
 export MAX_JOBS=2
 export OMP_NUM_THREADS=4
 export OPENBLAS_NUM_THREADS=4
@@ -103,6 +112,10 @@ case "${FS_VARIANT_SET:-default}" in
   gonly)
     VARIANTS=(_plain_sh3_g6000k_gonly)
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  diag)
+    VARIANTS=(_minit_it10k _minit_nooverlap_it10k _minit_nochroma_it10k _minit_nocover_it10k
+              _minit_noclear_it10k _minit_nobin_it10k _minit_nosmooth_it10k _plain_minit_it10k)
+    DEFAULT_SCENES="JapaneseGradens-RedSea-Undistorted Curasao-Undistorted"; DEFAULT_SEEDS="42" ;;
   start)
     VARIANTS=("" _clamp10 _clamp05 _minit _clamp10_minit _clamp05_minit _clamp10_minit_scl005 _clamp05_minit_scl005)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
@@ -135,6 +148,24 @@ variant_overrides() {
     elif [[ "$rest" =~ ^_c([0-9]+)k(.*)$ ]]; then
       echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_it([0-9]+)k(.*)$ ]]; then
+      # Shorter training: the schedules that end at 30000 end with it (densification still stops at 15000).
+      echo "joint.optimization.iterations=$(( BASH_REMATCH[1] * 1000 ))"
+      echo "joint.gaussian_adaptation.opacity_prune_until=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_nooverlap(.*)$ ]]; then
+      echo "rgb_surface.weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_nochroma(.*)$ ]]; then
+      echo "medium_fix.chroma_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_nocover(.*)$ ]]; then
+      echo "medium_fix.surface_coverage_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_noclear(.*)$ ]]; then
+      echo "medium_fix.water_clear_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_nobin(.*)$ ]]; then
+      echo "joint.disentanglement.opacity_binarization_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_nosmooth(.*)$ ]]; then
+      echo "rgb_smoothing.attenuation=0.0"
+      echo "rgb_smoothing.backscatter=0.0"
+      echo "rgb_smoothing.color=0.0"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_clamp([0-9]{2})(.*)$ ]]; then
       echo "joint.optimization.gaussian_max_scale_scene_fraction=0.${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_minit(.*)$ ]]; then
