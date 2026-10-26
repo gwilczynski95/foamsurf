@@ -75,6 +75,9 @@
 # Japanese Gardens and Curaçao, seed 42 (16 tasks); measure with scripts/medium_attenuation.py:
 #   FS_VARIANT_SET=diag FS_SLIM=0 sbatch --array=0-15%7 scripts/train_seathru.sbatch
 #   (another machine: FS_VARIANT_SET=diag FS_SLIM=0 scripts/run_local.sh 0 15)
+# _mdc = medium colour without the sigmoid (0.5 + C0 * raw, as before 2026-10-20). With _minit, same scenes
+# and seed, into the same folder as 'diag' (2 tasks):
+#   FS_VARIANT_SET=diag_mdc FS_SLIM=0 FS_RUN_ID=<diag job> sbatch --array=0-1 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 # Cluster paths by default; another machine (scripts/run_local.sh) sets FS_ROOT, FS_ENV, FS_DRIVER,
@@ -116,6 +119,9 @@ case "${FS_VARIANT_SET:-default}" in
     VARIANTS=(_minit_it10k _minit_nooverlap_it10k _minit_nochroma_it10k _minit_nocover_it10k
               _minit_noclear_it10k _minit_nobin_it10k _minit_nosmooth_it10k _plain_minit_it10k)
     DEFAULT_SCENES="JapaneseGradens-RedSea-Undistorted Curasao-Undistorted"; DEFAULT_SEEDS="42" ;;
+  diag_mdc)
+    VARIANTS=(_minit_mdc_it10k)
+    DEFAULT_SCENES="JapaneseGradens-RedSea-Undistorted Curasao-Undistorted"; DEFAULT_SEEDS="42" ;;
   start)
     VARIANTS=("" _clamp10 _clamp05 _minit _clamp10_minit _clamp05_minit _clamp10_minit_scl005 _clamp05_minit_scl005)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
@@ -152,6 +158,8 @@ variant_overrides() {
       # Shorter training: the schedules that end at 30000 end with it (densification still stops at 15000).
       echo "joint.optimization.iterations=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.gaussian_adaptation.opacity_prune_until=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_mdc(.*)$ ]]; then
+      echo "medium_color_activation=dc"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_nooverlap(.*)$ ]]; then
       echo "rgb_surface.weight=0.0"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_nochroma(.*)$ ]]; then

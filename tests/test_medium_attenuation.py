@@ -83,6 +83,22 @@ def test_diag_set_and_leave_one_out_suffixes():
                                             text=True, env={**env, "SLURM_ARRAY_TASK_ID": "16"}).stderr
 
 
+def test_medium_colour_without_sigmoid(tmp_path):
+    from train import resolve_iui3
+    assert overrides("_mdc") == ["medium_color_activation=dc"]
+    manifest = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "r", overrides=overrides("_minit_mdc_it10k"))
+    assert manifest["medium_color_activation"] == "dc"
+    assert manifest["joint"]["model"]["medium_initial_color_from_data"] is True
+    default = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "s", overrides=[])
+    assert default["medium_color_activation"] == "sigmoid"
+    if SEATHRU_PRESENT:
+        env = sbatch_env(FS_VARIANT_SET="diag_mdc")
+        for task in (0, 1):
+            run = subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True, text=True,
+                                 env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+            assert run.returncode == 0 and "dry run ok" in run.stdout, run.stderr
+
+
 def test_sbatch_paths_can_be_overridden_and_run_local_needs_the_dataset(tmp_path):
     script = (ROOT / "scripts/train_seathru.sbatch").read_text()
     for name in ("FS_ROOT", "FS_ENV", "FS_DRIVER", "FS_DATASETS", "FS_MIPNERF"):
