@@ -84,6 +84,32 @@
 # 20), _gt<N> = gradient threshold N x 1e-4 (default 2e-4). 2 x 2 grid (water start x densification)
 # on _clamp05_minit (best so far), every scene, seeds 42 and 43 (32 tasks):
 #   FS_VARIANT_SET=water FS_SLIM_KEEP_UNTIL=5000 sbatch --array=0-31%7 scripts/train_seathru.sbatch
+# Overfitting to individual training photos (view-specific dark Gaussians and medium cells near the
+# cameras). _gdk = Gaussian-DK near-camera densification gradient scaling with the paper's schedule
+# (x0.5 from 4000, off from 7000), _gdkw = the same weight without the schedule, _tri = OceanSplat
+# trinocular view consistency (lambda 0.1, 4000-24000). On _clamp05_minit (controls: water set,
+# job 548623), every scene, seeds 42 and 43 (32 tasks):
+#   FS_VARIANT_SET=consist FS_SLIM_KEEP_UNTIL=5000 sbatch --array=0-31%7 scripts/train_seathru.sbatch
+# Full OceanSplat (training/oceansplat.py): _rs = their resolution schedule (x1/4, x1/2 from 6000, full
+# from 12000), _ocean = trinocular consistency warped by the rendered depth + disparity smoothness
+# (lambda 0.1), epipolar depth prior (0.4 -> 0.2), depth residual (0.01), all 12000-24000, and the
+# depth-aware opacity until 12000. Both arms use their photometric loss (_rel = regularised L1 +
+# regularised D-SSIM 0.2, as WaterSplatting / OceanSplat), so lambda_tri 0.1 means what it means in
+# the paper. _oceane = the same with the loss window from 4000 (the paper's start in iterations; our
+# JG overfitting starts at ~3k). 3 x 2 grid (no OceanSplat / window 12k-24k / window 4k-24k) x (without /
+# with _rs) on _clamp05_minit, every scene, seeds 42 and 43 (48 tasks):
+#   FS_VARIANT_SET=ocean sbatch --array=0-47 scripts/train_seathru.sbatch
+# Water baked into the Gaussians (Panama MTN_1529: medium transmittance to the seabed 0.83-0.98 and grey,
+# the seed-dependent colour offset sits in the Gaussian colours): the medium/surface overlap prior is the
+# main pull towards a transparent medium (diag 548464), never run to 30k. _nooverlap on the 'ocean'
+# control _clamp05_minit_rel, every scene, seeds 42 and 43 (8 tasks):
+#   FS_VARIANT_SET=overlap sbatch --array=0-7 scripts/train_seathru.sbatch
+# Sub-pixel Gaussians (Panama: 56% of the opacity below 0.5 px at the nearest training camera; the
+# pixel-area render beats the pixel-centre render on test views, +0.25 dB, and loses on training views):
+# _jit = training rays through a random point of their pixel (evaluation: centres), _mip = Mip-Splatting
+# 3D filter (variance 0.2 px^2). On the 'ocean' control _clamp05_minit_rel, every scene, seeds 42 and
+# 43 (24 tasks):
+#   FS_VARIANT_SET=alias sbatch --array=0-23 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 # Cluster paths by default; another machine (scripts/run_local.sh) sets FS_ROOT, FS_ENV, FS_DRIVER,
@@ -123,6 +149,19 @@ case "${FS_VARIANT_SET:-default}" in
     DEFAULT_SCENES="garden bicycle Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
   water)
     VARIANTS=(_clamp05_minit _clamp05_minit_cmax5 _clamp05_minit_wfit _clamp05_minit_wfit_cmax5)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  consist)
+    VARIANTS=(_clamp05_minit_gdk _clamp05_minit_gdkw _clamp05_minit_tri _clamp05_minit_tri_gdkw)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  ocean)
+    VARIANTS=(_clamp05_minit_rel _clamp05_minit_rel_ocean _clamp05_minit_rel_oceane
+              _clamp05_minit_rs_rel _clamp05_minit_rs_rel_ocean _clamp05_minit_rs_rel_oceane)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  overlap)
+    VARIANTS=(_clamp05_minit_rel_nooverlap)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  alias)
+    VARIANTS=(_clamp05_minit_rel_jit _clamp05_minit_rel_mip _clamp05_minit_rel_jit_mip)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   diag)
     VARIANTS=(_minit_it10k _minit_nooverlap_it10k _minit_nochroma_it10k _minit_nocover_it10k
@@ -167,6 +206,33 @@ variant_overrides() {
       # Shorter training: the schedules that end at 30000 end with it (densification still stops at 15000).
       echo "joint.optimization.iterations=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.gaussian_adaptation.opacity_prune_until=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_jit(.*)$ ]]; then
+      echo "joint.optimization.ray_jitter=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_mip(.*)$ ]]; then
+      echo "joint.model.gaussian_mip_filter=0.2"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_rs(.*)$ ]]; then
+      echo "joint.optimization.training_downscale_levels=2"
+      echo "joint.optimization.training_downscale_interval=6000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_oceane(.*)$ ]]; then
+      echo "joint.optimization.ocean_tri_weight=0.1"
+      echo "joint.optimization.ocean_epi_weight_start=0.4"
+      echo "joint.optimization.ocean_epi_weight_end=0.2"
+      echo "joint.optimization.ocean_res_weight=0.01"
+      echo "joint.optimization.ocean_alpha_until=12000"
+      echo "joint.optimization.ocean_from=4000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_ocean(.*)$ ]]; then
+      echo "joint.optimization.ocean_tri_weight=0.1"
+      echo "joint.optimization.ocean_epi_weight_start=0.4"
+      echo "joint.optimization.ocean_epi_weight_end=0.2"
+      echo "joint.optimization.ocean_res_weight=0.01"
+      echo "joint.optimization.ocean_alpha_until=12000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_gdkw(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.near_camera_gradient_scaling=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_gdk(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.near_camera_gradient_scaling=true"
+      echo "joint.gaussian_adaptation.near_camera_steps=[4000, 7000]"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_tri(.*)$ ]]; then
+      echo "joint.optimization.trinocular_weight=0.1"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_wfitc(.*)$ ]]; then
       echo "joint.model.medium_initial_water_fit=all"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_wfit(.*)$ ]]; then

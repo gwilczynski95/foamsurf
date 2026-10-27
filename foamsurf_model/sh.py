@@ -38,41 +38,29 @@ def evaluate_sh(
     if coefficients.shape[:-2] != directions.shape[:-1]:
         raise ValueError("coefficient and direction batch shapes do not match")
 
-    x = directions[..., 0:1]
-    y = directions[..., 1:2]
-    z = directions[..., 2:3]
-    result = C0 * coefficients[..., 0]
+    # Basis [..., 1, required] times the coefficients in one product: indexing the coefficients one by
+    # one makes every backward allocate and zero a full copy of them per coefficient.
+    return (coefficients[..., :required] * sh_basis(degree, directions)[..., None, :]).sum(-1)
 
+
+def sh_basis(degree: int, directions: torch.Tensor) -> torch.Tensor:
+    """Real SH basis values [..., (degree + 1)^2] (3DGS sign convention) of unit directions [..., 3]."""
+    x, y, z = directions.unbind(-1)
+    values = [torch.full_like(x, C0)]
     if degree > 0:
-        result = (
-            result
-            - C1 * y * coefficients[..., 1]
-            + C1 * z * coefficients[..., 2]
-            - C1 * x * coefficients[..., 3]
-        )
+        values += [-C1 * y, C1 * z, -C1 * x]
     if degree > 1:
         xx, yy, zz = x * x, y * y, z * z
         xy, yz, xz = x * y, y * z, x * z
-        result = (
-            result
-            + C2[0] * xy * coefficients[..., 4]
-            + C2[1] * yz * coefficients[..., 5]
-            + C2[2] * (2.0 * zz - xx - yy) * coefficients[..., 6]
-            + C2[3] * xz * coefficients[..., 7]
-            + C2[4] * (xx - yy) * coefficients[..., 8]
-        )
+        values += [C2[0] * xy, C2[1] * yz, C2[2] * (2.0 * zz - xx - yy), C2[3] * xz, C2[4] * (xx - yy)]
     if degree > 2:
-        result = (
-            result
-            + C3[0] * y * (3.0 * xx - yy) * coefficients[..., 9]
-            + C3[1] * xy * z * coefficients[..., 10]
-            + C3[2] * y * (4.0 * zz - xx - yy) * coefficients[..., 11]
-            + C3[3]
-            * z
-            * (2.0 * zz - 3.0 * xx - 3.0 * yy)
-            * coefficients[..., 12]
-            + C3[4] * x * (4.0 * zz - xx - yy) * coefficients[..., 13]
-            + C3[5] * z * (xx - yy) * coefficients[..., 14]
-            + C3[6] * x * (xx - 3.0 * yy) * coefficients[..., 15]
-        )
-    return result
+        values += [
+            C3[0] * y * (3.0 * xx - yy),
+            C3[1] * xy * z,
+            C3[2] * y * (4.0 * zz - xx - yy),
+            C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy),
+            C3[4] * x * (4.0 * zz - xx - yy),
+            C3[5] * z * (xx - yy),
+            C3[6] * x * (xx - 3.0 * yy),
+        ]
+    return torch.stack(values, -1)

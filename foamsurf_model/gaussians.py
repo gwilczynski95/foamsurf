@@ -110,6 +110,7 @@ class SurfaceGaussianModel(nn.Module):
         self.means = nn.Parameter(means)
         self.log_scales = nn.Parameter(log_scales)
         self.quaternions = nn.Parameter(quaternions)
+        self.mip_filter = None
 
     @staticmethod
     def _initial_log_scales(
@@ -177,14 +178,48 @@ class SurfaceGaussianModel(nn.Module):
         camera_origin: torch.Tensor | None,
         means: torch.Tensor | None = None,
     ) -> GaussianScene:
+        log_scales, opacity_logits = self.log_scales, self.opacity_logits
+        if self.mip_filter is not None:
+            if self.mip_filter.shape[0] != self.point_count:
+                raise RuntimeError("Mip filter is stale (Gaussian count changed); call update_mip_filter")
+            # Mip-Splatting 3D filter: the Gaussian convolved with an isotropic one of std mip_filter
+            # (exact for kappa = 1), opacity scaled by sqrt(det / det') so the integral is kept.
+            filtered = 0.5 * torch.logaddexp(2 * log_scales, 2 * self.mip_filter.log()[:, None])
+            opacity = torch.sigmoid(opacity_logits) * (log_scales - filtered).sum(-1, keepdim=True).exp()
+            log_scales, opacity_logits = filtered, torch.logit(opacity.clamp(1e-6, 1 - 1e-6))
         return GaussianScene(
             means=self.means if means is None else means,
-            log_scales=self.log_scales,
+            log_scales=log_scales,
             quaternions=F.normalize(self.quaternions, dim=-1),
             colors=self.colors(camera_origin),
-            opacity_logits=self.opacity_logits,
+            opacity_logits=opacity_logits,
             raw_kappa=self.raw_kappa,
         )
+
+    @torch.no_grad()
+    def update_mip_filter(self, cameras, variance: float, near: float) -> None:
+        """Per-Gaussian filter std (world): sqrt(variance) x distance / focal of the nearest training
+        camera that sees it (in front of it, beyond near, inside the frame with a 15% margin), as
+        Mip-Splatting's compute_3D_filter; Gaussians no camera sees get the largest value."""
+        distance = torch.full((self.point_count,), float("inf"), device=self.means.device)
+        for camera in cameras:
+            offset = self.means - camera.origin
+            z = offset @ camera.forward
+            if camera.intrinsics is not None:
+                fx, fy, cx, cy = camera.intrinsics
+            else:
+                fx = 0.5 * camera.width / np.tan(0.5 * float(camera.fov_x))
+                fy = 0.5 * camera.height / np.tan(0.5 * float(camera.fov_y))
+                cx, cy = 0.5 * camera.width, 0.5 * camera.height
+            safe = z.clamp_min(1e-6)
+            u = fx * (offset @ camera.right) / safe + cx
+            v = fy * (offset @ camera.down) / safe + cy
+            seen = ((z > near) & (u >= -0.15 * camera.width) & (u <= 1.15 * camera.width)
+                    & (v >= -0.15 * camera.height) & (v <= 1.15 * camera.height))
+            distance = torch.where(seen, torch.minimum(distance, z / float(fx)), distance)
+        seen = torch.isfinite(distance)
+        distance[~seen] = distance[seen].max() if seen.any() else 1.0
+        self.mip_filter = distance * float(np.sqrt(variance))
 
     def training_scene(
         self, camera
@@ -264,4 +299,5 @@ class SurfaceGaussianModel(nn.Module):
                 name,
                 nn.Parameter(state[name].to(instance.device)),
             )
+        instance.mip_filter = None  # recomputed from the cameras by the trainer
         return instance

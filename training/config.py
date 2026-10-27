@@ -105,6 +105,10 @@ class ModelConfig:
     # (training/water_fit.py): "coefficients" = attenuation beta_D and backscatter beta_B,
     # "all" = also colour B_inf (overrides medium_initial_color_from_data). "off": as before.
     medium_initial_water_fit: str = "off"
+    # Mip-Splatting 3D smoothing filter (Yu et al. 2024): every Gaussian is rendered with scales
+    # sqrt(s^2 + s_f^2) and opacity x (s_u s_v) / (s_u' s_v'), s_f = sqrt(variance) x the world size of
+    # one pixel at the nearest training camera that sees it. Variance in pixels^2; 0 = off, paper 0.2.
+    gaussian_mip_filter: float = 0.0
 
 
 @dataclass
@@ -172,6 +176,37 @@ class OptimizationConfig:
     medium_color_lr_final: float | None = None
     medium_lr_decay_from: int = 0
     medium_lr_decay_until: int = 30_000
+    # OceanSplat (Kweon & Park, AAAI 2026) trinocular view consistency (training/view_consistency.py):
+    # weight lambda_tri (paper 0.1; 0 = off), active in [trinocular_from, trinocular_until), virtual
+    # baseline b_v ~ U[-b, b] in nerfstudio units (paper b = 0.4, b_h = 1.5 b_v), regularised L1
+    # with epsilon, on trinocular_rays random rays of the batch.
+    trinocular_weight: float = 0.0
+    trinocular_from: int = 4_000
+    trinocular_until: int = 24_000
+    trinocular_baseline: float = 0.4
+    trinocular_rays: int = 131_072
+    trinocular_epsilon: float = 1.0e-3
+    # Full OceanSplat (training/oceansplat.py), on images at 1/ocean_downscale: lambda_tri for
+    # L_obj-stereo + L_full-stereo + L_smooth warped by the rendered depth (0 = off), lambda_epi annealed
+    # linearly start -> end, lambda_res, all in [ocean_from, ocean_until) (paper: 4k-8k of 10k, scaled
+    # to 12k-24k of 30k). Depth-aware opacity alpha^d with weight ocean_alpha_weight decaying linearly
+    # to 0 at ocean_alpha_until (0 = off; paper t_alpha 4k of 10k -> 12k). Baseline and epsilon: the
+    # trinocular_* values above.
+    ocean_tri_weight: float = 0.0
+    # Training rays through a uniformly random point of their pixel (not its centre), so the loss
+    # matches the pixel's area average in expectation; evaluation keeps the centres.
+    ray_jitter: bool = False
+    ocean_epi_weight_start: float = 0.0
+    ocean_epi_weight_end: float = 0.0
+    ocean_res_weight: float = 0.0
+    ocean_from: int = 12_000
+    ocean_until: int = 24_000
+    ocean_downscale: int = 4
+    ocean_smooth_gamma: float = 1.0
+    ocean_gaussian_samples: int = 65_536
+    ocean_alpha_until: int = 0
+    ocean_alpha_weight: float = 0.5
+    ocean_alpha_lr: float = 1.0e-3
     topology_update_interval: int = 25
     topology_incremental: bool = True
 
@@ -271,6 +306,12 @@ class GaussianAdaptationConfig:
     # to max_points at this iteration, so the budget is spread over the window instead of
     # being used up in the first few thousand iterations. None: max_points from the start.
     max_points_ramp_until: int | None = None
+    # Gaussian-DK (Ye et al. 2024): densification gradient x min((z/R)^2, 1), z = depth in the
+    # training camera, R = 1.1 x camera spread, so Gaussians near the cameras (floaters fitting
+    # brightness differences between photos) do not clone/split. near_camera_steps (t1, t2): the
+    # paper's schedule (x1 before t1, x0.5 until t2, x0 after; 4000, 7000); None: the weight alone.
+    near_camera_gradient_scaling: bool = False
+    near_camera_steps: list[int] | None = None
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
@@ -512,6 +553,29 @@ class ExperimentConfig:
             raise ValueError("gaussian_max_scale_scene_fraction must be in (0, 1]")
         if self.model.medium_initial_water_fit not in ("off", "coefficients", "all"):
             raise ValueError("model.medium_initial_water_fit must be off, coefficients or all")
+        steps = self.gaussian_adaptation.near_camera_steps
+        if steps is not None and (len(steps) != 2 or not 0 <= steps[0] <= steps[1]):
+            raise ValueError("gaussian_adaptation.near_camera_steps must be [t1, t2] with 0 <= t1 <= t2")
+        optimization = self.optimization
+        if optimization.trinocular_weight < 0 or optimization.trinocular_baseline <= 0 \
+                or optimization.trinocular_rays <= 0 or optimization.trinocular_epsilon <= 0 \
+                or optimization.trinocular_from > optimization.trinocular_until:
+            raise ValueError("invalid trinocular settings (weight >= 0, baseline/rays/epsilon > 0, from <= until)")
+        ocean_on = (optimization.ocean_tri_weight > 0 or optimization.ocean_res_weight > 0
+                    or max(optimization.ocean_epi_weight_start, optimization.ocean_epi_weight_end) > 0)
+        if min(optimization.ocean_tri_weight, optimization.ocean_res_weight, optimization.ocean_epi_weight_start,
+               optimization.ocean_epi_weight_end, optimization.ocean_alpha_weight) < 0 \
+                or optimization.ocean_downscale < 1 or optimization.ocean_gaussian_samples < 1 \
+                or optimization.ocean_from > optimization.ocean_until or optimization.ocean_alpha_until < 0:
+            raise ValueError("invalid ocean settings (weights >= 0, downscale/samples >= 1, from <= until)")
+        if self.model.gaussian_mip_filter < 0:
+            raise ValueError("gaussian_mip_filter is a variance in pixels^2 (>= 0)")
+        if optimization.ray_jitter and optimization.training_downscale_levels > 1:
+            raise ValueError("ray_jitter is not implemented for the downscaled training images")
+        if ocean_on and self.model.medium_type != "rgb_backscatter":
+            raise ValueError("ocean losses need the RGB medium (object and medium parts)")
+        if optimization.trinocular_weight > 0 and self.model.medium_type != "rgb_backscatter":
+            raise ValueError("trinocular consistency needs the RGB medium (object and medium parts)")
         if len(self.model.medium_initial_color) != 3:
             raise ValueError("medium_initial_color must contain RGB")
         manual_bounds = (

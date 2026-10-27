@@ -277,6 +277,22 @@ class GaussianAdaptationController:
         transmittance = torch.exp(-distance[:, None] * attenuation[None, :]).mean(-1)
         return (1.0 / transmittance.clamp_min(1e-12)).clamp(max=self.config.gradient_compensation_max)
 
+    def near_camera_weight(self, camera, iteration: int | None) -> torch.Tensor:
+        """Gaussian-DK (Ye et al. 2024, Eqs. 10-11) step-based gradient scaling for every Gaussian:
+        min((z / R)^2, 1), z = its depth in this camera, R = 1.1 x the largest distance of a training
+        camera from their centroid; with near_camera_steps (t1, t2): x1 before t1, x0.5 until t2, 0 after."""
+        if self.camera_centers is None:
+            raise ValueError("near_camera_gradient_scaling needs the training camera centers")
+        centers = self.camera_centers.to(self.model.means)
+        radius = 1.1 * torch.linalg.vector_norm(centers - centers.mean(0), dim=-1).max()
+        depth = (self.model.means - camera.origin.to(self.model.means)) @ camera.forward.to(self.model.means)
+        weight = (depth / radius).square().clamp(max=1.0)
+        steps = self.config.near_camera_steps
+        if steps is not None and iteration is not None:
+            first, second = steps
+            weight = weight * (1.0 if iteration < first else 0.5 if iteration < second else 0.0)
+        return weight
+
     @torch.no_grad()
     def far_from_cameras(self, points: torch.Tensor) -> torch.Tensor:
         """Points farther than far_prune_distance from every training camera."""
@@ -400,6 +416,7 @@ class GaussianAdaptationController:
         screen_gradient: torch.Tensor | None,
         gaussian_statistics: torch.Tensor,
         camera,
+        iteration: int | None = None,
     ) -> None:
         expected = (self.model.point_count, 4)
         if gaussian_statistics.shape != expected:
@@ -417,6 +434,8 @@ class GaussianAdaptationController:
         gradient = screen_gradient.detach().norm(dim=-1)
         if self.config.gradient_attenuation_compensation:
             gradient = gradient * self.attenuation_compensation(camera.origin)
+        if self.config.near_camera_gradient_scaling:
+            gradient = gradient * self.near_camera_weight(camera, iteration)
         self.gradient_sum[visible] += gradient[visible]
         self.gradient_denom[visible] += 1
         self.max_radii2d[visible] = torch.maximum(

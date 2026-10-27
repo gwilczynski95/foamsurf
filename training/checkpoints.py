@@ -23,8 +23,9 @@ def checkpoint_payload(
     voronoi_adaptation_state: dict[str, Any] | None = None,
     medium_frozen_until: int = 0,
     disentanglement_state: dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    return (extras or {}) | {
         "format_version": 1,
         "baseline": "B0",
         "iteration": int(iteration),

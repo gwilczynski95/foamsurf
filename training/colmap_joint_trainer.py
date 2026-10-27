@@ -60,7 +60,7 @@ class ColmapJointTrainer(Trainer):
         payload=checkpoint_payload(self.model,self.gaussian_optimizer,self.medium_optimizer,
             self.config,iteration,self.training_seconds,self.best_psnr,self.topology.revision,
             self.gaussian_adaptation.state_dict(),self.voronoi_adaptation.state_dict(),
-            self.medium_frozen_until,self.disentanglement.state_dict())
+            self.medium_frozen_until,self.disentanglement.state_dict(),extras=self._checkpoint_extras())
         payload['colmap_joint']=dict(birth_steps=self.birth_steps.detach().cpu(),
             medium_accumulators={n:getattr(self.voronoi_adaptation,n).detach().cpu() for n in ACCUMULATORS},
             camera_stack=list(self.sampler._camera_stack),python_rng=random.getstate(),numpy_rng=np.random.get_state())

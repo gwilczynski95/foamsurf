@@ -39,9 +39,12 @@ class RandomCameraRaySampler:
         *,
         full_image: bool = False,
         cameras_without_replacement: bool = False,
+        jitter: bool = False,
     ) -> None:
         self.dataset = dataset
         self.rays_per_batch = int(rays_per_batch)
+        # Each ray through a uniformly random point of its pixel (the target is the pixel value).
+        self.jitter = bool(jitter)
         self.full_image = bool(full_image)
         self.cameras_without_replacement = bool(
             cameras_without_replacement
@@ -67,6 +70,8 @@ class RandomCameraRaySampler:
             camera_index = random.randrange(len(self.dataset.train))
         camera = self.dataset.train[camera_index]
         if self.downscale > 1:
+            if self.jitter:
+                raise ValueError("ray jitter is not implemented for downscaled images")
             return self._downscaled(camera)
         pixel_count = camera.width * camera.height
         if self.full_image:
@@ -93,6 +98,8 @@ class RandomCameraRaySampler:
             camera.height,
             intrinsics=(self.data['intrinsics'][camera_index:camera_index+1]
                         if 'intrinsics' in self.data else None),
+            pixel_offsets=(torch.rand(len(pixel_indices), 2, device=pixel_indices.device) - 0.5
+                           if self.jitter else None),
         )
         foreground = camera.foreground.reshape(-1, 3)[pixel_indices]
         alpha = camera.alpha.reshape(-1, 1)[pixel_indices]

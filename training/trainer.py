@@ -39,6 +39,8 @@ from .optimizer import (
     update_medium_learning_rates,
 )
 from .sampler import RandomCameraRaySampler
+from .oceansplat import DepthAwareOpacity, adjusted_scene, downscaled_target, ocean_terms
+from .view_consistency import blended_depth, nerfstudio_scale, trinocular_loss
 
 
 def _primitive_gradient_magnitude(module) -> torch.Tensor:
@@ -229,6 +231,7 @@ class Trainer:
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
 
         self.gaussian_point_extent = self._gaussian_point_extent()
+        self._update_mip_filter()
         if self.resume_path is None and config.optimization.gaussian_max_scale_scene_fraction is not None:
             self._apply_gaussian_scale_guard()  # the cap holds from iteration 0, initial scales too
         if not self.uses_gaussians:
@@ -322,6 +325,7 @@ class Trainer:
             cameras_without_replacement=(
                 config.optimization.cameras_without_replacement
             ),
+            jitter=config.optimization.ray_jitter,
         )
         self.evaluator = Evaluator(
             self.renderer,
@@ -335,6 +339,20 @@ class Trainer:
         self.logger = ExperimentLogger(
             config, self.output_dir, resume=self.resume_path is not None
         )
+        self.last_trinocular = {"obj": float("nan"), "full": float("nan")}
+        self.last_ocean = dict.fromkeys(("obj", "full", "smooth", "epi", "res", "alpha_weight"), float("nan"))
+        # OceanSplat depth-aware opacity alpha^d: a small MLP with its own optimizer (checkpointed).
+        self.alpha_mlp = self.alpha_optimizer = None
+        if config.optimization.ocean_alpha_until > 0:
+            self.alpha_mlp = DepthAwareOpacity().to(self.device)
+            self.alpha_optimizer = torch.optim.Adam(self.alpha_mlp.parameters(), lr=config.optimization.ocean_alpha_lr)
+            if payload is not None and payload.get("alpha_mlp") is not None:
+                self.alpha_mlp.load_state_dict(payload["alpha_mlp"])
+                self.alpha_optimizer.load_state_dict(payload["alpha_optimizer"])
+        # OceanSplat baseline in scene units: b (nerfstudio units) / the nerfstudio pose scale.
+        self.nerfstudio_scale = nerfstudio_scale(
+            torch.stack([camera.origin for camera in self.dataset.train + self.dataset.test]))
+        self.trinocular_baseline = config.optimization.trinocular_baseline / self.nerfstudio_scale
         self.last_hit_statistics = {
             "renderer/hit_buffer_size": config.renderer.gaussian_hit_buffer_size,
             "renderer/hit_count_mean": 0.0,
@@ -374,8 +392,15 @@ class Trainer:
                 self.voronoi_adaptation.state_dict(),
                 self.medium_frozen_until,
                 self.disentanglement.state_dict(),
+                extras=self._checkpoint_extras(),
             ),
         )
+
+    def _checkpoint_extras(self) -> dict | None:
+        """Optional state saved next to the model (OceanSplat alpha^d MLP and its optimizer)."""
+        if self.alpha_mlp is None:
+            return None
+        return {"alpha_mlp": self.alpha_mlp.state_dict(), "alpha_optimizer": self.alpha_optimizer.state_dict()}
 
     def _training_row(
         self,
@@ -561,6 +586,9 @@ class Trainer:
             "scene/cameras_extent": self.gaussian_adaptation.scene_extent,
             "optimization/gaussian_means_lr": self.current_gaussian_means_lr,
             "model/active_sh_degree": self.model.gaussians.active_sh_degree,
+            "train/trinocular_obj": self.last_trinocular["obj"],
+            "train/trinocular_full": self.last_trinocular["full"],
+            **{f"ocean/{name}": value for name, value in self.last_ocean.items()},
             "memory/allocated_mib": torch.cuda.memory_allocated(
                 self.device
             ) / (1024.0**2),
@@ -612,6 +640,69 @@ class Trainer:
         return row
 
     @torch.no_grad()
+    def _alpha_weight(self, iteration: int) -> float:
+        """OceanSplat alpha^d weight: ocean_alpha_weight decaying linearly to 0 at ocean_alpha_until."""
+        until = self.config.optimization.ocean_alpha_until
+        if self.alpha_mlp is None or until <= 0:
+            return 0.0
+        return self.config.optimization.ocean_alpha_weight * max(0.0, 1.0 - iteration / until)
+
+    def _depth_aware(self, scene, origin, forward, iteration: int):
+        return adjusted_scene(scene, self.alpha_mlp, self._alpha_weight(iteration), origin.to(scene.means),
+                              forward.to(scene.means), self.scene_extent)
+
+    def _ocean_term(self, iteration, batch, medium_scene):
+        """Full OceanSplat losses for this training camera, or None when inactive."""
+        optimization = self.config.optimization
+        self.last_ocean = dict.fromkeys(self.last_ocean, float("nan"))
+        self.last_ocean["alpha_weight"] = self._alpha_weight(iteration)
+        if not optimization.ocean_from <= iteration < optimization.ocean_until or medium_scene is None \
+                or not self.uses_gaussians:
+            return None
+        span = max(optimization.ocean_until - optimization.ocean_from, 1)
+        progress = (iteration - optimization.ocean_from) / span
+        epi_weight = optimization.ocean_epi_weight_start + progress * (
+            optimization.ocean_epi_weight_end - optimization.ocean_epi_weight_start)
+        if optimization.ocean_tri_weight <= 0 and optimization.ocean_res_weight <= 0 and epi_weight <= 0:
+            return None
+        camera = batch.camera
+        terms = ocean_terms(
+            self.renderer,
+            lambda origin: self._depth_aware(self.model.gaussians.render_scene(origin), origin, camera.forward, iteration),
+            medium_scene, self.config.background, camera,
+            downscaled_target(camera, optimization.ocean_downscale, self.config.background),
+            self.trinocular_baseline, optimization.ocean_downscale, optimization.trinocular_epsilon,
+            optimization.ocean_smooth_gamma, optimization.ocean_gaussian_samples,
+            depth_unit=self.nerfstudio_scale)
+        for name in ("obj", "full", "smooth", "epi", "res"):
+            self.last_ocean[name] = float(terms[name].detach())
+        return (optimization.ocean_tri_weight * (terms["obj"] + terms["full"] + terms["smooth"])
+                + epi_weight * terms["epi"] + optimization.ocean_res_weight * terms["res"])
+
+    def _trinocular_term(self, iteration, batch, rays, render, gaussian_scene, medium_scene):
+        """lambda_tri x OceanSplat L_tri on a random subset of the batch rays, or None when inactive."""
+        optimization = self.config.optimization
+        self.last_trinocular = {"obj": float("nan"), "full": float("nan")}
+        if (optimization.trinocular_weight <= 0.0 or not optimization.trinocular_from <= iteration < optimization.trinocular_until
+                or gaussian_scene is None or medium_scene is None or render.direct is None):
+            return None
+        count = rays.shape[0]
+        subset = torch.randperm(count, device=rays.device)[: optimization.trinocular_rays]
+        depth, accumulated = blended_depth(gaussian_scene, rays[subset], render.hit_depths[:, subset],
+                                           render.hit_indices[:, subset])
+        keep = accumulated > 0.5  # rays that end on a surface
+        if not bool(keep.any()):
+            return None
+        subset, depth = subset[keep], depth[keep]
+        direct = render.direct.reshape(-1, 3)[subset]
+        backscatter = render.backscatter.reshape(-1, 3)[subset]
+        term, values = trinocular_loss(
+            self.renderer, self.model.gaussians, medium_scene, tuple(self.config.background), batch.camera,
+            rays[subset], depth, direct, backscatter, batch.target.reshape(-1, 3)[subset],
+            self.trinocular_baseline, optimization.trinocular_epsilon)
+        self.last_trinocular = values
+        return optimization.trinocular_weight * term
+
     def _same_batch_psnr(self, batch, rays: torch.Tensor) -> float:
         gaussian_scene = None
         medium_scene = None
@@ -652,7 +743,16 @@ class Trainer:
             and self.model.gaussians.point_count > threshold
         )
 
+    def _update_mip_filter(self) -> None:
+        """Recompute the Mip-Splatting 3D filter from the training cameras (after every change of the
+        Gaussian population and every 100 iterations, as the paper)."""
+        if self.uses_gaussians and self.config.model.gaussian_mip_filter > 0:
+            self.model.gaussians.update_mip_filter(self.dataset.train, self.config.model.gaussian_mip_filter,
+                                                   self.config.renderer.near)
+
     def _train_step(self, iteration: int):
+        if iteration % 100 == 0:
+            self._update_mip_filter()
         gaussian_trainable = (
             self.uses_gaussians
             and iteration > self.config.optimization.gaussian_freeze_until
@@ -700,6 +800,7 @@ class Trainer:
                 gaussian_scene, screen_points = self.model.gaussians.training_scene(batch.camera)
             else:
                 gaussian_scene = self.model.gaussians.render_scene(batch.camera_origin)
+            gaussian_scene = self._depth_aware(gaussian_scene, batch.camera.origin, batch.camera.forward, iteration)
             self.renderer.set_gaussian_geometry(gaussian_scene)
         medium_scene = self.model.medium.render_scene() if self.uses_voronoi else None
         rays = torch.cat((batch.rays.origins, batch.rays.directions), dim=-1).contiguous()
@@ -777,7 +878,17 @@ class Trainer:
             loss,
             total=loss.total + self.last_disentanglement.total,
         )
+        trinocular = self._trinocular_term(iteration, batch, rays, render, gaussian_scene, medium_scene)
+        if trinocular is not None:
+            loss = replace(loss, total=loss.total + trinocular)
+        ocean = self._ocean_term(iteration, batch, medium_scene)
+        if ocean is not None:
+            loss = replace(loss, total=loss.total + ocean)
+        if self.alpha_optimizer is not None:
+            self.alpha_optimizer.zero_grad(set_to_none=True)
         loss.total.backward()
+        if self.alpha_optimizer is not None and self._alpha_weight(iteration) > 0.0:
+            self.alpha_optimizer.step()
         if collect_any and render.diagnostics is None:
             raise RuntimeError("adaptation statistics were not returned")
         if collect_gaussian:
@@ -788,7 +899,7 @@ class Trainer:
                 # Same chain rule as screen_points: d offset / d screen = scale * axis.
                 screen_gradient = screen_absolute[1] * self.model.gaussians.world_per_viewport(batch.camera).abs()
             self.gaussian_adaptation.collect_statistics(
-                screen_gradient, render.diagnostics.gaussian, batch.camera
+                screen_gradient, render.diagnostics.gaussian, batch.camera, iteration
             )
         if collect_voronoi:
             self.voronoi_adaptation.collect_statistics(render.diagnostics.medium)
@@ -821,6 +932,7 @@ class Trainer:
             )
             self.last_adaptation_pre_psnr = float(loss.psnr.item())
             self.last_adaptation = self.gaussian_adaptation.apply_plan(plan)
+            self._update_mip_filter()
             self.population_runaway = self._population_exceeds_safety_threshold()
             if not self.population_runaway:
                 self.last_adaptation_post_psnr = self._same_batch_psnr(batch, rays)
@@ -1040,6 +1152,7 @@ class Trainer:
             cameras_without_replacement=(
                 self.config.optimization.cameras_without_replacement
             ),
+            jitter=self.config.optimization.ray_jitter,
         )
 
     def fit(self) -> dict[str, float | int]:
