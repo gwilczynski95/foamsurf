@@ -17,6 +17,11 @@ Test views are rendered with neutral exposure and colour; nothing is fitted on t
 code is `training/camera_isp.py`, switched on by `joint.optimization.camera_isp=true` (the `_isp`
 suffix). The cluster job for the same set is 551590; use run id `551590_3090`.
 
+The variant has no anti-aliasing: `ray_jitter=false` and `gaussian_mip_filter=0.0` (the defaults;
+only the `_jit` / `_mip` suffixes switch them on). The anti-aliasing sweep (cluster job 551393) has
+not finished yet, so this run measures PPISP alone against `_rs_rel_oceane`. Do not add `_jit` or
+`_mip`.
+
 ## 1. Get the code
 
 ```bash
