@@ -43,6 +43,30 @@ def test_identity_at_start_then_per_photo_exposure_and_neutral_test_views():
 
 
 @gpu
+def test_novel_views_take_the_exposure_of_their_nearest_training_photos():
+    from training.camera_isp import CameraISP, pixel_grid
+    centres = torch.tensor([[0.0, 0, 0], [1, 0, 0], [3, 0, 0], [10, 0, 0]])
+    isp = CameraISP(["a", "b", "c", "d"], iterations=100, centres=centres, neighbours=2)
+    with torch.no_grad():
+        isp.module.exposure_params.copy_(torch.tensor([1.0, 0.0, -1.0, 5.0]))
+    rgb = torch.rand(6 * 8, 3, device="cuda") * 0.4 + 0.1
+    coords = pixel_grid(6, 8, "cuda")
+    centre = torch.tensor([0.25, 0, 0])  # 0.25 from "a", 0.75 from "b": weights 3/4 and 1/4
+    torch.testing.assert_close(isp.novel_view_weights(centre).cpu(), torch.tensor([0.75, 0.25, 0.0, 0.0]))
+    torch.testing.assert_close(isp.apply(rgb, coords, (6, 8), None, centre), rgb * 2 ** 0.75, atol=1e-3, rtol=0)
+    torch.testing.assert_close(isp.apply(rgb, coords, (6, 8), "c"), rgb / 2, atol=1e-3, rtol=0)  # training photo
+    with torch.no_grad():  # colour too: the novel view equals the photo it sits on
+        isp.module.color_params[1] = torch.linspace(-0.05, 0.05, 8)
+    torch.testing.assert_close(isp.apply(rgb, coords, (6, 8), None, torch.tensor([1.0, 0, 0])),
+                               isp.apply(rgb, coords, (6, 8), "b"), atol=1e-4, rtol=0)
+    neutral = CameraISP(["a", "b", "c", "d"], iterations=100, centres=centres, neighbours=0)
+    neutral.load_state_dict(isp.state_dict())
+    torch.testing.assert_close(neutral.apply(rgb, coords, (6, 8), None, centre), rgb, atol=1e-4, rtol=0)
+    with pytest.raises(ValueError, match="camera centre"):
+        CameraISP(["a", "b"], iterations=10, neighbours=2)
+
+
+@gpu
 def test_state_round_trip_and_frame_check():
     from training.camera_isp import CameraISP
     a = CameraISP(["x", "y", "z"], iterations=50)
@@ -98,9 +122,29 @@ def test_suffix_and_set(tmp_path):
     assert run(7).returncode == 0
 
 
+def test_seathru_default_is_oceansplat_plus_ppisp(tmp_path):
+    """configs/seathru_default.yaml = configs/iui3_default.yaml + the suffixes of the 551590 run, test views
+    with the exposure of their 4 nearest training photos; the sbatch 'default' set trains it."""
+    suffix = "_clamp05_minit_rs_rel_oceane_isp"
+    default = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "d")
+    run = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "d",
+                       overrides=overrides(suffix) + ["joint.optimization.camera_isp_neighbours=4"])
+    assert default == run
+    optimization = default["joint"]["optimization"]
+    assert optimization["camera_isp"] is True and optimization["camera_isp_neighbours"] == 4
+    assert optimization["ocean_from"] == 4000 and optimization["reconstruction_loss"] == "reg_l1_reg_dssim"
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task, **extra: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                               text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task), **extra})
+    assert "config=configs/seathru_default.yaml" in run(0).stdout and "out of range" in run(8).stderr
+    assert "config=configs/iui3_default.yaml" in run(0, FS_VARIANT_SET="isp").stdout  # suffix sets keep their base
+
+
 @gpu
 def test_short_real_training_with_camera_isp_and_resume(tmp_path):
     from test_medium_fix import _short_manifest
+    from training.camera_isp import pixel_grid
     from training.trainer import Trainer
     m = _short_manifest(tmp_path, "isp", overrides("_isp_ocean") + [
         "joint.optimization.ocean_from=1", "joint.optimization.ocean_until=5", "joint.optimization.ocean_downscale=1",
@@ -116,3 +160,16 @@ def test_short_real_training_with_camera_isp_and_resume(tmp_path):
                                checkpoint["camera_isp"]["module"]["exposure_params"])
     summary, _, _ = trainer.evaluator.evaluate(4)
     assert torch.isfinite(torch.tensor(summary["eval/primary_psnr"]))
+    assert trainer.camera_isp.neighbours == min(4, len(trainer.dataset.train))  # default: 4 nearest photos
+    test = trainer.dataset.test[0]
+    image = torch.rand(test.height, test.width, 3, device="cuda")
+    weights = trainer.camera_isp.novel_view_weights(test.origin)
+    with torch.no_grad():
+        trainer.camera_isp.module.exposure_params.copy_(torch.linspace(-0.5, 0.5, len(trainer.dataset.train)))
+    stops = float((weights * trainer.camera_isp.module.exposure_params).sum())
+    expected = trainer.camera_isp.apply_parameters(
+        torch.tensor([stops], device="cuda"), trainer.camera_isp.module.vignetting_params,
+        trainer.camera_isp.module.color_params[:1] * 0 + (weights[:, None] * trainer.camera_isp.module.color_params).sum(0),
+        trainer.camera_isp.module.crf_params, image, pixel_grid(test.height, test.width, "cuda").reshape(test.height, test.width, 2),
+        test.width, test.height, 0, 0)
+    torch.testing.assert_close(trainer.evaluator.camera_isp(image, test), expected)  # the evaluator uses the neighbours

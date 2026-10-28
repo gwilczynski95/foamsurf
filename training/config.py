@@ -197,8 +197,10 @@ class OptimizationConfig:
     # matches the pixel's area average in expectation; evaluation keeps the centres.
     ray_jitter: bool = False
     # PPISP camera model after the water (training/camera_isp.py): per-photo exposure and colour, shared
-    # vignetting and response curve; test views with neutral exposure and colour.
+    # vignetting and response curve; test views with the exposure and colour of their
+    # camera_isp_neighbours nearest training photos (1 / distance weights; 0 = neutral).
     camera_isp: bool = False
+    camera_isp_neighbours: int = 4
     ocean_epi_weight_start: float = 0.0
     ocean_epi_weight_end: float = 0.0
     ocean_res_weight: float = 0.0
@@ -573,6 +575,8 @@ class ExperimentConfig:
             raise ValueError("invalid ocean settings (weights >= 0, downscale/samples >= 1, from <= until)")
         if self.model.gaussian_mip_filter < 0:
             raise ValueError("gaussian_mip_filter is a variance in pixels^2 (>= 0)")
+        if self.optimization.camera_isp_neighbours < 0:
+            raise ValueError("camera_isp_neighbours must be >= 0 (0 = neutral test views)")
         if ocean_on and self.model.medium_type != "rgb_backscatter":
             raise ValueError("ocean losses need the RGB medium (object and medium parts)")
         if optimization.trinocular_weight > 0 and self.model.medium_type != "rgb_backscatter":

@@ -1,0 +1,52 @@
+# Current SeaThru default (2026-10-28): OceanSplat + PPISP, run _clamp05_minit_rs_rel_oceane_isp of
+# sweep 551590 = configs/iui3_default.yaml plus:
+# - Gaussian scale at most 5% of the scene (_clamp05);
+# - medium colour initialised from the training photos (_minit);
+# - resolution schedule 1/4 -> 1/2 from 6k -> full from 12k (_rs);
+# - WaterSplatting / OceanSplat loss: L1 and D-SSIM divided by the detached prediction (_rel);
+# - OceanSplat trinocular consistency, epipolar depth, residual and depth-aware opacity, 4k-24k (_oceane);
+# - PPISP camera model (_isp): per-photo exposure and colour, shared vignetting and response curve;
+#   test views with the exposure and colour of their 4 nearest training photos.
+# Test PSNR (mean of seeds 42 and 43; test views with neighbour exposure): IUI3 31.10, Curacao 33.77,
+# JG 23.49, Panama 31.42, mean 29.95 (WaterSplatting, our runs: 29.63).
+# configs/iui3_default.yaml stays the base of the older sweep suffixes; tests/test_camera_isp.py checks
+# that this file equals it plus the suffixes above.
+base_config: iui3_5k.yaml
+output_dir: outputs/seathru_default/run
+gaussian_rgb_activation: sigmoid
+medium_color_activation: sigmoid
+wandb_project: foamsurf_iui3_medium_color
+overrides:
+  # configs/iui3_default.yaml
+  - medium_fix.chroma_weight=1.0
+  - medium_fix.chroma_alpha_threshold=0.02
+  - medium_fix.surface_coverage_weight=3.0e-3
+  - medium_fix.surface_coverage_threshold=0.9
+  - medium_fix.water_clear_weight=1.0e-2
+  - joint.gaussian_adaptation.gradient_threshold=0.0002
+  - joint.gaussian_adaptation.max_points=700000
+  - joint.gaussian_adaptation.gradient_attenuation_compensation=true
+  - joint.model.appearance=sh
+  - joint.model.sh_degree=3
+  - joint.optimization.gaussian_sh_degree_interval=1000
+  - warmup.background=[0.0, 0.0, 0.0]
+  - joint.background=[0.0, 0.0, 0.0]
+  # _clamp05
+  - joint.optimization.gaussian_max_scale_scene_fraction=0.05
+  # _minit
+  - joint.model.medium_initial_color_from_data=true
+  # _rs
+  - joint.optimization.training_downscale_levels=2
+  - joint.optimization.training_downscale_interval=6000
+  # _rel
+  - joint.optimization.reconstruction_loss=reg_l1_reg_dssim
+  # _oceane
+  - joint.optimization.ocean_tri_weight=0.1
+  - joint.optimization.ocean_epi_weight_start=0.4
+  - joint.optimization.ocean_epi_weight_end=0.2
+  - joint.optimization.ocean_res_weight=0.01
+  - joint.optimization.ocean_alpha_until=12000
+  - joint.optimization.ocean_from=4000
+  # _isp
+  - joint.optimization.camera_isp=true
+  - joint.optimization.camera_isp_neighbours=4

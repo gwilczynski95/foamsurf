@@ -346,12 +346,13 @@ class Trainer:
         self.camera_isp = None
         if config.optimization.camera_isp:
             self.camera_isp = CameraISP([camera.name for camera in self.dataset.train], config.optimization.iterations,
-                                        self.device)
+                                        self.device, torch.stack([camera.origin for camera in self.dataset.train]),
+                                        config.optimization.camera_isp_neighbours)
             if payload is not None and payload.get("camera_isp") is not None:
                 self.camera_isp.load_state_dict(payload["camera_isp"])
             self.evaluator.camera_isp = lambda image, camera: self.camera_isp.apply(
                 image, pixel_grid(camera.height, camera.width, image.device).reshape(*image.shape[:-1], 2),
-                (camera.height, camera.width), None)
+                (camera.height, camera.width), None, camera.origin)
         self.alpha_mlp = self.alpha_optimizer = None
         if config.optimization.ocean_alpha_until > 0:
             self.alpha_mlp = DepthAwareOpacity().to(self.device)

@@ -10,9 +10,10 @@
 #SBATCH --exclude=c22,c11
 #SBATCH --time=24:00:00
 #SBATCH --array=0-7%7
-# The default configuration (configs/iui3_default.yaml) on every SeaThru-NeRF scene,
-# seeds 42 and 43: task = 2 * scene index + seed index. Each task trains, then audits
+# The default configuration (configs/seathru_default.yaml: OceanSplat + PPISP) on every SeaThru-NeRF
+# scene, seeds 42 and 43: task = 2 * scene index + seed index. Each task trains, then audits
 # best.pt and last.pt (water/seabed metrics on configs/water_sam/<scene>.npz).
+# Every other variant set builds its suffixes on configs/iui3_default.yaml (FS_CONFIG overrides both).
 #
 #   sbatch scripts/train_seathru.sbatch
 # One scene / other seeds:  FS_SCENES="Curasao-Undistorted" FS_SEEDS="42" sbatch --array=0 ...
@@ -143,7 +144,7 @@ export OPENBLAS_NUM_THREADS=4
 # Panama's directory name is misspelled in the dataset.
 ALL_SCENES="IUI3-RedSea-Undistorted Curasao-Undistorted JapaneseGradens-RedSea-Undistorted Panama-Undisorted"
 case "${FS_VARIANT_SET:-default}" in
-  default) VARIANTS=(""); DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  default) VARIANTS=(""); DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43"; SET_CONFIG=configs/seathru_default.yaml ;;
   cells)
     VARIANTS=("" _cs5 _cs10 _view75 _view75_cs5 _view75_cs10 _view75_c20k _view75_c20k_cs5 _view75_c20k_cs10)
     DEFAULT_SCENES="IUI3-RedSea-Undistorted Panama-Undisorted"; DEFAULT_SEEDS="42" ;;
@@ -392,7 +393,7 @@ WANDB="${FS_WANDB:-disabled}"
 OUTPUT="outputs/seathru/${RUN_ID}/${NAME}"
 
 ARGS=(
-  --config "${FS_CONFIG:-configs/iui3_default.yaml}"
+  --config "${FS_CONFIG:-${SET_CONFIG:-configs/iui3_default.yaml}}"
   --output-dir "$OUTPUT"
   --run-suffix "$NAME"
   --set "warmup.dataset.source_path=$SOURCE"
@@ -403,7 +404,7 @@ ARGS=(
 for item in "${OVERRIDES[@]}"; do ARGS+=(--set "$item"); done
 if [[ "${FS_RESUME:-0}" == 1 ]]; then ARGS+=(--resume); fi
 
-echo "scene=$SCENE variant=${VARIANT:-none} seed=$SEED output=$OUTPUT"
+echo "scene=$SCENE variant=${VARIANT:-none} seed=$SEED config=${ARGS[1]} output=$OUTPUT"
 if (( ${#OVERRIDES[@]} )); then printf '  --set %s\n' "${OVERRIDES[@]}"; fi
 if [[ "${FS_DRY_RUN:-0}" == 1 ]]; then
   python train.py "${ARGS[@]}" --dry-run > /dev/null

@@ -9,7 +9,19 @@ Hybryda: Gaussy 3D (powierzchnia/dno) + medium w komórkach Voronoi (woda). Scen
 - Dataset: `/shared/sets/datasets/SeathruNeRF_dataset/IUI3-RedSea-Undistorted` (`sparse/0` albo płaskie `sparse/`), split `llffhold=8`, rozdzielczość 1.
 - W&B: `mlpolska/foamsurf_iui3_medium_color`.
 
-## Konfiguracja domyślna
+## Konfiguracja domyślna (od 2026-10-28): OceanSplat + PPISP
+
+`configs/seathru_default.yaml` = `configs/iui3_default.yaml` (opis niżej) + wariant `_clamp05_minit_rs_rel_oceane_isp` ze sweepu 551590:
+
+- skala Gaussa maks. 5% sceny (`_clamp05`), kolor medium inicjalizowany ze zdjęć treningowych (`_minit`);
+- harmonogram rozdzielczości ¼ → ½ od 6k → pełna od 12k (`_rs`);
+- strata WaterSplatting/OceanSplat: L1 i D-SSIM dzielone przez odłączoną predykcję (`_rel`);
+- OceanSplat: spójność trójokularowa, głębia epipolarna, residuum i krycie zależne od głębi, 4k–24k (`_oceane`);
+- PPISP (`_isp`, `training/camera_isp.py`): ekspozycja i kolor per zdjęcie, wspólna winieta i krzywa odpowiedzi; widok testowy dostaje ekspozycję i kolor 4 najbliższych (po środku kamery) zdjęć treningowych, wagi 1/odległość (`camera_isp_neighbours`, 0 = neutralna).
+
+Wynik (PSNR, średnia z seedów 42 i 43): IUI3 31,10, Curaçao 33,77, JG 23,49, Panama 31,42, średnio 29,95 dB; WaterSplatting (nasze runy) 29,63. `sbatch scripts/train_seathru.sbatch` (zestaw `default`) trenuje ten config na 4 scenach × 2 seedy. Pozostałe zestawy budują sufiksy na `configs/iui3_default.yaml`, więc ich nazwy zachowują znaczenie; sufiksy na nowym defaulcie: `FS_CONFIG=configs/seathru_default.yaml`.
+
+### Poprzedni default: `configs/iui3_default.yaml`
 
 `configs/iui3_default.yaml` = `B0_chroma100_chthr02_scov3e3_cthr90_g700k_tden_water1e2_bk` ze sweepu 542092: `configs/iui3_5k.yaml` + sigmoid na RGB Gaussów i komórek, czarne tło, oraz:
 
