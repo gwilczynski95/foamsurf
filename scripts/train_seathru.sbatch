@@ -110,6 +110,15 @@
 # 3D filter (variance 0.2 px^2). On the 'ocean' control _clamp05_minit_rel, every scene, seeds 42 and
 # 43 (24 tasks):
 #   FS_VARIANT_SET=alias sbatch --array=0-23 scripts/train_seathru.sbatch
+# The same on the best OceanSplat variant (550540: _clamp05_minit_rs_rel_oceane, control in 550540),
+# plus that variant without _rel (our photometric loss: _rel alone was -0.22 dB), every scene, seeds 42
+# and 43 (32 tasks):
+#   FS_VARIANT_SET=alias2 sbatch --array=0-31 scripts/train_seathru.sbatch
+# The camera after the water: _isp = PPISP (training/camera_isp.py, CVPR 2026) with per-photo exposure and
+# colour, shared vignetting and response curve; test views neutral. Fitted after training on a frozen
+# 550540 model it already gave +0.26 dB (Curacao +0.48, IUI3 +0.43). On _clamp05_minit_rs_rel_oceane
+# (control in 550540), every scene, seeds 42 and 43 (8 tasks):
+#   FS_VARIANT_SET=isp sbatch --array=0-7 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 # Cluster paths by default; another machine (scripts/run_local.sh) sets FS_ROOT, FS_ENV, FS_DRIVER,
@@ -163,6 +172,13 @@ case "${FS_VARIANT_SET:-default}" in
   alias)
     VARIANTS=(_clamp05_minit_rel_jit _clamp05_minit_rel_mip _clamp05_minit_rel_jit_mip)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  isp)
+    VARIANTS=(_clamp05_minit_rs_rel_oceane_isp)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  alias2)
+    VARIANTS=(_clamp05_minit_rs_rel_oceane_jit _clamp05_minit_rs_rel_oceane_mip
+              _clamp05_minit_rs_rel_oceane_jit_mip _clamp05_minit_rs_oceane)
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   diag)
     VARIANTS=(_minit_it10k _minit_nooverlap_it10k _minit_nochroma_it10k _minit_nocover_it10k
               _minit_noclear_it10k _minit_nobin_it10k _minit_nosmooth_it10k _plain_minit_it10k)
@@ -206,6 +222,8 @@ variant_overrides() {
       # Shorter training: the schedules that end at 30000 end with it (densification still stops at 15000).
       echo "joint.optimization.iterations=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.gaussian_adaptation.opacity_prune_until=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_isp(.*)$ ]]; then
+      echo "joint.optimization.camera_isp=true"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_jit(.*)$ ]]; then
       echo "joint.optimization.ray_jitter=true"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_mip(.*)$ ]]; then

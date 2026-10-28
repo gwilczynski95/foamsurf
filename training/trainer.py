@@ -39,6 +39,7 @@ from .optimizer import (
     update_medium_learning_rates,
 )
 from .sampler import RandomCameraRaySampler
+from .camera_isp import CameraISP, pixel_grid
 from .oceansplat import DepthAwareOpacity, adjusted_scene, downscaled_target, ocean_terms
 from .view_consistency import blended_depth, nerfstudio_scale, trinocular_loss
 
@@ -342,6 +343,15 @@ class Trainer:
         self.last_trinocular = {"obj": float("nan"), "full": float("nan")}
         self.last_ocean = dict.fromkeys(("obj", "full", "smooth", "epi", "res", "alpha_weight"), float("nan"))
         # OceanSplat depth-aware opacity alpha^d: a small MLP with its own optimizer (checkpointed).
+        self.camera_isp = None
+        if config.optimization.camera_isp:
+            self.camera_isp = CameraISP([camera.name for camera in self.dataset.train], config.optimization.iterations,
+                                        self.device)
+            if payload is not None and payload.get("camera_isp") is not None:
+                self.camera_isp.load_state_dict(payload["camera_isp"])
+            self.evaluator.camera_isp = lambda image, camera: self.camera_isp.apply(
+                image, pixel_grid(camera.height, camera.width, image.device).reshape(*image.shape[:-1], 2),
+                (camera.height, camera.width), None)
         self.alpha_mlp = self.alpha_optimizer = None
         if config.optimization.ocean_alpha_until > 0:
             self.alpha_mlp = DepthAwareOpacity().to(self.device)
@@ -397,10 +407,27 @@ class Trainer:
         )
 
     def _checkpoint_extras(self) -> dict | None:
-        """Optional state saved next to the model (OceanSplat alpha^d MLP and its optimizer)."""
-        if self.alpha_mlp is None:
-            return None
-        return {"alpha_mlp": self.alpha_mlp.state_dict(), "alpha_optimizer": self.alpha_optimizer.state_dict()}
+        """Training state outside the model and its two optimizers (OceanSplat alpha^d, camera ISP)."""
+        extras = {}
+        if self.alpha_mlp is not None:
+            extras.update(alpha_mlp=self.alpha_mlp.state_dict(), alpha_optimizer=self.alpha_optimizer.state_dict())
+        if self.camera_isp is not None:
+            extras["camera_isp"] = self.camera_isp.state_dict()
+        return extras or None
+
+    def _apply_camera_isp(self, image: torch.Tensor, batch) -> torch.Tensor:
+        """The training image through the camera model of its photo (identity without camera_isp)."""
+        if self.camera_isp is None:
+            return image
+        camera = batch.camera
+        if batch.image_size is not None:  # whole image at 1/downscale (resolution schedule)
+            height, width = batch.image_size
+            coords = pixel_grid(height, width, image.device)
+        else:
+            height, width = camera.height, camera.width
+            index = batch.rays.pixel_indices
+            coords = torch.stack((index % width, torch.div(index, width, rounding_mode="floor")), -1).float() + 0.5
+        return self.camera_isp.apply(image, coords, (height, width), camera.name)
 
     def _training_row(
         self,
@@ -673,7 +700,11 @@ class Trainer:
             downscaled_target(camera, optimization.ocean_downscale, self.config.background),
             self.trinocular_baseline, optimization.ocean_downscale, optimization.trinocular_epsilon,
             optimization.ocean_smooth_gamma, optimization.ocean_gaussian_samples,
-            depth_unit=self.nerfstudio_scale)
+            depth_unit=self.nerfstudio_scale,
+            camera_model=None if self.camera_isp is None else (
+                lambda image: self.camera_isp.apply(
+                    image, pixel_grid(*image.shape[:2], image.device).reshape(*image.shape[:2], 2),
+                    image.shape[:2], camera.name)))
         for name in ("obj", "full", "smooth", "epi", "res"):
             self.last_ocean[name] = float(terms[name].detach())
         return (optimization.ocean_tri_weight * (terms["obj"] + terms["full"] + terms["smooth"])
@@ -851,7 +882,7 @@ class Trainer:
                     ),
                 }
         loss = b0_reconstruction_loss(
-            render.image, batch.target,
+            self._apply_camera_isp(render.image, batch), batch.target,
             mode=self.config.optimization.reconstruction_loss,
             dssim_weight=self.config.optimization.dssim_weight,
             image_size=batch.image_size or (batch.camera.height, batch.camera.width),
@@ -884,11 +915,16 @@ class Trainer:
         ocean = self._ocean_term(iteration, batch, medium_scene)
         if ocean is not None:
             loss = replace(loss, total=loss.total + ocean)
+        if self.camera_isp is not None:
+            loss = replace(loss, total=loss.total + self.camera_isp.regularization())
+            self.camera_isp.zero_grad()
         if self.alpha_optimizer is not None:
             self.alpha_optimizer.zero_grad(set_to_none=True)
         loss.total.backward()
         if self.alpha_optimizer is not None and self._alpha_weight(iteration) > 0.0:
             self.alpha_optimizer.step()
+        if self.camera_isp is not None:
+            self.camera_isp.step()
         if collect_any and render.diagnostics is None:
             raise RuntimeError("adaptation statistics were not returned")
         if collect_gaussian:

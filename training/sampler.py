@@ -70,8 +70,6 @@ class RandomCameraRaySampler:
             camera_index = random.randrange(len(self.dataset.train))
         camera = self.dataset.train[camera_index]
         if self.downscale > 1:
-            if self.jitter:
-                raise ValueError("ray jitter is not implemented for downscaled images")
             return self._downscaled(camera)
         pixel_count = camera.width * camera.height
         if self.full_image:
@@ -120,8 +118,9 @@ class RandomCameraRaySampler:
         height, width = camera.height // factor, camera.width // factor
         intrinsics = (None if camera.intrinsics is None
                       else tuple(value / factor for value in camera.intrinsics))
+        offsets = (torch.rand(height, width, 2, device=camera.origin.device) - 0.5) if self.jitter else None
         bundle = generate_camera_rays(camera.origin, camera.right, camera.down, camera.forward, width, height,
-                                      camera.fov_x, camera.fov_y, intrinsics=intrinsics)
+                                      camera.fov_x, camera.fov_y, intrinsics=intrinsics, pixel_offsets=offsets)
         rays = RayBundle(bundle.origins.reshape(-1, 3), bundle.directions.reshape(-1, 3))
 
         def resize(image):

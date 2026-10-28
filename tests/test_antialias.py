@@ -1,5 +1,5 @@
 """Anti-aliasing: training rays jittered inside their pixel (_jit) and the Mip-Splatting 3D filter
-(_mip), and the 'alias' set."""
+(_mip), and the 'alias' / 'alias2' sets."""
 import os
 import subprocess
 import sys
@@ -78,6 +78,26 @@ def test_sampler_rays_stay_in_their_pixel(jitter):
     torch.testing.assert_close(batch.target, cam.foreground.reshape(-1, 3))  # the pixel value, not resampled
 
 
+@pytest.mark.parametrize("jitter", [False, True])
+def test_downscaled_rays_stay_in_their_pixel(jitter):
+    """The resolution schedule (_rs): rays of the 1/2 image, jittered inside its (2x larger) pixels."""
+    torch.manual_seed(0)
+    cam = camera(width=64, height=48)
+    sampler = RandomCameraRaySampler(FakeDataset(cam), 0, (0.0, 0.0, 0.0), full_image=True, jitter=jitter)
+    sampler.downscale = 2
+    batch = sampler.next()
+    assert batch.image_size == (24, 32)
+    d = batch.rays.directions
+    x = FX / 2 * d[:, 0] / d[:, 2] + 16; y = FY / 2 * d[:, 1] / d[:, 2] + 12
+    i = torch.arange(32).repeat(24).float(); j = torch.arange(24).repeat_interleave(32).float()
+    dx, dy = x - i, y - j
+    assert dx.min() >= -1e-4 and dx.max() < 1 + 1e-4 and dy.min() >= -1e-4 and dy.max() < 1 + 1e-4
+    if jitter:
+        assert dx.std() > 0.25 and abs(float(dy.mean()) - 0.5) < 0.05
+    else:
+        torch.testing.assert_close(dx, torch.full_like(dx, 0.5), atol=1e-4, rtol=0)
+
+
 def gaussians(means, log_scales):
     model = SurfaceGaussianModel(np.asarray(means, np.float32), np.full((len(means), 3), 0.5, np.float32),
                                  ModelConfig(appearance="rgb"), "cpu")
@@ -133,8 +153,13 @@ def test_suffixes_validation_and_set(tmp_path):
     config.model.gaussian_mip_filter = 0.0
     config.optimization.ray_jitter = True
     config.optimization.training_downscale_levels = 2
-    with pytest.raises(ValueError, match="jitter"):
-        config.validate()
+    config.optimization.full_image_batch = True
+    config.validate()  # jitter works with the resolution schedule
+    m2 = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "b", overrides=overrides("_clamp05_minit_rs_rel_oceane_jit_mip"))
+    o = m2["joint"]["optimization"]
+    assert o["ray_jitter"] is True and o["training_downscale_levels"] == 2 and o["ocean_from"] == 4000
+    assert o["reconstruction_loss"] == "reg_l1_reg_dssim" and m2["joint"]["model"]["gaussian_mip_filter"] == 0.2
+    assert "reconstruction_loss" not in str(overrides("_clamp05_minit_rs_oceane"))
     env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "alias",
            "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
            "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
@@ -142,6 +167,9 @@ def test_suffixes_validation_and_set(tmp_path):
                                       text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
     assert "out of range" in run(24).stderr  # 3 variants x 4 scenes x 2 seeds
     assert run(23).returncode == 0
+    env["FS_VARIANT_SET"] = "alias2"
+    assert "out of range" in run(32).stderr  # 4 variants x 4 scenes x 2 seeds
+    assert run(31).returncode == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
@@ -159,3 +187,13 @@ def test_short_real_training_with_jitter_and_mip_filter_and_resume(tmp_path):
     assert g.mip_filter is not None and g.mip_filter.shape == (g.point_count,) and bool((g.mip_filter > 0).all())
     summary, _, _ = trainer.evaluator.evaluate(4)
     assert np.isfinite(summary["eval/primary_psnr"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+def test_short_real_training_with_jitter_through_the_resolution_schedule(tmp_path):
+    from test_medium_fix import _short_manifest
+    m = _short_manifest(tmp_path, "rs", overrides("_rs_jit_mip") + [
+        "joint.optimization.training_downscale_levels=1", "joint.optimization.training_downscale_interval=2"])
+    fit_iui3(m)  # iterations 1-2 at 1/2 resolution, 3-4 at full resolution, jittered throughout
+    checkpoint = torch.load(tmp_path / "rs/joint/checkpoints/last.pt", map_location="cpu", weights_only=False)
+    assert checkpoint["iteration"] == 4

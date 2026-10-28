@@ -196,10 +196,13 @@ def adjusted_scene(scene, mlp: DepthAwareOpacity, weight: float, camera_origin: 
 
 def ocean_terms(renderer, make_scene, medium_scene, background, camera, target, baseline: float,
                 downscale: int, epsilon: float, gamma: float, gaussian_samples: int,
-                epi_opacity: float = 0.8, depth_unit: float = 1.0, generator: torch.Generator | None = None):
+                epi_opacity: float = 0.8, depth_unit: float = 1.0, generator: torch.Generator | None = None,
+                camera_model=None):
     """L_obj-stereo + L_full-stereo, L_smooth, L_epi, L_res for one training camera.
     make_scene(origin) -> GaussianScene seen from origin. target [H, W, 3] photo at 1/downscale.
     depth_unit: scene units -> the paper's (nerfstudio) units for the depth errors of L_epi and L_res.
+    camera_model: optional callable(image [H, W, 3]) -> image, the camera of the central photo (PPISP), applied
+    to the warped full image before it is compared with the photo (L_full); renders are compared raw.
     Returns dict of losses (tensors) and floats for logging."""
     height, width, fx, fy, cx, cy = camera_geometry(camera, downscale)
     background_tuple = tuple(float(v) for v in background)
@@ -238,7 +241,8 @@ def ocean_terms(renderer, make_scene, medium_scene, background, camera, target, 
         warped, inside = sample_image(image, x, y)
         mask = surface & inside
         obj_loss = obj_loss + regularized_l1(warped, obj_c, full_c, mask, epsilon)
-        full_loss = full_loss + regularized_l1(warped + med_c, target, full_c, mask, epsilon)
+        full = warped + med_c if camera_model is None else camera_model(warped + med_c)
+        full_loss = full_loss + regularized_l1(full, target, full_c, mask, epsilon)
         smooth_loss = smooth_loss + smoothness(disparity, target, surface, gamma)
 
     # Gaussians projected into the central view (a random subset of those in front of the camera)

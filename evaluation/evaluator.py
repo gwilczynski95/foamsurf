@@ -113,6 +113,8 @@ class Evaluator:
         self.config = config
         self.layer_ground_truth = layer_ground_truth
         self.output_dir = output_dir
+        # Optional camera model applied to the hybrid image: callable(image [H, W, 3], camera) -> image.
+        self.camera_isp = None
 
     @torch.no_grad()
     def _timed(self, operation):
@@ -211,7 +213,8 @@ class Evaluator:
                     )
                 )
 
-                hybrid_image = hybrid.image.clamp(0.0, 1.0)
+                hybrid_image = (hybrid.image if self.camera_isp is None
+                                else self.camera_isp(hybrid.image, camera)).clamp(0.0, 1.0)
                 gaussian_image = gaussian.image.clamp(0.0, 1.0)
                 medium_image = medium.image.clamp(0.0, 1.0)
                 error = (hybrid_image - target).abs()
