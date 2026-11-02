@@ -217,8 +217,12 @@ class ColmapDataset:
         resolution: int = 1,
         device: str | torch.device = "cuda",
         llffhold: int = 8,
+        validation_hold: int = 0,
     ) -> None:
         self.root = Path(root)
+        self.validation_hold = int(validation_hold)
+        if self.validation_hold < 0 or self.validation_hold == 1:
+            raise ValueError("validation_hold must be 0 (off) or >= 2")
         self.resolution = int(resolution)
         self.device = torch.device(device)
         self.sampling_mode = "camera"
@@ -275,11 +279,18 @@ class ColmapDataset:
             fx, fy = _focal_lengths(calibration)
             fov_x = 2.0 * math.atan(calibration.width / (2.0 * fx))
             fov_y = 2.0 * math.atan(calibration.height / (2.0 * fy))
+            # The image is kept once, as the 3-channel foreground: an alpha that is a view of the RGBA
+            # tensor would keep all four channels alive, and an opaque photo's alpha is a constant one
+            # (Garden: 185 photos, 5.6 GB -> 2.4 GB on the GPU; values unchanged).
             alpha = pixels[..., 3:4]
+            foreground = pixels[..., :3] * alpha
+            alpha = (torch.ones((1, 1, 1), dtype=pixels.dtype, device=pixels.device).expand_as(alpha)
+                     if bool((alpha == 1.0).all()) else alpha.clone())
             if calibration.model not in {'PINHOLE', 'SIMPLE_PINHOLE'}:
                 raise ValueError('Undistort COLMAP images before training (PINHOLE required)')
             cx, cy = calibration.params[-2:]
             sx, sy = pixels.shape[1] / calibration.width, pixels.shape[0] / calibration.height
+            del pixels
             cameras.append(
                 Camera(
                     name=Path(record.name).stem,
@@ -292,7 +303,7 @@ class ColmapDataset:
                     intrinsics=(fx * sx, fy * sy, float(cx) * sx, float(cy) * sy),
                     fov_x=fov_x,
                     fov_y=fov_y,
-                    foreground=pixels[..., :3] * alpha,
+                    foreground=foreground,
                     alpha=alpha,
                 )
             )
@@ -305,6 +316,10 @@ class ColmapDataset:
             camera for index, camera in enumerate(cameras)
             if index % self.llffhold != 0
         ]
+        if self.validation_hold:
+            # every validation_hold-th training photo (name order) is evaluated instead of the test views
+            self.test = self.train[::self.validation_hold]
+            self.train = [camera for index, camera in enumerate(self.train) if index % self.validation_hold != 0]
         if not self.train or not self.test:
             raise ValueError("COLMAP LLFF split produced an empty split")
         self.width = self.train[0].width

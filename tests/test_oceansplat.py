@@ -244,3 +244,26 @@ def test_short_real_training_with_full_oceansplat(tmp_path):
         assert values and all(np.isfinite(v) and v >= 0 for v in values), name
     checkpoint = torch.load(tmp_path / "ocean/joint/checkpoints/last.pt", map_location="cpu", weights_only=False)
     assert checkpoint["iteration"] == 4 and "alpha_mlp" in checkpoint
+
+
+def test_hidden_gaussians_pull_the_surface_back_unless_visible_is_set():
+    # a Gaussian 3 units behind the opaque plane: without the visibility test L_epi and L_res pull the rendered
+    # depth to it (Garden: ~50% of the Gaussians in L_epi are hidden and give ~90% of it); with visible > 0 it is skipped
+    camera = plane_camera()
+    renderer = PlaneRenderer()
+    target = renderer.render(oc.image_rays(camera, 1)).direct.reshape(48, 64, 3) + 0.05
+    scene = plane_scene(extra_means=[[0.2, 0.1, PlaneRenderer.Z + 3.0]])
+    terms = lambda visible: oc.ocean_terms(renderer, lambda origin: scene, None, (0, 0, 0), camera, target, 0.6, 1,
+                                           1e-3, 1.0, 1000, generator=torch.Generator().manual_seed(1), visible=visible)
+    hidden, skipped = terms(0.0), terms(0.1)
+    assert hidden["res"].item() > 1.0 and hidden["epi"].item() > 0.1
+    assert skipped["res"].item() < 1e-3 and skipped["epi"].item() < 1e-3
+    near = plane_scene(extra_means=[[0.2, 0.1, PlaneRenderer.Z * 1.05]])  # within the tolerance: still used
+    kept = oc.ocean_terms(renderer, lambda origin: near, None, (0, 0, 0), camera, target, 0.6, 1, 1e-3, 1.0, 1000,
+                          generator=torch.Generator().manual_seed(1), visible=0.1)
+    assert kept["res"].item() > 0.05
+
+
+def test_epivis_suffix():
+    assert overrides("_epivis") == ["joint.optimization.ocean_visible=0.1"]
+    assert ExperimentConfig().optimization.ocean_visible == 0.0

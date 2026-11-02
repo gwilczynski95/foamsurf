@@ -197,3 +197,43 @@ def test_short_real_training_with_jitter_through_the_resolution_schedule(tmp_pat
     fit_iui3(m)  # iterations 1-2 at 1/2 resolution, 3-4 at full resolution, jittered throughout
     checkpoint = torch.load(tmp_path / "rs/joint/checkpoints/last.pt", map_location="cpu", weights_only=False)
     assert checkpoint["iteration"] == 4
+
+
+def test_mip_filter_without_compensation_only_dilates():
+    # as 3DGS "classic" / WaterSplatting: a sub-pixel surfel becomes pixel-sized and keeps its opacity
+    g = gaussians([[0.0, 0.0, 4.0], [0.1, 0.0, 4.0]], [[np.log(1e-3), np.log(2e-3)], [np.log(1.0), np.log(0.5)]])
+    plain = g.render_scene(None)
+    g.mip_filter = torch.tensor([0.01, 0.01])
+    g.mip_compensate = False
+    dilated = g.render_scene(None)
+    torch.testing.assert_close(dilated.log_scales.exp(), (plain.log_scales.exp() ** 2 + 0.01 ** 2).sqrt())
+    torch.testing.assert_close(dilated.opacity_logits, plain.opacity_logits)  # opacity kept
+    assert ExperimentConfig().model.gaussian_mip_compensate is True  # the default keeps the integral
+
+
+def test_classic_suffix_and_set(tmp_path):
+    assert overrides("_classic") == ["joint.model.gaussian_mip_compensate=false"]
+    assert overrides("_classic3") == ["joint.model.gaussian_mip_compensate=false", "joint.model.gaussian_mip_filter=0.3"]
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_classic3"))
+    assert m["joint"]["model"]["gaussian_mip_compensate"] is False and m["joint"]["model"]["gaussian_mip_filter"] == 0.3
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "classic",
+           "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(23).returncode == 0 and "Panama-Undisorted_nomip_seed43" in run(23).stdout
+    assert "out of range" in run(24).stderr
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+def test_short_real_training_with_classic_mip_filter_and_resume(tmp_path):
+    from test_medium_fix import _short_manifest
+    from training.trainer import Trainer
+    m = _short_manifest(tmp_path, "classic", overrides("_mip_classic"))
+    fit_iui3(m)
+    root = tmp_path / "classic/joint"
+    config = ExperimentConfig.load(root / "config.yaml")
+    assert config.model.gaussian_mip_compensate is False
+    config.output_dir = str(tmp_path / "resumed")
+    trainer = Trainer(config, resume=root / "checkpoints/last.pt")  # the mode survives a resume
+    assert trainer.model.gaussians.mip_compensate is False and trainer.model.gaussians.mip_filter is not None

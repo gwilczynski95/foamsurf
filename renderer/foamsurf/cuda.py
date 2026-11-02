@@ -65,8 +65,8 @@ class NativeHybridRender:
     image: torch.Tensor
     alpha: torch.Tensor
     transmittance: torch.Tensor
-    surface_depth: torch.Tensor
-    surface_index: torch.Tensor
+    surface_depth: torch.Tensor | None  # None when rendered with surface=False
+    surface_index: torch.Tensor | None
     hit_depths: torch.Tensor
     hit_indices: torch.Tensor
     num_intersections: torch.Tensor
@@ -382,13 +382,20 @@ class NativeHybridRenderer:
                 self._gaussian_radius_squared,
                 self.max_batch_size,
             )
-        self._optix.SetGeometry(
+        geometry = (
             scene.means.contiguous(),
             scene.log_scales.exp().contiguous(),
             scene.quaternions.contiguous(),
             scene.opacity_logits.sigmoid().contiguous(),
             (1.0 + torch.nn.functional.softplus(scene.raw_kappa)).contiguous(),
         )
+        try:
+            self._optix.SetGeometry(*geometry)
+        except RuntimeError:
+            # OptiX allocates outside PyTorch: free PyTorch's cached blocks and build once more
+            # (1M+ Gaussians on the 1794x1188 scenes failed here with memory held in the cache).
+            torch.cuda.empty_cache()
+            self._optix.SetGeometry(*geometry)
         self._gaussian_geometry_is_set = True
         self._gaussian_signature = (scene.means.data_ptr(), scene.means.size(0))
 
@@ -476,10 +483,15 @@ class NativeHybridRenderer:
         collect_diagnostics: bool = False,
         diagnostic_target: torch.Tensor | None = None,
         screen_absolute: tuple[torch.Tensor, torch.Tensor] | None = None,
+        surface: bool = True,
+        check_inputs: bool = True,
     ) -> NativeHybridRender:
         """screen_absolute=(axes [2,3] camera right/down, buffer [N,2] zeros):
         backward adds sum over rays of |dL/dmean . axis| into buffer (AbsGS).
-        Needs an RGB medium and the fused backend."""
+        Needs an RGB medium and the fused backend.
+        surface=False skips the surface-depth pass (surface_depth / surface_index are None) and
+        check_inputs=False the per-call finiteness checks of the scenes: for viewing a trained model,
+        the image and every other output are unchanged."""
         if gaussians is None and voronoi is None:
             raise ValueError("at least one representation must be provided")
         if rays.shape[-1] != 6:
@@ -510,7 +522,8 @@ class NativeHybridRenderer:
                 ray_count, dtype=torch.uint32, device=rays.device
             )
         else:
-            voronoi.validate()
+            if check_inputs:
+                voronoi.validate()
             self._require_cuda_float32(voronoi.sites, "Voronoi scene")
             if self._voronoi_topology is None:
                 raise RuntimeError(
@@ -558,7 +571,8 @@ class NativeHybridRenderer:
                 (0, ray_count), dtype=torch.int32, device=rays.device
             )
         else:
-            gaussians.validate()
+            if check_inputs:
+                gaussians.validate()
             self._require_cuda_float32(gaussians.means, "Gaussian scene")
             if not self._gaussian_geometry_is_set:
                 raise RuntimeError(
@@ -680,7 +694,9 @@ class NativeHybridRenderer:
                 semantics=("max_rgb_coefficient_proxy" if rgb_parts is not None else "scalar_compositing_weights"),
             )
 
-        if hit_depths.size(0):
+        if not surface:
+            surface_depth = surface_index = None
+        elif hit_depths.size(0):
             surface_depth, surface_index = self._bindings.surface_hits(
                 hit_depths, hit_indices, self.near, self.far
             )
@@ -695,8 +711,8 @@ class NativeHybridRenderer:
             image=rgba[:, :3].reshape(*leading_shape, 3),
             alpha=rgba[:, 3:].reshape(*leading_shape, 1),
             transmittance=(1.0 - rgba[:, 3:]).reshape(*leading_shape, 1),
-            surface_depth=surface_depth.reshape(*leading_shape, 1),
-            surface_index=surface_index.reshape(*leading_shape, 1),
+            surface_depth=None if surface_depth is None else surface_depth.reshape(*leading_shape, 1),
+            surface_index=None if surface_index is None else surface_index.reshape(*leading_shape, 1),
             hit_depths=hit_depths,
             hit_indices=hit_indices,
             num_intersections=num_intersections.reshape(*leading_shape, 1),

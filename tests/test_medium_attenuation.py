@@ -64,8 +64,8 @@ def overrides(variant):
 
 
 def test_diag_set_and_leave_one_out_suffixes():
-    assert overrides("_it10k") == ["joint.optimization.iterations=10000",
-                                   "joint.gaussian_adaptation.opacity_prune_until=10000"]
+    assert overrides("_cut10k") == ["joint.optimization.iterations=10000",
+                                    "joint.gaussian_adaptation.opacity_prune_until=10000"]
     assert overrides("_nooverlap") == ["rgb_surface.weight=0.0"]
     assert overrides("_nochroma") == ["medium_fix.chroma_weight=0.0"]
     assert overrides("_nocover") == ["medium_fix.surface_coverage_weight=0.0"]
@@ -86,7 +86,7 @@ def test_diag_set_and_leave_one_out_suffixes():
 def test_medium_colour_without_sigmoid(tmp_path):
     from train import resolve_iui3
     assert overrides("_mdc") == ["medium_color_activation=dc"]
-    manifest = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "r", overrides=overrides("_minit_mdc_it10k"))
+    manifest = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "r", overrides=overrides("_minit_mdc_cut10k"))
     assert manifest["medium_color_activation"] == "dc"
     assert manifest["joint"]["model"]["medium_initial_color_from_data"] is True
     default = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "s", overrides=[])

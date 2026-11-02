@@ -120,6 +120,89 @@
 # 550540 model it already gave +0.26 dB (Curacao +0.48, IUI3 +0.43). On _clamp05_minit_rs_rel_oceane
 # (control in 550540), every scene, seeds 42 and 43 (8 tasks):
 #   FS_VARIANT_SET=isp sbatch --array=0-7 scripts/train_seathru.sbatch
+# Mip-Splatting 3D filter on the new default (configs/seathru_default.yaml = OceanSplat + PPISP): on
+# _rs_rel_oceane it gave Panama +0.24 dB (sub-pixel Gaussians), IUI3 / JG about 0; the Curacao loss was the
+# camera-cell exposure view that PPISP fixes. Every scene, seeds 42 and 43 (8 tasks):
+#   FS_VARIANT_SET=mip sbatch --array=0-7%7 scripts/train_seathru.sbatch
+# On the new default: _camw = homogeneous water at the cameras (medium_fix.camera_water_*: the free-water
+# cells within 2 camera spacings of a training camera pulled to the median water, weight 0.01; each
+# camera's cell had become a per-photo brightness knob, JG MTN_1098), _oe2_it20k = OceanSplat losses every
+# 2nd step (x2) and 20k iterations with every schedule scaled by 2/3 (the window costs 40-45% of the
+# training time; JG overfits after ~16k), _g400k = at most 400k Gaussians (rendering speed). Every scene,
+# seeds 42 and 43 (24 tasks):
+#   FS_VARIANT_SET=camw_speed sbatch --array=0-23%7 scripts/train_seathru.sbatch
+# camw_speed (552535) on the default: _oe2_it20k 30.14 dB in 29 min (default 29.95 in 53 min), _camw 30.10
+# (JG +0.49, Panama -0.19), _mip 30.00 (552525, Panama +0.19), _g400k 29.87. Do they add up (16 tasks)?
+#   FS_VARIANT_SET=combo sbatch --array=0-15%7 scripts/train_seathru.sbatch
+# Since 2026-10-29 configs/seathru_default.yaml is combo's _camw_oe2_it20k_mip (30.22 dB, 31 min), so the
+# mip / camw_speed / combo sets on it now mean their suffixes on top of that (the 552525 / 552535 / 552797
+# runs were on the earlier default). Faster training on the new default: _oe4 = OceanSplat every 4th step
+# (x4), _it15k = 15k iterations with every schedule scaled (16 tasks):
+#   FS_VARIANT_SET=speed2 sbatch --array=0-15%7 scripts/train_seathru.sbatch
+# More Gaussians on the new default: every scene hits the 700k cap (about 52 densifications skipped per
+# run) and WaterSplatting uses 0.8-1.14M (Panama 1.14M, where we lose on seabed detail) (16 tasks):
+#   FS_VARIANT_SET=capacity sbatch --array=0-15%7 scripts/train_seathru.sbatch
+# Lower SH degree on the new default: seabed Gaussians seen alone change colour with the camera distance
+# (Panama MTN_1547: 105 at 8.6 units, 69 at 16), i.e. the direction-only SH colour carries part of the
+# water's attenuation and cannot brighten a closer test view (16 tasks):
+#   FS_VARIANT_SET=shdeg sbatch --array=0-15%7 scripts/train_seathru.sbatch
+# Water attenuation from the data on the new default: _wfit = the cells start from the fit on the COLMAP
+# tracks, _wanc = that fitted beta_D also anchors the level of the free water during training (weight 0.1).
+# On foggy Garden the fit is close to the truth (beta_D 0.75 / 1.28 vs 0.60 / 1.10) while the trained medium
+# ends at half (0.27 / 0.53), the Gaussian colours taking the rest. SeaThru (16 tasks) and foggy Garden (8):
+#   FS_VARIANT_SET=wfit sbatch --array=0-15%7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=wfit_foggy sbatch --array=0-7 scripts/train_seathru.sbatch
+# Foggy Garden is ~3 dB below WaterSplatting, 95% of it on the near, covered scene (detail and low
+# frequency), not in the empty background. garden_diag = the default on the same photos without fog (is it
+# the representation or the fog?); garden_tune = Garden settings chosen on held-out training photos (_val8:
+# every 8th training photo evaluated, the test views unused): without the underwater medium priors (_plain),
+# lower densification threshold (_dth10 = 1e-4), both (2 + 8 tasks):
+#   FS_VARIANT_SET=garden_diag sbatch --array=0-1 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=garden_tune sbatch --array=0-7 scripts/train_seathru.sbatch
+# Since 2026-10-30 the default includes _wfit (553596: 30.36 dB, every scene up). Garden round 2 on held-out
+# training photos: capacity (WaterSplatting puts 2.67M Gaussians on clear Garden, we stop at the 700k cap;
+# clear Garden 25.2 vs 26.7 dB) and the attenuation anchor at 0.03 vs 0.1 (0.1 fixes the fog attenuation,
+# 0.58 vs truth 0.60, but costs 0.7 dB on hard) (9 + 4 tasks):
+#   FS_VARIANT_SET=garden_cap sbatch --array=0-8 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=garden_anchor sbatch --array=0-3 scripts/train_seathru.sbatch
+# Which underwater prior removes the Gaussians from the fogged background? Without the medium priors
+# (_plain) Garden coverage (alpha > 0.5) goes 74 -> 91% (easy) and 54 -> 86% (hard) at the same PSNR;
+# leave one out on held-out photos (8 tasks):
+#   FS_VARIANT_SET=garden_prior sbatch --array=0-7 scripts/train_seathru.sbatch
+# garden_prior result: the water clearing prior removes the fogged background (without it coverage 75 -> 92%
+# easy, 54 -> 81% hard) and costs PSNR on held-out photos (+0.10 / +0.49 without it); the other priors do
+# not matter there. Test it on the Garden test views (with the default as control, both on the current code)
+# and on SeaThru, where it was introduced for open water (8 + 8 tasks):
+#   FS_VARIANT_SET=noclear_foggy sbatch --array=0-7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=noclear sbatch --array=0-7%7 scripts/train_seathru.sbatch
+# Garden underfits: training PSNR = test PSNR (clear 25.7 / 25.2), renders blurred (Laplacian energy 0.39 of
+# the photo vs WS 0.56), the training curve still rising by ~3 dB at the end (20k, 161 photos = ~120 visits
+# each) and flat during the OceanSplat window. Longer training, no OceanSplat losses, no Mip filter, on
+# held-out photos (10 tasks):
+#   FS_VARIANT_SET=garden_fit sbatch --array=0-9 scripts/train_seathru.sbatch
+# garden_fit: without the OceanSplat losses Garden easy goes 31.6 -> 34.0 dB on held-out photos (34.5 with
+# 40k), clear 25.1 -> 25.8 (26.0); _noclear is neutral on SeaThru (30.35 vs 30.36). Test views (12 tasks), and
+# which OceanSplat part hurts Garden (depth-aware opacity, trinocular, epipolar + residual) (6 tasks):
+#   FS_VARIANT_SET=garden_final sbatch --array=0-11 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=garden_ocean sbatch --array=0-5 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=garden_anchor2 sbatch --array=0-5 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=garden_final2 sbatch --array=0-7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=unify sbatch --array=0-15 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=garden_epivis sbatch --array=0-1 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=epivis sbatch --array=0-7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=epivis_wanc sbatch --array=0-11 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=fitlr sbatch --array=0-19 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=adameps sbatch --array=0-7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=owin sbatch --array=0-7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=wsapp_wdir sbatch --array=0-15 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=classic sbatch --array=0-23 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=cull sbatch --array=0-23 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=fuzz sbatch --array=0-31 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=reset sbatch --array=0-23 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=cover sbatch --array=0-23 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=phase sbatch --array=0-7 scripts/train_seathru.sbatch
+# The default on foggy Garden (easy, hard), seeds 42 and 43 (4 tasks; no SAM audit there):
+#   FS_VARIANT_SET=foggy sbatch --array=0-3 scripts/train_seathru.sbatch
 set -Eeuo pipefail
 
 # Cluster paths by default; another machine (scripts/run_local.sh) sets FS_ROOT, FS_ENV, FS_DRIVER,
@@ -131,11 +214,18 @@ DATASETS=${FS_DATASETS:-/shared/sets/datasets/SeathruNeRF_dataset}
 # Mip-NeRF 360 outdoor scenes, trained on images_4 like 3DGS and 2DGS.
 MIPNERF=${FS_MIPNERF:-/shared/sets/datasets/mipnerf_ds}
 MIPNERF_OUTDOOR=" bicycle flowers garden stump treehill "
+# Mip-NeRF 360 Garden in simulated fog (WaterSplatting Sec. 4; 1297x840 = images_4, test = sorted[::8]).
+FOGGY=${FS_FOGGY:-/shared/sets/datasets/foamsurf/foggy_garden}
+FOGGY_SCENES=" garden_easy garden_hard "
+# The same Garden photos without fog (symlinks to foggy_garden/garden_easy/clear and its COLMAP model).
+GARDEN_CLEAR=${FS_GARDEN_CLEAR:-/shared/results/gmwilczn/foamsurf/datasets/garden_clear}
 export PATH="$FS_ENV/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CUDA_HOME="$FS_ENV"
 export FOAMSURF_DRIVER_LIBRARY_DIRECTORY="$DRIVER"
 export LD_LIBRARY_PATH="$DRIVER:$FS_ENV/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONUNBUFFERED=1
+# Fewer unusable reserved blocks (foggy Garden ran out of memory with 2.5 GB reserved but unallocated).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.9}
 export MAX_JOBS=2
 export OMP_NUM_THREADS=4
@@ -176,16 +266,130 @@ case "${FS_VARIANT_SET:-default}" in
   isp)
     VARIANTS=(_clamp05_minit_rs_rel_oceane_isp)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  mip)
+    VARIANTS=(_mip); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  camw_speed)
+    VARIANTS=(_camw _oe2_it20k _g400k); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  combo)
+    VARIANTS=(_camw_oe2_it20k _camw_oe2_it20k_mip); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  speed2)
+    VARIANTS=(_oe4 _it15k); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  capacity)
+    VARIANTS=(_g1000k _g1200k); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  shdeg)
+    VARIANTS=(_sh1 _sh2); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  wfit)
+    VARIANTS=(_wfit _wfit_wanc); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  wfit_foggy)
+    VARIANTS=(_wfit _wfit_wanc); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42 43" ;;
+  garden_diag)
+    VARIANTS=(""); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_clear"; DEFAULT_SEEDS="42 43" ;;
+  garden_tune)
+    VARIANTS=(_val8 _plain_val8 _dth10_val8 _plain_dth10_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42" ;;
+  garden_cap)
+    VARIANTS=(_val8 _g1500k_val8 _g3000k_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard garden_clear"; DEFAULT_SEEDS="42" ;;
+  garden_anchor)
+    VARIANTS=(_wanc03_val8 _wanc_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42" ;;
+  garden_prior)
+    VARIANTS=(_noclear_val8 _nobin_val8 _nochroma_val8 _nocover_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42" ;;
+  noclear)
+    VARIANTS=(_noclear); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  noclear_foggy)
+    VARIANTS=("" _noclear); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42 43" ;;
+  garden_fit)
+    VARIANTS=(_noclear_val8 _noclear_it40k_val8 _noclear_noocean_val8 _noclear_nomip_val8 _noclear_noocean_it40k_val8)
+    SET_CONFIG=configs/seathru_default.yaml; DEFAULT_SCENES="garden_easy garden_clear"; DEFAULT_SEEDS="42" ;;
+  garden_final)
+    VARIANTS=(_noclear_noocean _noclear_noocean_it40k); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard garden_clear"; DEFAULT_SEEDS="42 43" ;;
+  garden_ocean)
+    VARIANTS=(_noclear_noalpha_val8 _noclear_notri_val8 _noclear_noepi_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42" ;;
+  garden_final2)
+    VARIANTS=(_noclear_noocean_wanc03 _noclear_noocean_wanc03_it40k); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42 43" ;;
+  garden_epivis)
+    VARIANTS=(_noclear_epivis_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42" ;;
+  epivis)
+    VARIANTS=(_noclear_epivis); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  phase)
+    # directional water light on top of the best run so far (_cull05r, 30.50)
+    VARIANTS=(_cull05r_wphase); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  cover)
+    # seabed coverage without Gaussians in the water: coverage prior from alpha 0.7 / 0.8 / 0.9 at weight 0.03
+    VARIANTS=(_cov07 _cov08 _cov09); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  reset)
+    # the two winners of 557114/557123 combined, and the opacity reset without the 0.5 culling
+    VARIANTS=(_cull05r_bin01 _reset _reset_bin01); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  fuzz)
+    # the half-transparent seabed, one mechanism at a time (on the default, which evaluates with _vt)
+    VARIANTS=(_bin01 _kfix _cov05 _nooverlap); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  cull)
+    # half-transparent seabed (a fuzz of ~11 surfels at opacity 0.5-0.7): WaterSplatting's opacity culling
+    VARIANTS=(_cull05 _cull05r _wsop); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  classic)
+    # seabed coverage: mip filter without the opacity scale-down (as WaterSplatting), and no filter at all
+    VARIANTS=(_classic _classic3 _nomip); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  wsapp_wdir)
+    VARIANTS=(_wsapp_dth10 _wdir); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  owin)
+    VARIANTS=(_owin); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  adameps)
+    # Adam epsilon: with 1e-8 the colour/opacity steps of Gaussians with small gradients are damped (sqrt(v) ~ 1e-8)
+    VARIANTS=(_eps15 _eps12); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="Curasao-Undistorted Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  fitlr)
+    # training-photo fit vs WaterSplatting (colour learning rates, densification) on the two scenes with the
+    # largest training-PSNR gap
+    VARIANTS=(_aconst _wsapp _shr20 _dth10 _dint150); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="Curasao-Undistorted Panama-Undisorted"; DEFAULT_SEEDS="42 43" ;;
+  epivis_wanc)
+    VARIANTS=(_noclear_epivis_wanc03); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="$ALL_SCENES garden_easy garden_hard"; DEFAULT_SEEDS="42 43" ;;
+  unify)
+    VARIANTS=(_noclear_noocean_wanc03 _noclear_noepi_wanc03); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  garden_anchor2)
+    VARIANTS=(_noclear_noocean_val8 _noclear_noocean_wanc_val8 _noclear_noocean_wanc03_val8); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42" ;;
+  foggy)
+    VARIANTS=(""); SET_CONFIG=configs/seathru_default.yaml
+    DEFAULT_SCENES="garden_easy garden_hard"; DEFAULT_SEEDS="42 43" ;;
   alias2)
     VARIANTS=(_clamp05_minit_rs_rel_oceane_jit _clamp05_minit_rs_rel_oceane_mip
               _clamp05_minit_rs_rel_oceane_jit_mip _clamp05_minit_rs_oceane)
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   diag)
-    VARIANTS=(_minit_it10k _minit_nooverlap_it10k _minit_nochroma_it10k _minit_nocover_it10k
-              _minit_noclear_it10k _minit_nobin_it10k _minit_nosmooth_it10k _plain_minit_it10k)
+    VARIANTS=(_minit_cut10k _minit_nooverlap_cut10k _minit_nochroma_cut10k _minit_nocover_cut10k
+              _minit_noclear_cut10k _minit_nobin_cut10k _minit_nosmooth_cut10k _plain_minit_cut10k)
     DEFAULT_SCENES="JapaneseGradens-RedSea-Undistorted Curasao-Undistorted"; DEFAULT_SEEDS="42" ;;
   diag_mdc)
-    VARIANTS=(_minit_mdc_it10k)
+    VARIANTS=(_minit_mdc_cut10k)
     DEFAULT_SCENES="JapaneseGradens-RedSea-Undistorted Curasao-Undistorted"; DEFAULT_SEEDS="42" ;;
   start)
     VARIANTS=("" _clamp10 _clamp05 _minit _clamp10_minit _clamp05_minit _clamp10_minit_scl005 _clamp05_minit_scl005)
@@ -220,9 +424,76 @@ variant_overrides() {
       echo "profile.spatial_count=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.voronoi_adaptation.max_points=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_it([0-9]+)k(.*)$ ]]; then
-      # Shorter training: the schedules that end at 30000 end with it (densification still stops at 15000).
+      # Training of N thousand iterations with every schedule scaled by the same factor (training/schedule.py).
+      echo "schedule.iterations=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_cut([0-9]+)k(.*)$ ]]; then
+      # Training cut at N thousand iterations: the schedules that end at 30000 end with it (densification
+      # still stops at 15000). The diag set's _it10k before 2026-10-29.
       echo "joint.optimization.iterations=$(( BASH_REMATCH[1] * 1000 ))"
       echo "joint.gaussian_adaptation.opacity_prune_until=$(( BASH_REMATCH[1] * 1000 ))"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_oe([0-9]+)(.*)$ ]]; then
+      echo "joint.optimization.ocean_every=${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_val([0-9]+)(.*)$ ]]; then
+      # evaluate on every N-th training photo (held out) instead of the test views: tuning only
+      echo "warmup.dataset.validation_hold=${BASH_REMATCH[1]}"
+      echo "joint.dataset.validation_hold=${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_wphase(.*)$ ]]; then
+      # Henyey-Greenstein phase function on the backscatter (training/water_phase.py)
+      echo "joint.optimization.water_phase=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wdir(.*)$ ]]; then
+      # direction-dependent water light (training/water_direction.py)
+      echo "joint.optimization.water_direction=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_owin(.*)$ ]]; then
+      # OceanSplat window as in the paper (4k-8k of 10k): 12k-24k of the 30k schedule = 8k-16k at the 20k default
+      echo "joint.optimization.ocean_from=12000"
+      echo "joint.optimization.ocean_until=24000"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_eps([0-9]+)(.*)$ ]]; then
+      # Adam epsilon of the Gaussian parameters 1e-N (default 1e-8; WaterSplatting / 3DGS: 1e-15)
+      echo "joint.optimization.gaussian_adam_eps=1.0e-${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_aconst(.*)$ ]]; then
+      # Gaussian colour learning rate kept at its start value (no decay)
+      echo "joint.optimization.gaussian_appearance_lr_decay=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wsapp(.*)$ ]]; then
+      # WaterSplatting's colour learning rates: DC 0.0025 constant, higher SH degrees x 1/20
+      echo "joint.optimization.gaussian_appearance_lr=0.0025"
+      echo "joint.optimization.gaussian_appearance_lr_decay=0.0"
+      echo "joint.optimization.gaussian_appearance_rest_lr_scale=0.05"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_shr20(.*)$ ]]; then
+      # higher SH degrees learn 20x slower than the DC colour (WaterSplatting's ratio)
+      echo "joint.optimization.gaussian_appearance_rest_lr_scale=0.05"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_dint([0-9]+)(.*)$ ]]; then
+      # densification interval before schedule scaling (the 20k default scales 30k-schedule values by 2/3)
+      echo "joint.gaussian_adaptation.densification_interval=${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_dth([0-9]+)(.*)$ ]]; then
+      echo "joint.gaussian_adaptation.gradient_threshold=${BASH_REMATCH[1]}.0e-5"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_noocean(.*)$ ]]; then
+      echo "joint.optimization.ocean_tri_weight=0.0"
+      echo "joint.optimization.ocean_epi_weight_start=0.0"
+      echo "joint.optimization.ocean_epi_weight_end=0.0"
+      echo "joint.optimization.ocean_res_weight=0.0"
+      echo "joint.optimization.ocean_alpha_until=0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_noalpha(.*)$ ]]; then
+      echo "joint.optimization.ocean_alpha_until=0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_notri(.*)$ ]]; then
+      echo "joint.optimization.ocean_tri_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_noepi(.*)$ ]]; then
+      echo "joint.optimization.ocean_epi_weight_start=0.0"
+      echo "joint.optimization.ocean_epi_weight_end=0.0"
+      echo "joint.optimization.ocean_res_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_epivis(.*)$ ]]; then
+      echo "joint.optimization.ocean_visible=0.1"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_classic([0-9]*)(.*)$ ]]; then
+      # mip filter as a dilation only (opacity kept, 3DGS "classic" as WaterSplatting); _classic3 = variance 0.3
+      echo "joint.model.gaussian_mip_compensate=false"
+      [[ -n "${BASH_REMATCH[1]}" ]] && echo "joint.model.gaussian_mip_filter=0.${BASH_REMATCH[1]}"
+      rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_nomip(.*)$ ]]; then
+      echo "joint.model.gaussian_mip_filter=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wanc([0-9]*)(.*)$ ]]; then
+      # _wanc = weight 0.1, _wanc<digits> = 0.<digits> (e.g. _wanc03 = 0.03)
+      echo "medium_fix.water_anchor_weight=0.${BASH_REMATCH[1]:-1}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_camw(.*)$ ]]; then
+      echo "medium_fix.camera_water_weight=0.01"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_isp(.*)$ ]]; then
       echo "joint.optimization.camera_isp=true"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_jit(.*)$ ]]; then
@@ -319,6 +590,40 @@ variant_overrides() {
       echo "medium_fix.water_clear_weight=0.0"
       echo "medium_fix.surface_coverage_weight=0.0"
       echo "joint.disentanglement.opacity_binarization_weight=0.0"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_bin01(.*)$ ]]; then
+      # opacity binarisation prior x10 (0.001 -> 0.01): against the half-transparent seabed fuzz
+      echo "joint.disentanglement.opacity_binarization_weight=0.01"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_kfix(.*)$ ]]; then
+      # kernel shape frozen at its start, kappa = 1.01 (plain Gaussians, as WaterSplatting)
+      echo "joint.optimization.gaussian_kappa_lr=1.0e-12"
+      echo "joint.optimization.gaussian_kappa_lr_final=1.0e-12"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_cov([0-9])([0-9])(.*)$ ]]; then
+      # seabed coverage prior from accumulated alpha 0.<NN> on (default 0.9), weight x10 (0.03); _cov05 pulls
+      # water rays with a few stray Gaussians to opaque, so higher thresholds keep the water clean
+      echo "medium_fix.surface_coverage_threshold=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+      echo "medium_fix.surface_coverage_weight=0.03"; rest=${BASH_REMATCH[3]}
+    elif [[ "$rest" =~ ^_vt(.*)$ ]]; then
+      # evaluation rays end at the training transmittance threshold (1e-4) instead of 1e-2
+      echo "joint.renderer.validation_transmittance_threshold=1.0e-4"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_reset(.*)$ ]]; then
+      # WaterSplatting's opacity reset alone (to 0.5 every 500 steps = 750 of the 30k schedule), culling unchanged
+      echo "joint.gaussian_adaptation.opacity_reset_interval=750"
+      echo "joint.gaussian_adaptation.opacity_reset_value=0.5"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_cull05(r?)(.*)$ ]]; then
+      # WaterSplatting's opacity culling only: Gaussians below 0.5 removed while densifying (to the end of our
+      # densification, 15000 of the 30k schedule = 10000 at 20k), below 0.1 after; _cull05r also resets the
+      # opacity to 0.5 every 500 steps (750 of the 30k schedule) as WaterSplatting
+      echo "joint.gaussian_adaptation.min_opacity=0.5"
+      echo "joint.gaussian_adaptation.min_opacity_initial=0.5"
+      echo "joint.gaussian_adaptation.opacity_prune_ramp=0"
+      echo "joint.gaussian_adaptation.min_opacity_late=0.1"
+      echo "joint.gaussian_adaptation.min_opacity_late_from=15000"
+      echo "joint.gaussian_adaptation.max_opacity_prune_fraction=1.0"
+      if [[ -n "${BASH_REMATCH[1]}" ]]; then
+        echo "joint.gaussian_adaptation.opacity_reset_interval=750"
+        echo "joint.gaussian_adaptation.opacity_reset_value=0.5"
+      fi
+      rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_wsop(.*)$ ]]; then
       echo "joint.gaussian_adaptation.densify_until=10000"
       echo "joint.gaussian_adaptation.opacity_reset_interval=500"
@@ -370,6 +675,8 @@ VARIANT=${VARIANTS[(TASK % PER_SCENE) / ${#SEEDS[@]}]}
 SEED=${SEEDS[TASK % ${#SEEDS[@]}]}
 SOURCE="$DATASETS/$SCENE"
 [[ "$MIPNERF_OUTDOOR" == *" $SCENE "* ]] && SOURCE="$MIPNERF/$SCENE"
+[[ "$FOGGY_SCENES" == *" $SCENE "* ]] && SOURCE="$FOGGY/$SCENE"
+[[ "$SCENE" == garden_clear ]] && SOURCE="$GARDEN_CLEAR"
 [[ -d "$SOURCE" ]] || { echo "Missing dataset $SOURCE" >&2; exit 2; }
 variant_overrides "$VARIANT" > /dev/null  # fail loudly on an unknown suffix
 OVERRIDES=()

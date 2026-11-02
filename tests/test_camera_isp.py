@@ -123,22 +123,30 @@ def test_suffix_and_set(tmp_path):
 
 
 def test_seathru_default_is_oceansplat_plus_ppisp(tmp_path):
-    """configs/seathru_default.yaml = configs/iui3_default.yaml + the suffixes of the 551590 run, test views
-    with the exposure of their 4 nearest training photos; the sbatch 'default' set trains it."""
-    suffix = "_clamp05_minit_rs_rel_oceane_isp"
+    """configs/seathru_default.yaml = configs/iui3_default.yaml + the suffixes of the best runs (552797's
+    _camw_oe2_it20k_mip, then 553596's _wfit), test views with the exposure of their 4 nearest training
+    photos; the sbatch 'default' set trains it."""
+    suffix = "_clamp05_minit_rs_rel_oceane_isp_camw_oe2_it20k_mip_wfit_vt"
     default = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "d")
     run = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "d",
                        overrides=overrides(suffix) + ["joint.optimization.camera_isp_neighbours=4"])
     assert default == run
     optimization = default["joint"]["optimization"]
     assert optimization["camera_isp"] is True and optimization["camera_isp_neighbours"] == 4
-    assert optimization["ocean_from"] == 4000 and optimization["reconstruction_loss"] == "reg_l1_reg_dssim"
+    assert optimization["ocean_from"] == 2667 and optimization["reconstruction_loss"] == "reg_l1_reg_dssim"
+    assert optimization["iterations"] == 20000 and optimization["ocean_every"] == 2
+    assert default["medium_fix"]["camera_water_weight"] == 0.01 and default["joint"]["model"]["gaussian_mip_filter"] == 0.2
+    assert default["joint"]["model"]["medium_initial_water_fit"] == "coefficients"
+    assert default["joint"]["renderer"]["validation_transmittance_threshold"] == 1e-4
     env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
            "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
     run = lambda task, **extra: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
                                                text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task), **extra})
     assert "config=configs/seathru_default.yaml" in run(0).stdout and "out of range" in run(8).stderr
     assert "config=configs/iui3_default.yaml" in run(0, FS_VARIANT_SET="isp").stdout  # suffix sets keep their base
+    mip = run(7, FS_VARIANT_SET="mip")  # the mip set: _mip on the new default, 4 scenes x 2 seeds
+    assert mip.returncode == 0 and "config=configs/seathru_default.yaml" in mip.stdout
+    assert "joint.model.gaussian_mip_filter=0.2" in mip.stdout and "out of range" in run(8, FS_VARIANT_SET="mip").stderr
 
 
 @gpu

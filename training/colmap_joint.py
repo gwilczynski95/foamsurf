@@ -84,7 +84,8 @@ def run_stage(output,stage):
             medium=transfer_medium(payload,config.device,
                 manifest.get('medium_color_activation','dc'))
             dataset=load_dataset(config.dataset.source_path,resolution=config.dataset.resolution,
-                                 device=config.device,llffhold=config.dataset.llffhold)
+                                 device=config.device,llffhold=config.dataset.llffhold,
+                                 validation_hold=config.dataset.validation_hold)
             if config.model.medium_initial_color_from_data:
                 mean=torch.stack([c.foreground.reshape(-1,3).mean(0) for c in dataset.train]).mean(0)
                 medium.set_uniform_color_(mean)

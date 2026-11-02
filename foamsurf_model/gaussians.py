@@ -111,6 +111,7 @@ class SurfaceGaussianModel(nn.Module):
         self.log_scales = nn.Parameter(log_scales)
         self.quaternions = nn.Parameter(quaternions)
         self.mip_filter = None
+        self.mip_compensate = True
 
     @staticmethod
     def _initial_log_scales(
@@ -166,6 +167,11 @@ class SurfaceGaussianModel(nn.Module):
                     else self.appearance)
         if camera_origin is None:
             raise ValueError("SH appearance requires a camera origin")
+        if not torch.is_grad_enabled() and self.means.is_cuda:
+            # Rendering without gradients (evaluation, viewing): one CUDA kernel, same values.
+            from .sh_cuda import sh_colors
+            return sh_colors(self.means, self.appearance_dc, self.appearance_rest, self.active_sh_degree,
+                             camera_origin, self.rgb_activation == "sigmoid")
         directions = F.normalize(
             camera_origin.reshape(1, 3) - self.means, dim=-1
         )
@@ -183,10 +189,13 @@ class SurfaceGaussianModel(nn.Module):
             if self.mip_filter.shape[0] != self.point_count:
                 raise RuntimeError("Mip filter is stale (Gaussian count changed); call update_mip_filter")
             # Mip-Splatting 3D filter: the Gaussian convolved with an isotropic one of std mip_filter
-            # (exact for kappa = 1), opacity scaled by sqrt(det / det') so the integral is kept.
+            # (exact for kappa = 1), opacity scaled by sqrt(det / det') so the integral is kept; without
+            # compensation only the dilation (3DGS "classic").
             filtered = 0.5 * torch.logaddexp(2 * log_scales, 2 * self.mip_filter.log()[:, None])
-            opacity = torch.sigmoid(opacity_logits) * (log_scales - filtered).sum(-1, keepdim=True).exp()
-            log_scales, opacity_logits = filtered, torch.logit(opacity.clamp(1e-6, 1 - 1e-6))
+            if self.mip_compensate:
+                opacity = torch.sigmoid(opacity_logits) * (log_scales - filtered).sum(-1, keepdim=True).exp()
+                opacity_logits = torch.logit(opacity.clamp(1e-6, 1 - 1e-6))
+            log_scales = filtered
         return GaussianScene(
             means=self.means if means is None else means,
             log_scales=log_scales,

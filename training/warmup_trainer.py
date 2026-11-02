@@ -233,7 +233,8 @@ class WarmupTrainer(Trainer):
         previous_stack = list(self.sampler._camera_stack) if self._training_resolution is not None else []
         data = self.dataset if factor == 1 else load_dataset(
             self.config.dataset.source_path, resolution=self.config.dataset.resolution * factor,
-            device=self.device, llffhold=self.config.dataset.llffhold)
+            device=self.device, llffhold=self.config.dataset.llffhold,
+            validation_hold=self.config.dataset.validation_hold)
         if self.profile.ray_sampling == "mixed":
             self.sampler = MixedRaySampler(data, self.config.optimization.rays_per_batch,
                                           tuple(self.config.background))

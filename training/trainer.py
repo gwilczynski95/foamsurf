@@ -40,6 +40,8 @@ from .optimizer import (
 )
 from .sampler import RandomCameraRaySampler
 from .camera_isp import CameraISP, pixel_grid
+from .water_direction import WaterDirectionGain
+from .water_phase import WaterPhase
 from .oceansplat import DepthAwareOpacity, adjusted_scene, downscaled_target, ocean_terms
 from .view_consistency import blended_depth, nerfstudio_scale, trinocular_loss
 
@@ -123,6 +125,7 @@ class Trainer:
             resolution=config.dataset.resolution,
             device=self.device,
             llffhold=config.dataset.llffhold,
+            validation_hold=config.dataset.validation_hold,
         )
         self.layer_ground_truth = None
         if config.dataset.gaussian_ground_truth_path is not None:
@@ -353,6 +356,20 @@ class Trainer:
             self.evaluator.camera_isp = lambda image, camera: self.camera_isp.apply(
                 image, pixel_grid(camera.height, camera.width, image.device).reshape(*image.shape[:-1], 2),
                 (camera.height, camera.width), None, camera.origin)
+        self.water_direction = None
+        if config.optimization.water_direction:
+            self.water_direction = WaterDirectionGain(self.device, config.optimization.water_direction_lr)
+            if payload is not None and payload.get("water_direction") is not None:
+                self.water_direction.load_state_dict(payload["water_direction"])
+        self.water_phase = None
+        if config.optimization.water_phase:
+            up = -torch.stack([camera.down for camera in self.dataset.train]).mean(0)  # the cameras' mean "up"
+            self.water_phase = WaterPhase(up, self.device, config.optimization.water_phase_lr)
+            if payload is not None and payload.get("water_phase") is not None:
+                self.water_phase.load_state_dict(payload["water_phase"])
+        if self._water_modules():
+            self.evaluator.water_direction = lambda image, backscatter, rays: self._water_light_parts(
+                image, backscatter, rays)
         self.alpha_mlp = self.alpha_optimizer = None
         if config.optimization.ocean_alpha_until > 0:
             self.alpha_mlp = DepthAwareOpacity().to(self.device)
@@ -414,7 +431,28 @@ class Trainer:
             extras.update(alpha_mlp=self.alpha_mlp.state_dict(), alpha_optimizer=self.alpha_optimizer.state_dict())
         if self.camera_isp is not None:
             extras["camera_isp"] = self.camera_isp.state_dict()
+        if self.water_direction is not None:
+            extras["water_direction"] = self.water_direction.state_dict()
+        if self.water_phase is not None:
+            extras["water_phase"] = self.water_phase.state_dict()
         return extras or None
+
+    def _water_modules(self) -> list:
+        """The direction-dependent water light terms in use (water_direction, water_phase)."""
+        return [m for m in (self.water_direction, self.water_phase) if m is not None]
+
+    def _water_light_parts(self, image: torch.Tensor, backscatter: torch.Tensor, rays: torch.Tensor) -> torch.Tensor:
+        """image + (gain - 1) backscatter with the product of the gains of every water light term."""
+        gain = 1.0
+        for module in self._water_modules():
+            gain = gain * module.gain(rays[..., 3:])
+        return image + (gain - 1.0) * backscatter
+
+    def _water_light(self, render, rays: torch.Tensor) -> torch.Tensor:
+        """The rendered image with direction-dependent water light (unchanged without these terms)."""
+        if not self._water_modules() or render.backscatter is None:
+            return render.image
+        return self._water_light_parts(render.image, render.backscatter, rays)
 
     def _apply_camera_isp(self, image: torch.Tensor, batch) -> torch.Tensor:
         """The training image through the camera model of its photo (identity without camera_isp)."""
@@ -685,7 +723,7 @@ class Trainer:
         self.last_ocean = dict.fromkeys(self.last_ocean, float("nan"))
         self.last_ocean["alpha_weight"] = self._alpha_weight(iteration)
         if not optimization.ocean_from <= iteration < optimization.ocean_until or medium_scene is None \
-                or not self.uses_gaussians:
+                or not self.uses_gaussians or (iteration - optimization.ocean_from) % optimization.ocean_every:
             return None
         span = max(optimization.ocean_until - optimization.ocean_from, 1)
         progress = (iteration - optimization.ocean_from) / span
@@ -701,15 +739,16 @@ class Trainer:
             downscaled_target(camera, optimization.ocean_downscale, self.config.background),
             self.trinocular_baseline, optimization.ocean_downscale, optimization.trinocular_epsilon,
             optimization.ocean_smooth_gamma, optimization.ocean_gaussian_samples,
-            depth_unit=self.nerfstudio_scale,
+            depth_unit=self.nerfstudio_scale, visible=optimization.ocean_visible,
             camera_model=None if self.camera_isp is None else (
                 lambda image: self.camera_isp.apply(
                     image, pixel_grid(*image.shape[:2], image.device).reshape(*image.shape[:2], 2),
                     image.shape[:2], camera.name)))
         for name in ("obj", "full", "smooth", "epi", "res"):
             self.last_ocean[name] = float(terms[name].detach())
-        return (optimization.ocean_tri_weight * (terms["obj"] + terms["full"] + terms["smooth"])
-                + epi_weight * terms["epi"] + optimization.ocean_res_weight * terms["res"])
+        return optimization.ocean_every * (
+            optimization.ocean_tri_weight * (terms["obj"] + terms["full"] + terms["smooth"])
+            + epi_weight * terms["epi"] + optimization.ocean_res_weight * terms["res"])
 
     def _trinocular_term(self, iteration, batch, rays, render, gaussian_scene, medium_scene):
         """lambda_tri x OceanSplat L_tri on a random subset of the batch rays, or None when inactive."""
@@ -779,6 +818,7 @@ class Trainer:
         """Recompute the Mip-Splatting 3D filter from the training cameras (after every change of the
         Gaussian population and every 100 iterations, as the paper)."""
         if self.uses_gaussians and self.config.model.gaussian_mip_filter > 0:
+            self.model.gaussians.mip_compensate = self.config.model.gaussian_mip_compensate
             self.model.gaussians.update_mip_filter(self.dataset.train, self.config.model.gaussian_mip_filter,
                                                    self.config.renderer.near)
 
@@ -883,7 +923,7 @@ class Trainer:
                     ),
                 }
         loss = b0_reconstruction_loss(
-            self._apply_camera_isp(render.image, batch), batch.target,
+            self._apply_camera_isp(self._water_light(render, rays), batch), batch.target,
             mode=self.config.optimization.reconstruction_loss,
             dssim_weight=self.config.optimization.dssim_weight,
             image_size=batch.image_size or (batch.camera.height, batch.camera.width),
@@ -919,6 +959,8 @@ class Trainer:
         if self.camera_isp is not None:
             loss = replace(loss, total=loss.total + self.camera_isp.regularization())
             self.camera_isp.zero_grad()
+        for module in self._water_modules():
+            module.zero_grad()
         if self.alpha_optimizer is not None:
             self.alpha_optimizer.zero_grad(set_to_none=True)
         loss.total.backward()
@@ -926,6 +968,8 @@ class Trainer:
             self.alpha_optimizer.step()
         if self.camera_isp is not None:
             self.camera_isp.step()
+        for module in self._water_modules():
+            module.step()
         if collect_any and render.diagnostics is None:
             raise RuntimeError("adaptation statistics were not returned")
         if collect_gaussian:

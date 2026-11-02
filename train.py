@@ -108,8 +108,13 @@ def resolve_iui3(
     stage_defaults = ExperimentConfig().as_dict()
     # Variant-file overrides first, so command-line --set can still change them.
     overrides = list(variant.get("overrides", [])) + list(overrides or [])
+    from training.schedule import pop_schedule, scale_schedule
+
+    schedule_iterations, overrides = pop_schedule(overrides)
     apply_overrides(source, overrides, {"warmup": stage_defaults, "joint": stage_defaults,
                                         "profile": WarmupProfile().as_dict()})
+    if schedule_iterations is not None:  # after the overrides: scales the values they set
+        scale_schedule(source, schedule_iterations)
     WarmupProfile.from_dict(source["profile"])
     MediumFixConfig(**source["medium_fix"])
     if run_suffix:

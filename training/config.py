@@ -73,6 +73,9 @@ class DatasetConfig:
     source_path: str = ""
     resolution: int = 1
     llffhold: int = 8
+    # Tuning without the test views: > 0 holds out every validation_hold-th training photo and evaluates on
+    # those instead of the test split (which is then not used at all); 0 = the usual train / test split.
+    validation_hold: int = 0
     gaussian_ground_truth_path: str | None = None
     medium_ground_truth_path: str | None = None
     train_target: str = "both"
@@ -109,6 +112,10 @@ class ModelConfig:
     # sqrt(s^2 + s_f^2) and opacity x (s_u s_v) / (s_u' s_v'), s_f = sqrt(variance) x the world size of
     # one pixel at the nearest training camera that sees it. Variance in pixels^2; 0 = off, paper 0.2.
     gaussian_mip_filter: float = 0.0
+    # False: the filter only dilates (as 3DGS / gsplat "classic", WaterSplatting), opacity kept: a sub-pixel
+    # surfel becomes an opaque pixel-size one instead of a faint one (the integral-keeping scale-down of
+    # Mip-Splatting leaves the seabed half transparent: on Panama 1/3 of the Gaussians lose > 50% opacity).
+    gaussian_mip_compensate: bool = True
 
 
 @dataclass
@@ -201,11 +208,25 @@ class OptimizationConfig:
     # camera_isp_neighbours nearest training photos (1 / distance weights; 0 = neutral).
     camera_isp: bool = False
     camera_isp_neighbours: int = 4
+    # Direction-dependent water light (training/water_direction.py): the backscatter of each ray x exp(W d), nine
+    # parameters per scene starting at 0; open water brightens toward the surface.
+    water_direction: bool = False
+    water_direction_lr: float = 0.005
+    # Henyey-Greenstein phase function on the backscatter (training/water_phase.py): learned direction toward the
+    # light (started at the cameras' mean up) and anisotropy g per channel (started at 0 = the plain model).
+    water_phase: bool = False
+    water_phase_lr: float = 0.01
     ocean_epi_weight_start: float = 0.0
     ocean_epi_weight_end: float = 0.0
     ocean_res_weight: float = 0.0
+    # L_epi and L_res only for Gaussians not hidden behind the rendered surface: z_i <= (1 + ocean_visible) x the
+    # rendered depth at their pixel (0 = every Gaussian in the frustum, as the paper).
+    ocean_visible: float = 0.0
     ocean_from: int = 12_000
     ocean_until: int = 24_000
+    # The OceanSplat losses on every ocean_every-th step of the window only, weighted x ocean_every (the same
+    # expected gradient, 1/ocean_every of their cost: each needs extra renders of two virtual views).
+    ocean_every: int = 1
     ocean_downscale: int = 4
     ocean_smooth_gamma: float = 1.0
     ocean_gaussian_samples: int = 65_536
@@ -569,10 +590,13 @@ class ExperimentConfig:
         ocean_on = (optimization.ocean_tri_weight > 0 or optimization.ocean_res_weight > 0
                     or max(optimization.ocean_epi_weight_start, optimization.ocean_epi_weight_end) > 0)
         if min(optimization.ocean_tri_weight, optimization.ocean_res_weight, optimization.ocean_epi_weight_start,
-               optimization.ocean_epi_weight_end, optimization.ocean_alpha_weight) < 0 \
+               optimization.ocean_epi_weight_end, optimization.ocean_alpha_weight, optimization.ocean_visible) < 0 \
                 or optimization.ocean_downscale < 1 or optimization.ocean_gaussian_samples < 1 \
-                or optimization.ocean_from > optimization.ocean_until or optimization.ocean_alpha_until < 0:
-            raise ValueError("invalid ocean settings (weights >= 0, downscale/samples >= 1, from <= until)")
+                or optimization.ocean_from > optimization.ocean_until or optimization.ocean_alpha_until < 0 \
+                or optimization.ocean_every < 1:
+            raise ValueError("invalid ocean settings (weights >= 0, downscale/samples/every >= 1, from <= until)")
+        if optimization.water_direction_lr <= 0 or optimization.water_phase_lr <= 0:
+            raise ValueError("optimization.water_direction_lr and water_phase_lr must be positive")
         if self.model.gaussian_mip_filter < 0:
             raise ValueError("gaussian_mip_filter is a variance in pixels^2 (>= 0)")
         if self.optimization.camera_isp_neighbours < 0:

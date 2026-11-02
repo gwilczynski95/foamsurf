@@ -197,12 +197,13 @@ def adjusted_scene(scene, mlp: DepthAwareOpacity, weight: float, camera_origin: 
 def ocean_terms(renderer, make_scene, medium_scene, background, camera, target, baseline: float,
                 downscale: int, epsilon: float, gamma: float, gaussian_samples: int,
                 epi_opacity: float = 0.8, depth_unit: float = 1.0, generator: torch.Generator | None = None,
-                camera_model=None):
+                camera_model=None, visible: float = 0.0):
     """L_obj-stereo + L_full-stereo, L_smooth, L_epi, L_res for one training camera.
     make_scene(origin) -> GaussianScene seen from origin. target [H, W, 3] photo at 1/downscale.
     depth_unit: scene units -> the paper's (nerfstudio) units for the depth errors of L_epi and L_res.
     camera_model: optional callable(image [H, W, 3]) -> image, the camera of the central photo (PPISP), applied
     to the warped full image before it is compared with the photo (L_full); renders are compared raw.
+    visible > 0: L_epi and L_res skip Gaussians hidden behind the surface, z_i > (1 + visible) x the rendered depth.
     Returns dict of losses (tensors) and floats for logging."""
     height, width, fx, fy, cx, cy = camera_geometry(camera, downscale)
     background_tuple = tuple(float(v) for v in background)
@@ -259,6 +260,8 @@ def ocean_terms(renderer, make_scene, medium_scene, background, camera, target, 
     covered, _ = sample_image(surface[..., None].to(depth), px, py)
     rendered, on_surface = rendered[:, 0], covered[:, 0] > 0.5
     zi = torch.index_select(z, 0, candidates)
+    if visible > 0:
+        on_surface = on_surface & (zi <= (1.0 + visible) * rendered.detach())
     res_loss = ((rendered - zi).abs() * depth_unit * on_surface).sum() / on_surface.sum().clamp_min(1)
 
     # L_epi: opaque Gaussians inside all three frusta; the prior depth is the Gaussian's own depth

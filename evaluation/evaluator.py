@@ -115,6 +115,7 @@ class Evaluator:
         self.output_dir = output_dir
         # Optional camera model applied to the hybrid image: callable(image [H, W, 3], camera) -> image.
         self.camera_isp = None
+        self.water_direction = None  # callable(image, backscatter, rays) -> image, or None
 
     @torch.no_grad()
     def _timed(self, operation):
@@ -133,6 +134,8 @@ class Evaluator:
         dict[str, np.ndarray],
         dict[str, torch.Tensor],
     ]:
+        # The OptiX geometry is built outside PyTorch's allocator: give its cached blocks back first.
+        torch.cuda.empty_cache()
         original_threshold = self.renderer.transmittance_threshold
         self.renderer.transmittance_threshold = (
             self.config.renderer.validation_transmittance_threshold
@@ -213,8 +216,10 @@ class Evaluator:
                     )
                 )
 
-                hybrid_image = (hybrid.image if self.camera_isp is None
-                                else self.camera_isp(hybrid.image, camera)).clamp(0.0, 1.0)
+                hybrid_raw = (hybrid.image if self.water_direction is None or hybrid.backscatter is None
+                              else self.water_direction(hybrid.image, hybrid.backscatter, rays))
+                hybrid_image = (hybrid_raw if self.camera_isp is None
+                                else self.camera_isp(hybrid_raw, camera)).clamp(0.0, 1.0)
                 gaussian_image = gaussian.image.clamp(0.0, 1.0)
                 medium_image = medium.image.clamp(0.0, 1.0)
                 error = (hybrid_image - target).abs()

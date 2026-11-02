@@ -24,12 +24,16 @@ def load_dataset(
     resolution: int,
     device: str | torch.device,
     llffhold: int = 8,
+    validation_hold: int = 0,
 ):
     if detect_dataset_type(root) == "blender":
+        if validation_hold:
+            raise ValueError("validation_hold is supported for COLMAP datasets only")
         return BlenderDataset(root, resolution=resolution, device=device)
     return ColmapDataset(
         root,
         resolution=resolution,
         device=device,
         llffhold=llffhold,
+        validation_hold=validation_hold,
     )

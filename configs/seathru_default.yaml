@@ -1,16 +1,22 @@
-# Current SeaThru default (2026-10-28): OceanSplat + PPISP, run _clamp05_minit_rs_rel_oceane_isp of
-# sweep 551590 = configs/iui3_default.yaml plus:
+# Current SeaThru default (2026-10-30): OceanSplat + PPISP + homogeneous water at the cameras + Mip filter +
+# water attenuation fitted on the COLMAP tracks, 20k iterations = configs/iui3_default.yaml plus:
 # - Gaussian scale at most 5% of the scene (_clamp05);
 # - medium colour initialised from the training photos (_minit);
-# - resolution schedule 1/4 -> 1/2 from 6k -> full from 12k (_rs);
+# - resolution schedule 1/4 -> 1/2 -> full (_rs);
 # - WaterSplatting / OceanSplat loss: L1 and D-SSIM divided by the detached prediction (_rel);
-# - OceanSplat trinocular consistency, epipolar depth, residual and depth-aware opacity, 4k-24k (_oceane);
-# - PPISP camera model (_isp): per-photo exposure and colour, shared vignetting and response curve;
-#   test views with the exposure and colour of their 4 nearest training photos.
-# Test PSNR (mean of seeds 42 and 43; test views with neighbour exposure): IUI3 31.10, Curacao 33.77,
-# JG 23.49, Panama 31.42, mean 29.95 (WaterSplatting, our runs: 29.63).
-# configs/iui3_default.yaml stays the base of the older sweep suffixes; tests/test_camera_isp.py checks
-# that this file equals it plus the suffixes above.
+# - OceanSplat trinocular consistency, epipolar depth, residual and depth-aware opacity (_oceane), on every
+#   2nd step with weight x2 (_oe2);
+# - PPISP camera model (_isp; Deutsch et al., CVPR 2026): per-photo exposure and colour, shared vignetting
+#   and response curve; test views with the exposure and colour of their 4 nearest training photos;
+# - free-water cells near the training cameras pulled to the median water (_camw, weight 0.01);
+# - Mip-Splatting 3D filter (_mip);
+# - medium attenuation and backscatter of every cell started from the fit on the COLMAP point tracks (_wfit);
+# - 20k iterations with every schedule scaled by 2/3 (_it20k; schedule.iterations, training/schedule.py).
+# Test PSNR (mean of seeds 42 and 43, neighbour exposure; run _wfit of sweep 553596): IUI3 31.47, Curacao
+# 33.82, JG 24.23, Panama 31.94, mean 30.36 (WaterSplatting 29.63, WaterSplatting + PPISP 30.71, our runs).
+# Earlier defaults: without _wfit 30.22 (552797); without _camw, _oe2, _mip, _it20k 29.95 dB in 53 min
+# (551590). configs/iui3_default.yaml stays the base of the older sweep suffixes; tests/test_camera_isp.py
+# checks that this file equals it plus the suffixes above.
 base_config: iui3_5k.yaml
 output_dir: outputs/seathru_default/run
 gaussian_rgb_activation: sigmoid
@@ -50,3 +56,16 @@ overrides:
   # _isp
   - joint.optimization.camera_isp=true
   - joint.optimization.camera_isp_neighbours=4
+  # _camw
+  - medium_fix.camera_water_weight=0.01
+  # _oe2
+  - joint.optimization.ocean_every=2
+  # _it20k (applied after all overrides)
+  - schedule.iterations=20000
+  # _mip
+  - joint.model.gaussian_mip_filter=0.2
+  # _wfit
+  - joint.model.medium_initial_water_fit=coefficients
+  # _vt (2026-11-01): evaluation rays end at the training transmittance threshold 1e-4 instead of 1e-2
+  # (+0.07 dB on 553596 seed 42 without retraining: the model is fitted with the longer rays)
+  - joint.renderer.validation_transmittance_threshold=1.0e-4

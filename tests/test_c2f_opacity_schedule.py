@@ -1,6 +1,8 @@
 """Coarse-to-fine training resolution and the WaterSplatting-like opacity schedule."""
 import csv
+import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -96,3 +98,90 @@ def test_c2f_wsop_short_real_training(tmp_path):
     fit_iui3(m)
     rows = list(csv.DictReader((tmp_path / "c2f/joint/metrics/train.csv").open()))
     assert len(rows) == 4 and all(float(r["train/loss"]) == float(r["train/loss"]) for r in rows)
+
+
+def test_cull05_keeps_our_densification_and_set(tmp_path):
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_cull05"))
+    a = m["joint"]["gaussian_adaptation"]
+    assert a["min_opacity"] == 0.5 and a["min_opacity_late"] == 0.1 and a["max_opacity_prune_fraction"] == 1.0
+    assert a["min_opacity_late_from"] == 10000 == a["densify_until"]  # culling at 0.5 exactly while densifying
+    assert a["opacity_reset_interval"] == 0
+    r = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "b", overrides=overrides("_cull05r"))
+    assert r["joint"]["gaussian_adaptation"]["opacity_reset_interval"] == 500
+    assert r["joint"]["gaussian_adaptation"]["opacity_reset_value"] == 0.5
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "cull",
+           "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(23).returncode == 0 and "Panama-Undisorted_wsop_seed43" in run(23).stdout
+    assert "out of range" in run(24).stderr
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+def test_cull05r_short_real_training(tmp_path):
+    from test_medium_fix import _short_manifest
+    m = _short_manifest(tmp_path, "cull", overrides("_cull05r") + [
+        "joint.gaussian_adaptation.opacity_reset_interval=2", "joint.gaussian_adaptation.min_opacity_late_from=3"])
+    fit_iui3(m)
+    checkpoint = torch.load(tmp_path / "cull/joint/checkpoints/last.pt", map_location="cpu", weights_only=False)
+    assert checkpoint["iteration"] == 4  # resets and culling at 0.5 / 0.1 ran without emptying the model
+
+
+def test_fuzz_suffixes_and_set(tmp_path):
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_bin01_kfix_cov05"))
+    assert m["joint"]["disentanglement"]["opacity_binarization_weight"] == 0.01
+    o = m["joint"]["optimization"]
+    assert o["gaussian_kappa_lr"] == 1e-12 and o["gaussian_kappa_lr_final"] == 1e-12
+    assert m["medium_fix"]["surface_coverage_threshold"] == 0.5 and m["medium_fix"]["surface_coverage_weight"] == 0.03
+    assert m["joint"]["renderer"]["validation_transmittance_threshold"] == 1e-4  # the default evaluates with _vt
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "fuzz",
+           "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(31).returncode == 0 and "Panama-Undisorted_nooverlap_seed43" in run(31).stdout
+    assert "out of range" in run(32).stderr
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+def test_kfix_keeps_the_kernel_shape(tmp_path):
+    from test_medium_fix import _short_manifest
+    m = _short_manifest(tmp_path, "kfix", overrides("_kfix_bin01_cov05"))
+    fit_iui3(m)
+    checkpoint = torch.load(tmp_path / "kfix/joint/checkpoints/last.pt", map_location="cpu", weights_only=False)
+    initial = torch.load(tmp_path / "kfix/joint/checkpoints/initialization.pt", map_location="cpu", weights_only=False)
+    kappa = lambda c: next(v for k, v in c["model"].items() if k.endswith("raw_kappa"))
+    torch.testing.assert_close(kappa(checkpoint).unique(), kappa(initial).unique())  # every kappa still the start value
+
+
+def test_reset_suffix_and_set(tmp_path):
+    assert overrides("_reset") == ["joint.gaussian_adaptation.opacity_reset_interval=750",
+                                   "joint.gaussian_adaptation.opacity_reset_value=0.5"]
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_reset_bin01"))
+    a = m["joint"]["gaussian_adaptation"]
+    assert a["opacity_reset_interval"] == 500 and a["opacity_reset_value"] == 0.5
+    assert a["min_opacity"] == 0.1 and a.get("min_opacity_late") is None  # culling as the default
+    assert m["joint"]["disentanglement"]["opacity_binarization_weight"] == 0.01
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "reset",
+           "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(0).returncode == 0 and "IUI3-RedSea-Undistorted_cull05r_bin01" in run(0).stdout
+    assert run(23).returncode == 0 and "Panama-Undisorted_reset_bin01_seed43" in run(23).stdout
+    assert "out of range" in run(24).stderr
+
+
+def test_coverage_threshold_suffix_and_set(tmp_path):
+    assert overrides("_cov05") == ["medium_fix.surface_coverage_threshold=0.5", "medium_fix.surface_coverage_weight=0.03"]
+    assert overrides("_cov08") == ["medium_fix.surface_coverage_threshold=0.8", "medium_fix.surface_coverage_weight=0.03"]
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_cov07"))
+    assert m["medium_fix"]["surface_coverage_threshold"] == 0.7 > m["medium_fix"]["water_clear_threshold"]
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "cover",
+           "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(23).returncode == 0 and "Panama-Undisorted_cov09_seed43" in run(23).stdout
+    assert "out of range" in run(24).stderr

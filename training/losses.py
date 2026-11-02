@@ -327,11 +327,30 @@ class MediumFixConfig:
     under_surface_ramp: int = 1000
     under_surface_threshold: float = 0.5
     under_surface_offset: float = 0.01
+    # Homogeneous water at the cameras: medium cells in free water (nearest Gaussian farther than
+    # camera_water_free x the median spacing of the training cameras) within camera_water_radius x that
+    # spacing of a training camera are pulled to the median free water far from the cameras (log
+    # coefficients and raw colour). Without it each camera's cell turns into a per-photo brightness knob
+    # (JG: 0.06-2.6x the water's attenuation, up to 7x its backscatter) that leaks into nearby test views.
+    camera_water_weight: float = 0.0
+    camera_water_start: int = 1000
+    camera_water_ramp: int = 1000
+    camera_water_radius: float = 2.0
+    camera_water_free: float = 1.0
+    camera_water_refresh: int = 250
+    # Water attenuation anchored to the fit on the COLMAP tracks (training/water_fit.py, needs
+    # joint.model.medium_initial_water_fit): the mean log attenuation of the free water far from the cameras
+    # pulled to the fitted beta_D. The same point seen from several distances fixes beta_D; during training
+    # the medium otherwise drifts to about half of it and the Gaussian colours take the rest (foggy Garden:
+    # fit 0.75 / 1.28, truth 0.60 / 1.10, trained medium 0.27 / 0.53).
+    water_anchor_weight: float = 0.0
+    water_anchor_start: int = 0
+    water_anchor_ramp: int = 0
 
     def __post_init__(self):
         if type(self.prior_rays) is not int or self.prior_rays < 1:
             raise ValueError('Invalid medium_fix.prior_rays')
-        for prefix in ('chroma', 'surface_coverage', 'under_surface', 'water_clear'):
+        for prefix in ('chroma', 'surface_coverage', 'under_surface', 'water_clear', 'camera_water', 'water_anchor'):
             weight = getattr(self, f'{prefix}_weight')
             if not math.isfinite(weight) or weight < 0:
                 raise ValueError(f'Invalid medium_fix.{prefix}_weight')
@@ -356,6 +375,9 @@ class MediumFixConfig:
             raise ValueError('medium_fix.water_clear_threshold must be below surface_coverage_threshold')
         if not math.isfinite(self.under_surface_offset) or self.under_surface_offset < 0:
             raise ValueError('medium_fix.under_surface_offset must be non-negative')
+        if not (self.camera_water_radius > 0 and self.camera_water_free >= 0
+                and type(self.camera_water_refresh) is int and self.camera_water_refresh >= 1):
+            raise ValueError('medium_fix needs camera_water_radius > 0, camera_water_free >= 0, refresh >= 1')
 
     def as_dict(self):
         return asdict(self)
@@ -375,6 +397,34 @@ class MediumFixConfig:
     def under_surface_weight_at(self, iteration):
         return ramp_weight(self.under_surface_weight, iteration, self.under_surface_start,
                            self.under_surface_ramp)
+
+    def camera_water_weight_at(self, iteration):
+        return ramp_weight(self.camera_water_weight, iteration, self.camera_water_start, self.camera_water_ramp)
+
+    def water_anchor_weight_at(self, iteration):
+        return ramp_weight(self.water_anchor_weight, iteration, self.water_anchor_start, self.water_anchor_ramp)
+
+
+def water_anchor_loss(coefficients, reference, attenuation):
+    """Squared distance (summed over RGB) of the mean log attenuation of the cells in ``reference`` to
+    log ``attenuation`` [3]; only the level of the water moves, the cells keep their differences.
+    None when ``reference`` is empty."""
+    if not bool(reference.any()):
+        return None
+    level = torch.log(coefficients[reference, :3].clamp_min(1e-8)).mean(0)
+    return ((level - torch.log(attenuation.to(level).clamp_min(1e-8))) ** 2).sum()
+
+
+def camera_water_loss(coefficients, raw_color, near, reference):
+    """Mean squared distance of the cells in ``near`` to the median of the cells in ``reference`` (detached):
+    log optical coefficients [N, 6] and raw colours [N, 3]. None when either set is empty."""
+    if not bool(near.any()) or not bool(reference.any()):
+        return None
+    log = torch.log(coefficients.clamp_min(1e-8))
+    with torch.no_grad():
+        target_log = log[reference].median(0).values
+        target_color = raw_color[reference].median(0).values
+    return ((log[near] - target_log) ** 2).mean() + ((raw_color[near] - target_color) ** 2).mean()
 
 
 def water_direction(backscatter, gaussian_alpha, water_alpha):
