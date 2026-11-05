@@ -1,8 +1,10 @@
-# Current SeaThru default (2026-11-05): test PSNR (seeds 42 and 43, sweep 561669) IUI3 31.85, Curacao 34.32,
-# JG 24.31, Panama 32.55, mean 30.76 (WaterSplatting + PPISP 30.71, OceanSplat paper 30.71). It is the
-# 2026-10-30 default below plus, at the end of the list: opacity cull/reset as WaterSplatting (_cull05r),
-# opacity binarisation (_bin01), the water phase function (_wphase), Gaussian colour 1.5 x sigmoid (_rgbs15)
-# and, at evaluation, the water light continued beyond the training directions (_wext).
+# Current SeaThru default (2026-11-05): test PSNR (seeds 42, 43 and 44, sweep 562267) IUI3 31.87, Curacao
+# 34.29, JG 24.31, Panama 32.51, mean 30.74 (WaterSplatting + PPISP 30.71 on 3 seeds, OceanSplat paper 30.71);
+# seabed Gaussian alpha 0.875, Gaussians in the open water 0.015 (WaterSplatting + PPISP 0.99 / 0.76). It is
+# the 2026-10-30 default below plus, at the end of the list: opacity cull/reset as WaterSplatting (_cull05r),
+# opacity binarisation (_bin01), the water phase function (_wphase), Gaussian colour 1.5 x sigmoid (_rgbs15),
+# at evaluation the water light continued beyond the training directions (_wext), and the stronger seabed
+# coverage prior (_cov09). Without _cov09: 30.75, seabed alpha 0.79.
 # The 2026-10-30 default: OceanSplat + PPISP + homogeneous water at the cameras + Mip filter +
 # water attenuation fitted on the COLMAP tracks, 20k iterations = configs/iui3_default.yaml plus:
 # - Gaussian scale at most 5% of the scene (_clamp05);
@@ -92,3 +94,7 @@ overrides:
   - joint.model.gaussian_rgb_scale=1.5
   # _wext: evaluation only, water light continued beyond the training directions (training/water_extrapolation.py)
   - joint.optimization.water_extrapolation=true
+  # _cov09 (2026-11-05): seabed coverage prior weight x10 on rays with alpha > 0.9; 3 seeds (562267): seabed
+  # alpha 0.79 -> 0.875, Gaussians in the water 0.004 -> 0.015, PSNR 30.753 -> 30.744 (within seed noise)
+  - medium_fix.surface_coverage_threshold=0.9
+  - medium_fix.surface_coverage_weight=0.03

@@ -127,7 +127,7 @@ def test_seathru_default_is_oceansplat_plus_ppisp(tmp_path):
     _camw_oe2_it20k_mip, then 553596's _wfit), test views with the exposure of their 4 nearest training
     photos; the sbatch 'default' set trains it."""
     suffix = "_clamp05_minit_rs_rel_oceane_isp_camw_oe2_it20k_mip_wfit_vt"
-    best = "_cull05r_bin01_wphase_rgbs15_wext"  # 2026-11-05: sweep 561669, 30.76
+    best = "_cull05r_bin01_wphase_rgbs15_wext_cov09"  # 2026-11-05: sweeps 561669 / 562266 / 562267, 30.74
     default = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "d")
     run = resolve_iui3(ROOT / "configs/iui3_default.yaml", tmp_path / "d",
                        overrides=overrides(suffix + best) + ["joint.optimization.camera_isp_neighbours=4"])
@@ -140,6 +140,7 @@ def test_seathru_default_is_oceansplat_plus_ppisp(tmp_path):
     assert default["joint"]["model"]["gaussian_rgb_scale"] == 1.5
     assert default["joint"]["optimization"]["water_phase"] is True
     assert default["joint"]["optimization"]["water_extrapolation"] is True
+    assert default["medium_fix"]["surface_coverage_threshold"] == 0.9 and default["medium_fix"]["surface_coverage_weight"] == 0.03
     optimization = default["joint"]["optimization"]
     assert optimization["camera_isp"] is True and optimization["camera_isp_neighbours"] == 4
     assert optimization["ocean_from"] == 2667 and optimization["reconstruction_loss"] == "reg_l1_reg_dssim"
