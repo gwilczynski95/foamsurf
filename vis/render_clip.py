@@ -11,6 +11,7 @@ Shot file (JSON):
    "frames": 120, "fps": 30,                  # the camera model's exposure is that of the anchor view
    "path": {"look_at_objects": 0.7,          # 0: the photos' own viewing direction, 1: aim at the objects
             "views": null,                   # views to pass through (default: all training views, along their main axis)
+            "nearest": null,                 # or the N training views nearest the anchor, along their main axis
             "scale": 1.0},                   # image size factor
    "trace": {...}}                           # TraceSettings overrides
 The camera follows a Catmull-Rom spline through the chosen training camera positions (novel views stay close to
@@ -59,12 +60,16 @@ def smooth(values: torch.Tensor, passes: int = 3) -> torch.Tensor:
     return values
 
 
-def camera_path(trainer, template, target: torch.Tensor, frames: int, look_at: float, views=None, scale=1.0):
+def camera_path(trainer, template, target: torch.Tensor, frames: int, look_at: float, views=None, scale=1.0,
+                nearest=None):
     train = list(trainer.dataset.train)
     if views:
         by_name = {c.name: c for c in train + list(trainer.dataset.test)}
         train = [by_name[v] for v in views]
     else:  # along the main axis of the camera positions (photo names zigzag)
+        if nearest:  # the training views closest to the anchor
+            distance = torch.stack([(c.origin - template.origin).norm() for c in train])
+            train = [train[i] for i in distance.argsort()[:nearest].tolist()]
         origins = torch.stack([c.origin for c in train])
         axis = torch.linalg.svd(origins - origins.mean(0)).Vh[0]
         train = [train[i] for i in ((origins - origins.mean(0)) @ axis).argsort().tolist()]
@@ -152,7 +157,7 @@ def main():
     path = shot.get("path", {})
     frames = args.frames or shot.get("frames", 120)
     cameras = camera_path(trainer, anchor, target, frames, path.get("look_at_objects", 0.7), path.get("views"),
-                          path.get("scale", 1.0))
+                          path.get("scale", 1.0), path.get("nearest"))
 
     out_frames = args.out / "frames"
     out_frames.mkdir(parents=True, exist_ok=True)

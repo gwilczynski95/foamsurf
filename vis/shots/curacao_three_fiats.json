@@ -1,0 +1,86 @@
+{
+ "anchor_view": "MTN_1296",
+ "objects": [
+  {
+   "type": "mesh",
+   "name": "fiat_red",
+   "manifest": "$FALCON/source/fiat_bicycle/manifest.json",
+   "u": 0.48,
+   "v": 0.88,
+   "span_fraction": 0.2,
+   "yaw_deg": 60,
+   "materials": {
+    "caroseria": {
+     "mode": "ceramic",
+     "rgb": [
+      0.6,
+      0.05,
+      0.035
+     ],
+     "kd": 1.0,
+     "eta": 2.2
+    }
+   }
+  },
+  {
+   "type": "mesh",
+   "name": "fiat_green",
+   "manifest": "$FALCON/source/fiat_bicycle/manifest.json",
+   "u": 0.24,
+   "v": 0.82,
+   "span_fraction": 0.18,
+   "yaw_deg": 20,
+   "materials": {
+    "caroseria": {
+     "mode": "ceramic",
+     "rgb": [
+      0.08,
+      0.38,
+      0.1
+     ],
+     "kd": 1.0,
+     "eta": 2.2
+    }
+   }
+  },
+  {
+   "type": "mesh",
+   "name": "fiat_blue",
+   "manifest": "$FALCON/source/fiat_bicycle/manifest.json",
+   "u": 0.72,
+   "v": 0.8,
+   "span_fraction": 0.18,
+   "yaw_deg": 110,
+   "materials": {
+    "caroseria": {
+     "mode": "ceramic",
+     "rgb": [
+      0.05,
+      0.12,
+      0.55
+     ],
+     "kd": 1.0,
+     "eta": 2.2
+    }
+   }
+  }
+ ],
+ "frames": 150,
+ "fps": 30,
+ "path": {
+  "look_at_objects": 0.7,
+  "scale": 1.0,
+  "views": [
+   "MTN_1292",
+   "MTN_1293",
+   "MTN_1294",
+   "MTN_1295",
+   "MTN_1296",
+   "MTN_1297",
+   "MTN_1298"
+  ]
+ },
+ "trace": {
+  "max_depth": 4
+ }
+}

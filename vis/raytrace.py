@@ -79,7 +79,11 @@ class TraceSettings:
     shadow_strength: float = 0.6  # fraction of the direct light coming from the cone
     shadow_cone_deg: float = 25.0
     occlusion_strength: float = 1.0
-    shadow_samples: int = 32  # meshes: rays per point for the cone and for the occlusion
+    shadow_samples: int = 96  # meshes: rays per point for the cone and for the occlusion
+    # The first surface a ray meets is ragged (needle-like surfels), and next to an object the occlusion changes
+    # fast with height, so the shadow of the camera's own rays is smoothed over the image (normalized convolution
+    # over the pixels that see a surface; Gaussian sigma in pixels, 0: off).
+    shadow_blur_px: float = 3.0
     # Matte surfaces: environment directions (from the object's centre) and occlusion rays per hit.
     environment_samples: int = 256
     occlusion_samples: int = 16
@@ -249,6 +253,7 @@ class SceneTracer:
         self.color_origin = color_origin
         self.gaussians = None
         self._environment = {}
+        self.image_shape = None  # (h, w) while render_camera traces a camera's rays
         if color_origin is not None:
             self.set_color_origin(color_origin)
 
@@ -383,7 +388,10 @@ class SceneTracer:
         hits = intersect(rays, objects)
         direct, scattered, transmission = self.segment(rays, hits.t, start_points)
         if settings.shadows:
-            direct = direct * self.shadow_factor(rays, hits.t, objects, settings)[:, None]
+            factor = self.shadow_factor(rays, hits.t, objects, settings)
+            if depth == 0 and self.image_shape is not None and settings.shadow_blur_px > 0:
+                factor = self._blur_shadow(factor, rays, hits.t, settings.shadow_blur_px)
+            direct = direct * factor[:, None]
         out = self.water_light(direct, scattered, rays, settings.water_light_max_up)
         if not bool((hits.obj >= 0).any()) or depth >= settings.max_depth:  # past the last bounce: black
             return out
@@ -436,13 +444,35 @@ class SceneTracer:
         factor[valid] = lit
         return factor
 
+    def _blur_shadow(self, factor, rays, t_hit, sigma: float) -> torch.Tensor:
+        h, w = self.image_shape
+        if factor.shape[0] != h * w:
+            return factor
+        depth, index = (x.reshape(-1) for x in self.last_surface)
+        valid = ((index >= 0) & (depth > 0) & (depth < t_hit)).float()
+        radius = int(3 * sigma)
+        x = torch.arange(-radius, radius + 1, device=factor.device, dtype=torch.float32)
+        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+        kernel = kernel / kernel.sum()
+
+        def blur(image):
+            image = image.reshape(1, 1, h, w)
+            image = F.conv2d(F.pad(image, (radius, radius, 0, 0), mode="replicate"), kernel.view(1, 1, 1, -1))
+            image = F.conv2d(F.pad(image, (0, 0, radius, radius), mode="replicate"), kernel.view(1, 1, -1, 1))
+            return image.reshape(-1)
+        smooth = blur(factor * valid) / blur(valid).clamp_min(1e-6)
+        return torch.where(valid > 0, smooth, factor)
+
     def _mesh_shadow(self, mesh, p, n, up, cone: float, settings) -> torch.Tensor:
         """Sampled version of the sphere shadow for a mesh, on points within 3 radii of it."""
         lit = torch.ones(p.shape[0], device=p.device)
         near = (p - mesh.center).norm(dim=-1) < 3 * mesh.radius
         if not near.any():
             return lit
-        q, m = p[near], n[near]
+        # Surfel normals are ragged (elongated surfels on sand tilt every which way) and turn the occlusion into
+        # spikes, surfel by surfel; the occlusion hemisphere is the one around "up" instead.
+        q = p[near]
+        m = up[None].expand_as(q)
         k = settings.shadow_samples
         eps = 1e-3 * mesh.radius
         cone_dirs = around(cone_directions(k, cone, p.device), up[None].expand(1, 3))[0]  # [K,3]
@@ -574,7 +604,11 @@ def render_camera(tracer: SceneTracer, camera, objects: list, settings: TraceSet
     from training.camera_isp import pixel_grid
     tracer.set_color_origin(camera.origin)
     rays = _rays(camera).reshape(-1, 6).contiguous()
-    raw = tracer.trace(rays, objects, settings, stats=stats)
+    tracer.image_shape = (camera.height, camera.width)
+    try:
+        raw = tracer.trace(rays, objects, settings, stats=stats)
+    finally:
+        tracer.image_shape = None
     isp = tracer.trainer.camera_isp
     h, w = camera.height, camera.width
     full = raw if isp is None else isp.apply(raw, pixel_grid(h, w, raw.device).reshape(-1, 2), (h, w), None,
