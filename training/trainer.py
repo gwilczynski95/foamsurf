@@ -11,6 +11,7 @@ import torch
 from tqdm import trange
 
 from evaluation import Evaluator
+from evaluation.evaluator import _rays
 from foamsurf import NativeHybridRenderer
 from foamsurf_data import LayerGroundTruth, load_dataset
 from foamsurf_data.camera_geometry import camera_normalization
@@ -41,6 +42,7 @@ from .optimizer import (
 from .sampler import RandomCameraRaySampler
 from .camera_isp import CameraISP, pixel_grid
 from .water_direction import WaterDirectionGain
+from .water_extrapolation import WaterExtrapolation
 from .water_phase import WaterPhase
 from .oceansplat import DepthAwareOpacity, adjusted_scene, downscaled_target, ocean_terms
 from .view_consistency import blended_depth, nerfstudio_scale, trinocular_loss
@@ -364,12 +366,13 @@ class Trainer:
         self.water_phase = None
         if config.optimization.water_phase:
             up = -torch.stack([camera.down for camera in self.dataset.train]).mean(0)  # the cameras' mean "up"
-            self.water_phase = WaterPhase(up, self.device, config.optimization.water_phase_lr)
+            self.water_phase = WaterPhase(up, self.device, config.optimization.water_phase_lr,
+                                          config.optimization.water_phase_fixed_light)
             if payload is not None and payload.get("water_phase") is not None:
                 self.water_phase.load_state_dict(payload["water_phase"])
-        if self._water_modules():
-            self.evaluator.water_direction = lambda image, backscatter, rays: self._water_light_parts(
-                image, backscatter, rays)
+        self.water_extrapolation = None  # fitted from the training photos before each evaluation (_wext)
+        if self._water_modules() or config.optimization.water_extrapolation:
+            self.evaluator.water_direction = self._evaluation_water_light
         self.alpha_mlp = self.alpha_optimizer = None
         if config.optimization.ocean_alpha_until > 0:
             self.alpha_mlp = DepthAwareOpacity().to(self.device)
@@ -447,6 +450,39 @@ class Trainer:
         for module in self._water_modules():
             gain = gain * module.gain(rays[..., 3:])
         return image + (gain - 1.0) * backscatter
+
+    def _evaluation_water_light(self, image: torch.Tensor, backscatter: torch.Tensor, rays: torch.Tensor) -> torch.Tensor:
+        """The evaluator's image: the trained water light terms, then (with _wext) the water light continued beyond
+        the training directions, applied to the backscatter as those terms left it."""
+        modules = bool(self._water_modules())
+        out = self._water_light_parts(image, backscatter, rays) if modules else image
+        if self.water_extrapolation is not None:
+            effective = self._water_light_parts(backscatter, backscatter, rays) if modules else backscatter
+            out = self.water_extrapolation.apply(out, effective, rays[..., 3:])
+        return out
+
+    def fit_water_extrapolation(self, step: int = 4) -> WaterExtrapolation | None:
+        """Fit the water light trend on the open water of the training photos (rays where the trained Gaussians
+        cover < 2%, every `step`-th pixel), as training/water_extrapolation.py describes."""
+        background = tuple(self.config.background)
+        directions, colours, photo = [], [], []
+        with torch.no_grad():
+            for index, camera in enumerate(self.dataset.train):
+                rays = _rays(camera)[::step, ::step].reshape(-1, 6).contiguous()
+                scene = self.model.gaussians.render_scene(camera.origin)
+                self.renderer.set_gaussian_geometry(scene)
+                alpha = self.renderer.render_gaussians(rays, scene, background=background).alpha.reshape(-1)
+                target = camera.ground_truth(background).reshape(camera.height, camera.width, 3)[::step, ::step].reshape(-1, 3)
+                water = (alpha < 0.02) & (target.min(-1).values > 0.01)
+                directions.append(rays[water, 3:]); colours.append(target[water])
+                photo.append(torch.full((int(water.sum()),), index, device=rays.device, dtype=torch.long))
+        directions = torch.cat(directions)
+        if directions.shape[0] < 100:  # no open water: nothing to continue
+            self.water_extrapolation = None
+            return None
+        up = -torch.stack([camera.down for camera in self.dataset.train]).mean(0)
+        self.water_extrapolation = WaterExtrapolation.fit(up.to(directions), directions, torch.cat(colours), torch.cat(photo))
+        return self.water_extrapolation
 
     def _water_light(self, render, rays: torch.Tensor) -> torch.Tensor:
         """The rendered image with direction-dependent water light (unchanged without these terms)."""
@@ -1145,6 +1181,10 @@ class Trainer:
         self.gaussian_point_extent = self._gaussian_point_extent()
 
     def _evaluate_and_checkpoint(self, iteration: int) -> None:
+        if self.config.optimization.water_extrapolation:
+            fitted = self.fit_water_extrapolation()
+            if fitted is not None:
+                (self.output_dir / "water_extrapolation.json").write_text(json.dumps(fitted.state_dict()))
         summary, images, histograms = self.evaluator.evaluate(
             iteration
         )

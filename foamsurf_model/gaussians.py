@@ -41,6 +41,7 @@ class SurfaceGaussianModel(nn.Module):
         super().__init__()
         self.appearance_mode = config.appearance
         self.rgb_activation = config.gaussian_rgb_activation
+        self.rgb_scale = float(config.gaussian_rgb_scale)  # sigmoid colours in (0, rgb_scale)
         self.sh_degree = config.sh_degree
         self.active_sh_degree = config.sh_degree
         self.device = torch.device(device)
@@ -85,7 +86,7 @@ class SurfaceGaussianModel(nn.Module):
         )
 
         if self.appearance_mode == "rgb":
-            appearance_dc = (torch.logit(rgb.clamp(1.0e-5, 1.0 - 1.0e-5))
+            appearance_dc = (torch.logit((rgb / self.rgb_scale).clamp(1.0e-5, 1.0 - 1.0e-5))
                              if self.rgb_activation == "sigmoid" else rgb)
             appearance_rest = torch.empty(
                 points.shape[0], 3, 0, device=self.device
@@ -93,8 +94,8 @@ class SurfaceGaussianModel(nn.Module):
         else:
             coefficient_count = (self.sh_degree + 1) ** 2
             if self.rgb_activation == "sigmoid":
-                # sigmoid(C0 * dc) = rgb when the higher coefficients are zero.
-                appearance_dc = (torch.logit(rgb.clamp(1.0e-5, 1.0 - 1.0e-5)) / C0)[..., None]
+                # rgb_scale * sigmoid(C0 * dc) = rgb when the higher coefficients are zero.
+                appearance_dc = (torch.logit((rgb / self.rgb_scale).clamp(1.0e-5, 1.0 - 1.0e-5)) / C0)[..., None]
             else:
                 appearance_dc = rgb_to_sh_dc(rgb)[..., None]
             appearance_rest = torch.zeros(
@@ -162,22 +163,24 @@ class SurfaceGaussianModel(nn.Module):
     def colors(
         self, camera_origin: torch.Tensor | None
     ) -> torch.Tensor:
+        scale = getattr(self, "rgb_scale", 1.0)
         if self.appearance_mode == "rgb":
-            return (torch.sigmoid(self.appearance) if self.rgb_activation == "sigmoid"
+            return (scale * torch.sigmoid(self.appearance) if self.rgb_activation == "sigmoid"
                     else self.appearance)
         if camera_origin is None:
             raise ValueError("SH appearance requires a camera origin")
         if not torch.is_grad_enabled() and self.means.is_cuda:
             # Rendering without gradients (evaluation, viewing): one CUDA kernel, same values.
             from .sh_cuda import sh_colors
-            return sh_colors(self.means, self.appearance_dc, self.appearance_rest, self.active_sh_degree,
-                             camera_origin, self.rgb_activation == "sigmoid")
+            colours = sh_colors(self.means, self.appearance_dc, self.appearance_rest, self.active_sh_degree,
+                                camera_origin, self.rgb_activation == "sigmoid")
+            return colours * scale if self.rgb_activation == "sigmoid" and scale != 1.0 else colours
         directions = F.normalize(
             camera_origin.reshape(1, 3) - self.means, dim=-1
         )
         value = evaluate_sh(self.active_sh_degree, self.appearance, directions)
-        # sigmoid: SH gives view-dependent logits, colours stay in (0, 1).
-        return torch.sigmoid(value) if self.rgb_activation == "sigmoid" else 0.5 + value
+        # sigmoid: SH gives view-dependent logits, colours stay in (0, rgb_scale).
+        return scale * torch.sigmoid(value) if self.rgb_activation == "sigmoid" else 0.5 + value
 
     def render_scene(
         self,
@@ -271,6 +274,7 @@ class SurfaceGaussianModel(nn.Module):
         return {
             "appearance_mode": self.appearance_mode,
             "rgb_activation": self.rgb_activation,
+            "rgb_scale": self.rgb_scale,
             "sh_degree": self.sh_degree,
             "active_sh_degree": self.active_sh_degree,
             "point_count": self.point_count,
@@ -297,6 +301,7 @@ class SurfaceGaussianModel(nn.Module):
         nn.Module.__init__(instance)
         instance.appearance_mode = str(metadata["appearance_mode"])
         instance.rgb_activation = str(metadata.get("rgb_activation", "identity"))
+        instance.rgb_scale = float(metadata.get("rgb_scale", 1.0))  # older checkpoints: 1
         instance.sh_degree = int(metadata["sh_degree"])
         instance.active_sh_degree = int(
             metadata.get("active_sh_degree", instance.sh_degree)

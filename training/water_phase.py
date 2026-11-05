@@ -22,10 +22,11 @@ MAX_ANISOTROPY = 0.95
 
 
 class WaterPhase:
-    def __init__(self, up: torch.Tensor, device="cuda", lr: float = 0.01) -> None:
-        self.toward_light = F.normalize(up.reshape(3).float(), dim=0).to(device).clone().requires_grad_(True)
+    def __init__(self, up: torch.Tensor, device="cuda", lr: float = 0.01, fixed_light: bool = False) -> None:
+        # fixed_light (_wphaseup): the light stays at `up` (sun overhead), only g is learned
+        self.toward_light = F.normalize(up.reshape(3).float(), dim=0).to(device).clone().requires_grad_(not fixed_light)
         self.raw_anisotropy = torch.zeros(3, device=device, requires_grad=True)
-        self.optimizer = torch.optim.Adam([self.toward_light, self.raw_anisotropy], lr=lr)
+        self.optimizer = torch.optim.Adam(([] if fixed_light else [self.toward_light]) + [self.raw_anisotropy], lr=lr)
 
     @property
     def anisotropy(self) -> torch.Tensor:

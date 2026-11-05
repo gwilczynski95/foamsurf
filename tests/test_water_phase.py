@@ -72,6 +72,47 @@ def test_learns_the_light_direction_and_anisotropy():
     torch.testing.assert_close(copy.gain(up), phase.gain(up))
 
 
+def test_fixed_light_learns_only_the_anisotropy():
+    torch.manual_seed(0)
+    truth = WaterPhase(UP, "cpu")
+    with torch.no_grad():
+        truth.raw_anisotropy.fill_(math.atanh(0.6 / 0.95))
+    directions = torch.nn.functional.normalize(torch.randn(2048, 3), dim=-1)
+    backscatter = torch.full((len(directions), 3), 0.3)
+    target = truth.apply(0.1 + backscatter, backscatter, directions).detach()
+    start = torch.nn.functional.normalize(torch.tensor([0.2, 0.0, 1.0]), dim=0)  # a tilted "up"
+    phase = WaterPhase(start, "cpu", lr=0.05, fixed_light=True)
+    for _ in range(300):
+        phase.zero_grad()
+        ((phase.apply(0.1 + backscatter, backscatter, directions) - target) ** 2).mean().backward()
+        phase.step()
+    torch.testing.assert_close(phase.toward_light, start)  # never moved
+    assert not phase.toward_light.requires_grad
+    assert float(phase.anisotropy.mean()) > 0.4  # g still found, as well as a tilted light allows
+    copy = WaterPhase(start, "cpu", fixed_light=True)
+    copy.load_state_dict(phase.state_dict())
+    torch.testing.assert_close(copy.raw_anisotropy, phase.raw_anisotropy.detach())
+
+
+def test_curwater_suffixes_and_set(tmp_path):
+    assert overrides("_wphaseup") == ["joint.optimization.water_phase=true", "joint.optimization.water_phase_fixed_light=true"]
+    assert overrides("_wphase_wphlr05") == ["joint.optimization.water_phase=true", "joint.optimization.water_phase_lr=0.05"]
+    assert ExperimentConfig().optimization.water_phase_fixed_light is False
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "r", overrides=overrides("_cull05r_bin01_wphaseup_wphlr05"))
+    o = m["joint"]["optimization"]
+    assert o["water_phase"] is True and o["water_phase_fixed_light"] is True and o["water_phase_lr"] == 0.05
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "c", overrides=overrides("_cull05r_bin01_wphase_cov07late"))
+    assert m["joint"]["optimization"]["water_phase"] is True and m["medium_fix"]["surface_coverage_threshold"] == 0.7
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_VARIANT_SET": "curwater",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(31).returncode == 0 and "Panama-Undisorted_cull05r_bin01_wphase_cov07late_seed43" in run(31).stdout
+    assert "Curasao-Undistorted_cull05r_bin01_wphaseup" in run(8).stdout
+    assert "out of range" in run(32).stderr
+
+
 def test_suffix_config_and_set(tmp_path):
     assert overrides("_wphase") == ["joint.optimization.water_phase=true"]
     assert ExperimentConfig().optimization.water_phase is False

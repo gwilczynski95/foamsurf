@@ -100,13 +100,22 @@ def test_c2f_wsop_short_real_training(tmp_path):
     assert len(rows) == 4 and all(float(r["train/loss"]) == float(r["train/loss"]) for r in rows)
 
 
+PREVIOUS_DEFAULT = "_clamp05_minit_rs_rel_oceane_isp_camw_oe2_it20k_mip_wfit_vt"  # seathru_default before 2026-11-05
+
+
+def on_previous_default(path, suffix):
+    """The suffix on the default these sweeps ran on (no opacity reset yet; the current default includes _cull05r)."""
+    return resolve_iui3(ROOT / "configs/iui3_default.yaml", path,
+                        overrides=overrides(PREVIOUS_DEFAULT + suffix) + ["joint.optimization.camera_isp_neighbours=4"])
+
+
 def test_cull05_keeps_our_densification_and_set(tmp_path):
-    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_cull05"))
+    m = on_previous_default(tmp_path / "a", "_cull05")
     a = m["joint"]["gaussian_adaptation"]
     assert a["min_opacity"] == 0.5 and a["min_opacity_late"] == 0.1 and a["max_opacity_prune_fraction"] == 1.0
     assert a["min_opacity_late_from"] == 10000 == a["densify_until"]  # culling at 0.5 exactly while densifying
     assert a["opacity_reset_interval"] == 0
-    r = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "b", overrides=overrides("_cull05r"))
+    r = on_previous_default(tmp_path / "b", "_cull05r")
     assert r["joint"]["gaussian_adaptation"]["opacity_reset_interval"] == 500
     assert r["joint"]["gaussian_adaptation"]["opacity_reset_value"] == 0.5
     env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "cull",
@@ -158,7 +167,7 @@ def test_kfix_keeps_the_kernel_shape(tmp_path):
 def test_reset_suffix_and_set(tmp_path):
     assert overrides("_reset") == ["joint.gaussian_adaptation.opacity_reset_interval=750",
                                    "joint.gaussian_adaptation.opacity_reset_value=0.5"]
-    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_reset_bin01"))
+    m = on_previous_default(tmp_path / "a", "_reset_bin01")
     a = m["joint"]["gaussian_adaptation"]
     assert a["opacity_reset_interval"] == 500 and a["opacity_reset_value"] == 0.5
     assert a["min_opacity"] == 0.1 and a.get("min_opacity_late") is None  # culling as the default
@@ -185,3 +194,26 @@ def test_coverage_threshold_suffix_and_set(tmp_path):
                                       text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
     assert run(23).returncode == 0 and "Panama-Undisorted_cov09_seed43" in run(23).stdout
     assert "out of range" in run(24).stderr
+
+
+def test_binarisation_weight_late_coverage_and_night_set(tmp_path):
+    assert overrides("_bin01") == ["joint.disentanglement.opacity_binarization_weight=0.01"]
+    assert overrides("_bin03") == ["joint.disentanglement.opacity_binarization_weight=0.03"]
+    assert overrides("_cov09") == ["medium_fix.surface_coverage_threshold=0.9", "medium_fix.surface_coverage_weight=0.03"]
+    m = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "a", overrides=overrides("_cull05r_bin01_cov07late"))
+    f = m["medium_fix"]
+    assert f["surface_coverage_threshold"] == 0.7 and f["surface_coverage_weight"] == 0.03
+    assert f["surface_coverage_start"] == m["joint"]["gaussian_adaptation"]["densify_until"] == 10000  # after densifying
+    assert f["surface_coverage_ramp"] == 1000
+    assert m["joint"]["disentanglement"]["opacity_binarization_weight"] == 0.01
+    early = resolve_iui3(ROOT / "configs/seathru_default.yaml", tmp_path / "b", overrides=overrides("_cov07"))
+    assert early["medium_fix"]["surface_coverage_start"] < 10000
+    env = {"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin", "FS_VARIANT_SET": "night",
+           "SLURM_ARRAY_JOB_ID": "test", "FS_DRY_RUN": "1",
+           "FS_DATASETS": os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_dataset")}
+    run = lambda task: subprocess.run(["bash", "scripts/train_seathru.sbatch"], cwd=ROOT, capture_output=True,
+                                      text=True, env={**env, "SLURM_ARRAY_TASK_ID": str(task)})
+    assert run(0).returncode == 0 and "IUI3-RedSea-Undistorted_cull05r_bin01_wphase" in run(0).stdout
+    assert "joint.optimization.water_phase=true" in run(0).stdout
+    assert run(39).returncode == 0 and "Panama-Undisorted_cull05r_bin01_cov07late_seed43" in run(39).stdout
+    assert "out of range" in run(40).stderr

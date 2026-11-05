@@ -86,6 +86,9 @@ class ModelConfig:
     medium_type: str = "scalar"
     appearance: str = "rgb"
     gaussian_rgb_activation: str = "identity"
+    # sigmoid only: colour = scale x sigmoid (_rgbs<NN>). At 1 white objects behind water cannot reach the photo
+    # (Curacao colour chart: its Gaussians sit at 1.0 and render ~45/255 too dark); still bounded, unlike identity.
+    gaussian_rgb_scale: float = 1.0
     sh_degree: int = 3
     gaussian_initial_points: int = 100_000
     gaussian_initial_opacity: float = 0.1
@@ -216,6 +219,10 @@ class OptimizationConfig:
     # light (started at the cameras' mean up) and anisotropy g per channel (started at 0 = the plain model).
     water_phase: bool = False
     water_phase_lr: float = 0.01
+    water_phase_fixed_light: bool = False  # light held at the cameras' mean up, only g learned (_wphaseup)
+    # evaluation only: water light continued beyond the training directions, fitted on the training photos' open
+    # water before each evaluation (training/water_extrapolation.py, _wext)
+    water_extrapolation: bool = False
     ocean_epi_weight_start: float = 0.0
     ocean_epi_weight_end: float = 0.0
     ocean_res_weight: float = 0.0
@@ -556,6 +563,9 @@ class ExperimentConfig:
             raise ValueError("model.appearance must be rgb or sh")
         if self.model.gaussian_rgb_activation not in {"identity", "sigmoid"}:
             raise ValueError("model.gaussian_rgb_activation must be identity or sigmoid")
+        if self.model.gaussian_rgb_scale < 1.0 or (self.model.gaussian_rgb_scale != 1.0
+                                                    and self.model.gaussian_rgb_activation != "sigmoid"):
+            raise ValueError("model.gaussian_rgb_scale must be >= 1 and needs the sigmoid activation")
         if not 0 <= self.model.sh_degree <= 3:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:

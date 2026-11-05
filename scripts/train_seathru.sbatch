@@ -201,6 +201,7 @@
 #   FS_VARIANT_SET=reset sbatch --array=0-23 scripts/train_seathru.sbatch
 #   FS_VARIANT_SET=cover sbatch --array=0-23 scripts/train_seathru.sbatch
 #   FS_VARIANT_SET=phase sbatch --array=0-7 scripts/train_seathru.sbatch
+#   FS_VARIANT_SET=night sbatch --array=0-39 scripts/train_seathru.sbatch
 # The default on foggy Garden (easy, hard), seeds 42 and 43 (4 tasks; no SAM audit there):
 #   FS_VARIANT_SET=foggy sbatch --array=0-3 scripts/train_seathru.sbatch
 set -Eeuo pipefail
@@ -329,6 +330,29 @@ case "${FS_VARIANT_SET:-default}" in
   epivis)
     VARIANTS=(_noclear_epivis); SET_CONFIG=configs/seathru_default.yaml
     DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  night)
+    # on the best runs so far (_cull05r_bin01 30.58, _cull05r_wphase 30.58): both combined first, then colour LRs +
+    # densification, stronger binarisation, seabed coverage without Gaussians in the water (threshold 0.9 from the
+    # start, 0.7 after densification)
+    VARIANTS=(_cull05r_bin01_wphase _cull05r_bin01_wsapp_dth10 _cull05r_bin03 _cull05r_bin01_cov09 _cull05r_bin01_cov07late)
+    SET_CONFIG=configs/seathru_default.yaml; DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  rgbs)
+    # Gaussian colour ceiling lifted to 1.5 x sigmoid on the best run (_cull05r_bin01_wphase 30.62): white objects
+    # behind water (Curacao colour chart) reach the photo; estimated +0.06 dB mean (+0.18 Curacao) from the trained
+    # models (ceiling_probe.py); evaluated with _wext (+0.04, evaluation only)
+    VARIANTS=(_cull05r_bin01_wphase_rgbs15_wext)
+    SET_CONFIG=configs/seathru_default.yaml; DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
+  rgbscov)
+    # the best run (_cull05r_bin01_wphase_rgbs15_wext 30.756, 561669) with the seabed coverage prior from alpha 0.9
+    # (_cov09: seabed alpha 0.79 -> 0.87, ~-0.03 dB on _cull05r_bin01); three seeds to decide the final default
+    VARIANTS=(_cull05r_bin01_wphase_rgbs15_cov09_wext)
+    SET_CONFIG=configs/seathru_default.yaml; DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43 44" ;;
+  curwater)
+    # Curacao MTN_1288: water above every training direction is too dark (top-left up to -9/255); the phase
+    # function trained from the start stays near g = 0 (the cells absorb the trend): light held up, higher phase
+    # LR, both; plus the best run with the late seabed coverage prior
+    VARIANTS=(_cull05r_bin01_wphaseup _cull05r_bin01_wphase_wphlr05 _cull05r_bin01_wphaseup_wphlr05 _cull05r_bin01_wphase_cov07late)
+    SET_CONFIG=configs/seathru_default.yaml; DEFAULT_SCENES=$ALL_SCENES; DEFAULT_SEEDS="42 43" ;;
   phase)
     # directional water light on top of the best run so far (_cull05r, 30.50)
     VARIANTS=(_cull05r_wphase); SET_CONFIG=configs/seathru_default.yaml
@@ -437,9 +461,22 @@ variant_overrides() {
       # evaluate on every N-th training photo (held out) instead of the test views: tuning only
       echo "warmup.dataset.validation_hold=${BASH_REMATCH[1]}"
       echo "joint.dataset.validation_hold=${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
+    elif [[ "$rest" =~ ^_rgbs([0-9])([0-9])(.*)$ ]]; then
+      # Gaussian colour = <N.N> x sigmoid: white objects behind water can reach the photo (_rgbs15 = 1.5)
+      echo "joint.model.gaussian_rgb_scale=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"; rest=${BASH_REMATCH[3]}
+    elif [[ "$rest" =~ ^_wext(.*)$ ]]; then
+      # evaluation only: water light continued beyond the training directions (training/water_extrapolation.py)
+      echo "joint.optimization.water_extrapolation=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wphaseup(.*)$ ]]; then
+      # phase function with the light held at the cameras' mean up, only g learned
+      echo "joint.optimization.water_phase=true"
+      echo "joint.optimization.water_phase_fixed_light=true"; rest=${BASH_REMATCH[1]}
     elif [[ "$rest" =~ ^_wphase(.*)$ ]]; then
       # Henyey-Greenstein phase function on the backscatter (training/water_phase.py)
       echo "joint.optimization.water_phase=true"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_wphlr([0-9]+)(.*)$ ]]; then
+      # phase function LR 0.<NN> (default 0.01): g can take the direction trend before the cells do
+      echo "joint.optimization.water_phase_lr=0.${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_wdir(.*)$ ]]; then
       # direction-dependent water light (training/water_direction.py)
       echo "joint.optimization.water_direction=true"; rest=${BASH_REMATCH[1]}
@@ -590,18 +627,25 @@ variant_overrides() {
       echo "medium_fix.water_clear_weight=0.0"
       echo "medium_fix.surface_coverage_weight=0.0"
       echo "joint.disentanglement.opacity_binarization_weight=0.0"; rest=${BASH_REMATCH[1]}
-    elif [[ "$rest" =~ ^_bin01(.*)$ ]]; then
-      # opacity binarisation prior x10 (0.001 -> 0.01): against the half-transparent seabed fuzz
-      echo "joint.disentanglement.opacity_binarization_weight=0.01"; rest=${BASH_REMATCH[1]}
+    elif [[ "$rest" =~ ^_bin([0-9][0-9])(.*)$ ]]; then
+      # opacity binarisation prior 0.<NN> (_bin01 = 0.01 = x10 the default 0.001): against the half-transparent seabed
+      echo "joint.disentanglement.opacity_binarization_weight=0.${BASH_REMATCH[1]}"; rest=${BASH_REMATCH[2]}
     elif [[ "$rest" =~ ^_kfix(.*)$ ]]; then
       # kernel shape frozen at its start, kappa = 1.01 (plain Gaussians, as WaterSplatting)
       echo "joint.optimization.gaussian_kappa_lr=1.0e-12"
       echo "joint.optimization.gaussian_kappa_lr_final=1.0e-12"; rest=${BASH_REMATCH[1]}
-    elif [[ "$rest" =~ ^_cov([0-9])([0-9])(.*)$ ]]; then
+    elif [[ "$rest" =~ ^_cov([0-9])([0-9])(late)?(.*)$ ]]; then
       # seabed coverage prior from accumulated alpha 0.<NN> on (default 0.9), weight x10 (0.03); _cov05 pulls
-      # water rays with a few stray Gaussians to opaque, so higher thresholds keep the water clean
+      # water rays with a few stray Gaussians to opaque, so higher thresholds keep the water clean. late: the prior
+      # starts when densification ends (15000 of the 30k schedule = 10000 at 20k, ramp 1000), so it can only make
+      # the existing Gaussians more opaque and never grows new ones in the water
       echo "medium_fix.surface_coverage_threshold=${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-      echo "medium_fix.surface_coverage_weight=0.03"; rest=${BASH_REMATCH[3]}
+      echo "medium_fix.surface_coverage_weight=0.03"
+      if [[ -n "${BASH_REMATCH[3]}" ]]; then
+        echo "medium_fix.surface_coverage_start=15000"
+        echo "medium_fix.surface_coverage_ramp=1500"
+      fi
+      rest=${BASH_REMATCH[4]}
     elif [[ "$rest" =~ ^_vt(.*)$ ]]; then
       # evaluation rays end at the training transmittance threshold (1e-4) instead of 1e-2
       echo "joint.renderer.validation_transmittance_threshold=1.0e-4"; rest=${BASH_REMATCH[1]}
