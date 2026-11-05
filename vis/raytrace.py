@@ -13,10 +13,14 @@ into a Fresnel-weighted reflection and a refraction through the (water-free) sol
 continues through the water from the object's surface. The camera model (PPISP) is applied once to the final
 image, as in render.py. With no objects the result equals render.py's `raw` mode.
 
-Objects are analytic spheres for now (`Sphere`); meshes come later.
+Objects are analytic spheres (`Sphere`) and triangle meshes (`vis.mesh.Mesh`, NVIDIA Warp BVH). Matte parts
+(diffuse, the diffuse share of metal and ceramic) are lit by the scene itself: the radiance arriving at the
+object's centre from a few hundred directions (traced through the trained scene without the objects), times an
+ambient occlusion of the inserted objects.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -26,12 +30,31 @@ INF = float("inf")
 
 
 @dataclass
+class Material:
+    kind: str = "mirror"  # mirror | glass | diffuse | metal | ceramic
+    tint: tuple[float, float, float] = (1.0, 1.0, 1.0)  # reflectance / transmittance / albedo
+    ior: float = 1.5  # glass and ceramic Fresnel, relative to water
+    kd: float = 1.0  # metal: mirror fraction (rest diffuse); ceramic: diffuse weight
+
+    @staticmethod
+    def from_falcon(spec: dict) -> "Material":
+        """FALCON material {"mode", "rgb", "kd", "eta"}."""
+        return Material(kind=spec.get("mode", "ceramic"), tint=tuple(spec.get("rgb", (1, 1, 1))),
+                        ior=float(spec.get("eta", 1.5)), kd=float(spec.get("kd", 1.0)))
+
+
+@dataclass
 class Sphere:
     center: tuple[float, float, float]
     radius: float
-    material: str = "mirror"  # mirror | glass | diffuse
-    tint: tuple[float, float, float] = (1.0, 1.0, 1.0)  # mirror/glass reflectance or transmittance, diffuse albedo
+    material: str = "mirror"  # mirror | glass | diffuse | metal | ceramic
+    tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
     ior: float = 1.5  # glass, relative to water
+    kd: float = 1.0
+
+    @property
+    def materials(self) -> list[Material]:
+        return [Material(self.material, tuple(self.tint), self.ior, self.kd)]
 
     def tensors(self, device):
         return (torch.tensor(self.center, dtype=torch.float32, device=device),
@@ -43,7 +66,7 @@ class TraceSettings:
     max_depth: int = 4
     min_weight: float = 1e-3  # secondary rays carrying less (max channel) are dropped
     epsilon: float = 1e-4  # secondary ray offset, in units of the object's radius
-    ambient: tuple[float, float, float] = (0.0, 0.0, 0.0)  # diffuse objects: constant light (raw space)
+    ambient: tuple[float, float, float] = (0.0, 0.0, 0.0)  # extra constant light on matte surfaces (raw space)
     # The trained water light extrapolation (HG phase, g up to ~0.93) explodes for rays looking up, which the
     # photos never saw but mirrors do (Curacao: x4500 straight up). Directions are tilted down to this cosine
     # with the cameras' "up" before the water light is evaluated; None keeps the trained behaviour.
@@ -56,6 +79,18 @@ class TraceSettings:
     shadow_strength: float = 0.6  # fraction of the direct light coming from the cone
     shadow_cone_deg: float = 25.0
     occlusion_strength: float = 1.0
+    shadow_samples: int = 32  # meshes: rays per point for the cone and for the occlusion
+    # Matte surfaces: environment directions (from the object's centre) and occlusion rays per hit.
+    environment_samples: int = 256
+    occlusion_samples: int = 16
+    occlusion_distance: float = 0.5  # in units of the object's radius
+    # The trained water holds no sunlight (rays looking up see only the dim backscatter), so matte objects would be
+    # far darker than the seabed next to them. Light from above is calibrated on the seabed itself: the radiance
+    # seen looking down from the object, divided by this reference albedo, is the light a horizontal surface gets;
+    # a surface with normal n gets it times ((1 + n.up)/2)^sky_exponent (1: overcast sky, larger: more from above).
+    # None: environment only.
+    seabed_albedo: float | None = 0.7
+    sky_exponent: float = 2.0
 
 
 @dataclass
@@ -63,32 +98,126 @@ class TraceStats:
     rays_per_depth: list = field(default_factory=list)
 
 
-def intersect_spheres(rays: torch.Tensor, spheres: list[Sphere]):
-    """Nearest positive hit: depth [R] (inf: none), object index [R] (-1), normal [R,3] (outward)."""
+# --- direction sets (deterministic, so videos do not shimmer) ---------------------------------------------------
+GOLDEN = math.pi * (3 - math.sqrt(5))
+
+
+def sphere_directions(count: int, device) -> torch.Tensor:
+    i = torch.arange(count, device=device, dtype=torch.float32) + 0.5
+    z = 1 - 2 * i / count
+    r = (1 - z * z).clamp_min(0).sqrt()
+    phi = i * GOLDEN
+    return torch.stack((r * phi.cos(), r * phi.sin(), z), -1)
+
+
+def cosine_directions(count: int, device) -> torch.Tensor:
+    """Cosine-weighted unit hemisphere around +z [K,3]."""
+    i = torch.arange(count, device=device, dtype=torch.float32) + 0.5
+    r = (i / count).sqrt()
+    phi = i * GOLDEN
+    return torch.stack((r * phi.cos(), r * phi.sin(), (1 - r * r).clamp_min(0).sqrt()), -1)
+
+
+def cone_directions(count: int, half_angle: float, device) -> torch.Tensor:
+    """Uniform in a cone of half_angle (radians) around +z [K,3]."""
+    i = torch.arange(count, device=device, dtype=torch.float32) + 0.5
+    z = 1 - (i / count) * (1 - math.cos(half_angle))
+    r = (1 - z * z).clamp_min(0).sqrt()
+    phi = i * GOLDEN
+    return torch.stack((r * phi.cos(), r * phi.sin(), z), -1)
+
+
+def tangent_frame(n: torch.Tensor):
+    helper = torch.where(n[:, 2:].abs() < 0.9, torch.tensor([0.0, 0.0, 1.0], device=n.device),
+                         torch.tensor([1.0, 0.0, 0.0], device=n.device))
+    t = F.normalize(torch.linalg.cross(helper, n), dim=-1)
+    return t, torch.linalg.cross(n, t)
+
+
+def around(local: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
+    """Local directions [K,3] (+z = n) turned to every normal n [P,3]: [P,K,3]."""
+    t, b = tangent_frame(n)
+    return local[None, :, :1] * t[:, None] + local[None, :, 1:2] * b[:, None] + local[None, :, 2:] * n[:, None]
+
+
+# --- intersections ---------------------------------------------------------------------------------------------
+def is_mesh(obj) -> bool:
+    return hasattr(obj, "faces")
+
+
+def sphere_hit(rays: torch.Tensor, sphere: Sphere) -> torch.Tensor:
     origin, direction = rays[:, :3], rays[:, 3:]
-    best = torch.full((rays.shape[0],), INF, device=rays.device)
-    index = torch.full((rays.shape[0],), -1, dtype=torch.long, device=rays.device)
-    for i, sphere in enumerate(spheres):
-        center, _ = sphere.tensors(rays.device)
-        oc = origin - center
-        b = (oc * direction).sum(-1)
-        c = (oc * oc).sum(-1) - sphere.radius ** 2
-        disc = b * b - c
-        root = disc.clamp_min(0).sqrt()
-        near, far = -b - root, -b + root
-        t = torch.where(near > 0, near, far)
-        t = torch.where((disc > 0) & (t > 0), t, torch.full_like(t, INF))
+    center, _ = sphere.tensors(rays.device)
+    oc = origin - center
+    b = (oc * direction).sum(-1)
+    c = (oc * oc).sum(-1) - sphere.radius ** 2
+    disc = b * b - c
+    root = disc.clamp_min(0).sqrt()
+    near, far = -b - root, -b + root
+    t = torch.where(near > 0, near, far)
+    return torch.where((disc > 0) & (t > 0), t, torch.full_like(t, INF))
+
+
+@dataclass
+class Hits:
+    t: torch.Tensor  # [R] inf: none
+    obj: torch.Tensor  # [R] object index, -1
+    material: torch.Tensor  # [R] index into the flat material table, -1
+    point: torch.Tensor  # [R,3]
+    normal: torch.Tensor  # [R,3] shading normal, facing the ray
+    geometric: torch.Tensor  # [R,3] geometric normal, facing the ray
+
+
+def material_table(objects):
+    """[(object index, Material)] over all objects; offsets[i] = first entry of object i."""
+    table, offsets = [], []
+    for i, obj in enumerate(objects):
+        offsets.append(len(table))
+        table.extend((i, m) for m in obj.materials)
+    return table, offsets
+
+
+def intersect(rays: torch.Tensor, objects: list, max_t: torch.Tensor | None = None) -> Hits:
+    count, device = rays.shape[0], rays.device
+    best = torch.full((count,), INF, device=device) if max_t is None else max_t.clone()
+    index = torch.full((count,), -1, dtype=torch.long, device=device)
+    faces = {}
+    for i, obj in enumerate(objects):
+        if is_mesh(obj):
+            t, face, bary = obj.intersect(rays, best)
+            faces[i] = (face, bary)
+        else:
+            t = sphere_hit(rays, obj)
         closer = t < best
         best = torch.where(closer, t, best)
         index = torch.where(closer, torch.full_like(index, i), index)
-    points = rays[:, :3] + best[:, None].nan_to_num(posinf=0.0) * rays[:, 3:]
-    normal = torch.zeros_like(points)
-    for i, sphere in enumerate(spheres):
+    best = torch.where(index >= 0, best, torch.full_like(best, INF))
+    point = rays[:, :3] + best[:, None].nan_to_num(posinf=0.0) * rays[:, 3:]
+    normal = torch.zeros_like(point)
+    geometric = torch.zeros_like(point)
+    material = torch.full_like(index, -1)
+    _, offsets = material_table(objects)
+    for i, obj in enumerate(objects):
         mask = index == i
-        if mask.any():
-            center, _ = sphere.tensors(rays.device)
-            normal[mask] = F.normalize(points[mask] - center, dim=-1)
-    return best, index, points, normal
+        if not mask.any():
+            continue
+        if is_mesh(obj):
+            face, bary = faces[i]
+            shading, geo = obj.surface(face[mask], bary[mask])
+            normal[mask], geometric[mask] = shading, geo
+            material[mask] = offsets[i] + obj.face_material[face[mask]]
+        else:
+            center, _ = obj.tensors(device)
+            normal[mask] = geometric[mask] = F.normalize(point[mask] - center, dim=-1)
+            material[mask] = offsets[i]
+    # Face the ray (meshes may be open or inconsistently oriented); a shading normal turned away from the ray
+    # (interpolation at silhouettes) falls back to the geometric one.
+    d = rays[:, 3:]
+    flip = (geometric * d).sum(-1, keepdim=True) > 0
+    geometric = torch.where(flip, -geometric, geometric)
+    normal = torch.where(flip, -normal, normal)
+    normal = torch.where((normal * d).sum(-1, keepdim=True) >= 0, geometric, normal)
+    return Hits(best, index, material, point, normal, geometric)
 
 
 def reflect(d: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
@@ -119,6 +248,7 @@ class SceneTracer:
         self.medium = trainer.model.medium.render_scene()
         self.color_origin = color_origin
         self.gaussians = None
+        self._environment = {}
         if color_origin is not None:
             self.set_color_origin(color_origin)
 
@@ -187,9 +317,55 @@ class SceneTracer:
     def side(self) -> torch.Tensor:  # any unit vector orthogonal to up (straight-up rays)
         return F.normalize(torch.linalg.cross(self.up, torch.tensor([0.0, 0.0, 1.0], device=self.up.device)), dim=0)
 
+    # --- light on matte surfaces ----------------------------------------------------------------
+    @torch.no_grad()
+    def environment(self, center: torch.Tensor, samples: int, settings: TraceSettings):
+        """Directions [K,3] and the scene's radiance [K,3] arriving at a point (objects not included); cached."""
+        key = (tuple(round(float(x), 5) for x in center), samples, settings.water_light_max_up)
+        if key not in self._environment:
+            directions = sphere_directions(samples, center.device)
+            rays = torch.cat((center.expand_as(directions), directions), -1).contiguous()
+            start = self.nearest_sites(center[None]).expand(samples)
+            self._environment[key] = (directions, self.trace(rays, [], settings, start_points=start))
+        return self._environment[key]
+
+    @torch.no_grad()
+    def irradiance(self, obj, normal: torch.Tensor, settings: TraceSettings) -> torch.Tensor:
+        """Cosine-weighted incoming light / pi at normals [P,3] from the environment at the object's centre."""
+        center = obj.center if is_mesh(obj) else obj.tensors(normal.device)[0]
+        directions, radiance = self.environment(center, settings.environment_samples, settings)
+        cos = (normal @ directions.T).clamp_min(0)  # [P,K]
+        light = 4.0 / directions.shape[0] * cos @ radiance + torch.tensor(settings.ambient, device=normal.device)
+        if settings.seabed_albedo is not None:
+            up = self.up.to(normal)
+            down = (-(directions @ up)).clamp_min(0)  # cosine-weighted mean over the lower hemisphere
+            seabed = (down[:, None] * radiance).sum(0) / down.sum().clamp_min(1e-6)
+            light = light + (seabed / settings.seabed_albedo) * ((1 + normal @ up) / 2).pow(settings.sky_exponent)[:, None]
+        return light
+
+    @torch.no_grad()
+    def blocked(self, rays: torch.Tensor, objects: list, max_t: torch.Tensor) -> torch.Tensor:
+        """[R] bool: some inserted object lies on the ray before max_t."""
+        hit = torch.zeros(rays.shape[0], dtype=torch.bool, device=rays.device)
+        for obj in objects:
+            t = obj.intersect(rays, max_t)[0] if is_mesh(obj) else sphere_hit(rays, obj)
+            hit |= t < max_t
+        return hit
+
+    @torch.no_grad()
+    def occlusion(self, points, normal, objects, distance: float, samples: int, epsilon: float) -> torch.Tensor:
+        """[P] cosine-weighted fraction of the hemisphere around normal hidden by objects within distance."""
+        if points.shape[0] == 0 or not objects:
+            return torch.zeros(points.shape[0], device=points.device)
+        directions = around(cosine_directions(samples, points.device), normal)  # [P,K,3]
+        origins = (points + epsilon * normal)[:, None].expand_as(directions)
+        rays = torch.cat((origins, directions), -1).reshape(-1, 6).contiguous()
+        far = torch.full((rays.shape[0],), distance, device=points.device)
+        return self.blocked(rays, objects, far).reshape(-1, samples).float().mean(-1)
+
     # --- recursive tracing ------------------------------------------------------------------------
     @torch.no_grad()
-    def trace(self, rays: torch.Tensor, objects: list[Sphere], settings: TraceSettings = TraceSettings(),
+    def trace(self, rays: torch.Tensor, objects: list, settings: TraceSettings = TraceSettings(),
               depth: int = 0, weight: torch.Tensor | None = None, start_points=None, stats: TraceStats | None = None):
         """Raw radiance [R,3] (water light applied, before the camera model)."""
         count = rays.shape[0]
@@ -197,27 +373,30 @@ class SceneTracer:
             while len(stats.rays_per_depth) <= depth:
                 stats.rays_per_depth.append(0)
             stats.rays_per_depth[depth] += count
+        if count == 0:
+            return torch.zeros(0, 3, device=rays.device)
         if weight is None:
             weight = torch.ones(count, 3, device=rays.device)
         if not objects:
             direct, scattered, _ = self.segment(rays, torch.full((count,), INF, device=rays.device), start_points)
             return self.water_light(direct, scattered, rays, settings.water_light_max_up)
-        t_hit, index, points, normal = intersect_spheres(rays, objects)
-        direct, scattered, transmission = self.segment(rays, t_hit, start_points)
+        hits = intersect(rays, objects)
+        direct, scattered, transmission = self.segment(rays, hits.t, start_points)
         if settings.shadows:
-            direct = direct * self.shadow_factor(rays, t_hit, objects, settings)[:, None]
+            direct = direct * self.shadow_factor(rays, hits.t, objects, settings)[:, None]
         out = self.water_light(direct, scattered, rays, settings.water_light_max_up)
-        hit = index >= 0
-        if not hit.any() or depth >= settings.max_depth:  # past the last bounce an object is black
+        if not bool((hits.obj >= 0).any()) or depth >= settings.max_depth:  # past the last bounce: black
             return out
         # Light leaving the objects towards the ray origin, attenuated by the water in front of them.
         carried = transmission * weight
-        for i, sphere in enumerate(objects):
-            mask = hit & (index == i) & (carried.amax(-1) > settings.min_weight)
-            if not mask.any():
-                continue
-            out[mask] += transmission[mask] * self.shade(sphere, rays[mask], points[mask], normal[mask],
-                                                         settings, depth, carried[mask], objects, stats)
+        table, _ = material_table(objects)
+        alive = (hits.obj >= 0) & (carried.amax(-1) > settings.min_weight)
+        for m in hits.material[alive].unique().tolist():
+            mask = alive & (hits.material == m)
+            obj_index, material = table[m]
+            sub = Hits(*(x[mask] for x in (hits.t, hits.obj, hits.material, hits.point, hits.normal, hits.geometric)))
+            out[mask] += transmission[mask] * self.shade(objects[obj_index], material, rays[mask], sub, settings,
+                                                         depth, carried[mask], objects, stats)
         return out
 
     @torch.no_grad()
@@ -237,12 +416,15 @@ class SceneTracer:
         up = self.up.to(d)
         cone = torch.tensor(settings.shadow_cone_deg, device=d.device).deg2rad()
         lit = torch.ones(p.shape[0], device=d.device)
-        for sphere in objects:
-            center, _ = sphere.tensors(d.device)
+        for obj in objects:
+            if is_mesh(obj):
+                lit = lit * self._mesh_shadow(obj, p, n, up, float(cone), settings)
+                continue
+            center, _ = obj.tensors(d.device)
             v = center - p
             distance = v.norm(dim=-1).clamp_min(1e-6)
             v = v / distance[:, None]
-            ratio = (sphere.radius / distance).clamp(max=1.0)
+            ratio = (obj.radius / distance).clamp(max=1.0)
             occlusion = (n * v).sum(-1).clamp_min(0) * ratio ** 2  # cosine-weighted solid angle / pi
             # Directional part: overlap of the light cone (half-angle cone) and the sphere's disc (half-angle beta)
             # seen from p, as a smooth step in their angular separation.
@@ -254,40 +436,115 @@ class SceneTracer:
         factor[valid] = lit
         return factor
 
-    def _secondary(self, origins, directions, sphere, settings):
-        origins = origins + directions * (settings.epsilon * sphere.radius)
+    def _mesh_shadow(self, mesh, p, n, up, cone: float, settings) -> torch.Tensor:
+        """Sampled version of the sphere shadow for a mesh, on points within 3 radii of it."""
+        lit = torch.ones(p.shape[0], device=p.device)
+        near = (p - mesh.center).norm(dim=-1) < 3 * mesh.radius
+        if not near.any():
+            return lit
+        q, m = p[near], n[near]
+        k = settings.shadow_samples
+        eps = 1e-3 * mesh.radius
+        cone_dirs = around(cone_directions(k, cone, p.device), up[None].expand(1, 3))[0]  # [K,3]
+        origins = (q + eps * m)[:, None].expand(-1, k, -1)
+        rays = torch.cat((origins, cone_dirs[None].expand_as(origins)), -1).reshape(-1, 6).contiguous()
+        hit = mesh.intersect(rays)[0] < INF
+        in_cone = hit.reshape(-1, k).float().mean(-1)
+        occluded = self.occlusion(q, m, [mesh], 2 * mesh.radius, k, eps)
+        lit[near] = (1 - settings.shadow_strength * in_cone) * (1 - settings.occlusion_strength * occluded)
+        return lit
+
+    def _secondary(self, origins, directions, obj, settings):
+        origins = origins + directions * (settings.epsilon * obj.radius)
         return torch.cat((origins, directions), -1).contiguous()
 
+    def _branch(self, rays, objects, settings, depth, weight, stats):
+        """trace() of the rays whose weight is worth it, zeros elsewhere."""
+        out = torch.zeros(rays.shape[0], 3, device=rays.device)
+        keep = weight.amax(-1) > settings.min_weight
+        if keep.any():
+            out[keep] = self.trace(rays[keep], objects, settings, depth + 1, weight[keep], stats=stats)
+        return out
+
+    def _matte(self, obj, hits: Hits, objects, settings) -> torch.Tensor:
+        light = self.irradiance(obj, hits.normal, settings)
+        if any(is_mesh(o) for o in objects):
+            meshes = [o for o in objects if is_mesh(o)]
+            hidden = self.occlusion(hits.point, hits.geometric, meshes, settings.occlusion_distance * obj.radius,
+                                    settings.occlusion_samples, 1e-3 * obj.radius)
+            light = light * (1 - hidden)[:, None]
+        return light
+
     @torch.no_grad()
-    def shade(self, sphere: Sphere, rays, points, normal, settings, depth, weight, objects, stats):
+    def shade(self, obj, material: Material, rays, hits: Hits, settings, depth, weight, objects, stats):
         device = rays.device
-        _, tint = sphere.tensors(device)
+        tint = torch.tensor(material.tint, dtype=torch.float32, device=device)
         d = rays[:, 3:]
-        if sphere.material == "diffuse":
-            return tint * torch.tensor(settings.ambient, device=device) * (-(d * normal).sum(-1, keepdim=True)).clamp_min(0.2)
-        reflected = self._secondary(points, reflect(d, normal), sphere, settings)
-        if sphere.material == "mirror":
-            return tint * self.trace(reflected, objects, settings, depth + 1, weight * tint, stats=stats)
-        if sphere.material != "glass":
-            raise ValueError(f"unknown material {sphere.material}")
-        # Glass: Fresnel split; the refracted ray crosses the solid sphere (no water inside) and leaves it at the
-        # far side. A sphere never totally reflects on the way out, so the path is analytic.
-        cos_i = -(d * normal).sum(-1, keepdim=True)
-        kr = fresnel_schlick(cos_i, 1.0, sphere.ior)
-        inside, _ = refract(d, normal, 1.0 / sphere.ior)
-        center, _ = sphere.tensors(device)
-        oc = points - center
+        n = hits.normal
+        kind = material.kind
+        if kind == "diffuse":
+            return tint * self._matte(obj, hits, objects, settings)
+        reflected = self._secondary(hits.point, reflect(d, n), obj, settings)
+        if kind == "mirror":
+            return tint * self._branch(reflected, objects, settings, depth, weight * tint, stats)
+        if kind == "metal":
+            mirror = self._branch(reflected, objects, settings, depth, weight * tint * material.kd, stats)
+            return tint * (material.kd * mirror + (1 - material.kd) * self._matte(obj, hits, objects, settings))
+        cos_i = -(d * n).sum(-1, keepdim=True)
+        kr = fresnel_schlick(cos_i, 1.0, material.ior)
+        if kind == "ceramic":
+            mirror = self._branch(reflected, objects, settings, depth, weight * kr, stats)
+            return kr * mirror + (1 - kr) * material.kd * tint * self._matte(obj, hits, objects, settings)
+        if kind != "glass":
+            raise ValueError(f"unknown material {kind}")
+        if is_mesh(obj):
+            return self._glass_mesh(obj, material, rays, hits, kr, tint, settings, depth, weight, objects, stats)
+        # Glass sphere: Fresnel split; the refracted ray crosses the solid sphere (no water inside) and leaves it at
+        # the far side. A sphere never totally reflects on the way out, so the path is analytic.
+        inside, _ = refract(d, n, 1.0 / material.ior)
+        center, _ = obj.tensors(device)
+        oc = hits.point - center
         b = (oc * inside).sum(-1, keepdim=True)
         chord = (-2.0 * b).clamp_min(0)  # second intersection of a ray starting on the sphere
-        exit_point = points + chord * inside
+        exit_point = hits.point + chord * inside
         exit_normal = F.normalize(exit_point - center, dim=-1)
-        outgoing, tir = refract(inside, -exit_normal, sphere.ior)
+        outgoing, tir = refract(inside, -exit_normal, material.ior)
         outgoing = torch.where(tir[:, None], reflect(inside, -exit_normal), outgoing)
         cos_o = (inside * exit_normal).sum(-1, keepdim=True)
-        kt = (1 - kr) * (1 - fresnel_schlick(cos_o, sphere.ior, 1.0))
-        reflected_light = self.trace(reflected, objects, settings, depth + 1, weight * kr, stats=stats)
-        refracted = self._secondary(exit_point, outgoing, sphere, settings)
-        refracted_light = self.trace(refracted, objects, settings, depth + 1, weight * kt * tint, stats=stats)
+        kt = (1 - kr) * (1 - fresnel_schlick(cos_o, material.ior, 1.0))
+        reflected_light = self._branch(reflected, objects, settings, depth, weight * kr, stats)
+        refracted = self._secondary(exit_point, outgoing, obj, settings)
+        refracted_light = self._branch(refracted, objects, settings, depth, weight * kt * tint, stats)
+        return kr * reflected_light + kt * tint * refracted_light
+
+    def _glass_mesh(self, mesh, material, rays, hits, kr, tint, settings, depth, weight, objects, stats):
+        """Glass part of a mesh, entered from the water: refract in, find the exit on the same mesh (no water
+        inside), refract out (total internal reflection: leave along the reflection). An open surface with no exit
+        is a thin sheet: the ray continues in its refracted direction."""
+        d, n = rays[:, 3:], hits.normal
+        inside, tir_in = refract(d, n, 1.0 / material.ior)
+        kr = torch.where(tir_in[:, None], torch.ones_like(kr), kr)
+        start = hits.point - n * (settings.epsilon * mesh.radius)
+        inner = torch.cat((start, inside), -1).contiguous()
+        t, face, bary = mesh.intersect(inner)
+        exits = t < INF
+        out_point, out_dir = start.clone(), inside.clone()
+        kt = 1 - kr
+        if exits.any():
+            point = start[exits] + t[exits, None] * inside[exits]
+            _, geo = mesh.surface(face[exits], bary[exits])
+            geo = torch.where((geo * inside[exits]).sum(-1, keepdim=True) > 0, -geo, geo)  # facing the inner ray
+            outgoing, tir = refract(inside[exits], geo, material.ior)
+            outgoing = torch.where(tir[:, None], reflect(inside[exits], geo), outgoing)
+            cos_o = -(inside[exits] * geo).sum(-1, keepdim=True)
+            kt = kt.clone()
+            kt[exits] = kt[exits] * (1 - fresnel_schlick(cos_o, material.ior, 1.0))
+            out_point[exits] = point
+            out_dir[exits] = outgoing
+        reflected = self._secondary(hits.point, reflect(d, n), mesh, settings)
+        refracted = self._secondary(out_point, out_dir, mesh, settings)
+        reflected_light = self._branch(reflected, objects, settings, depth, weight * kr, stats)
+        refracted_light = self._branch(refracted, objects, settings, depth, weight * kt * tint, stats)
         return kr * reflected_light + kt * tint * refracted_light
 
 
@@ -301,15 +558,14 @@ def place_on_seabed(tracer, camera, u: float, v: float, radius_fraction: float, 
     only = tracer.renderer.render_gaussians(ray, tracer.gaussians, background=(0.0, 0.0, 0.0))
     depth = float(only.surface_depth.reshape(-1)[0])
     point = ray[0, :3] + depth * ray[0, 3:]
-    up = -torch.stack([c.down for c in tracer.trainer.dataset.train]).mean(0)
-    up = up / up.norm()
+    up = tracer.up.to(point)
     radius = radius_fraction * depth
     center = point + up * radius * lift  # lift < 1 sinks the sphere into the surface
     return center.tolist(), radius, depth
 
 
 @torch.no_grad()
-def render_camera(tracer: SceneTracer, camera, objects: list[Sphere], settings: TraceSettings = TraceSettings(),
+def render_camera(tracer: SceneTracer, camera, objects: list, settings: TraceSettings = TraceSettings(),
                   stats: TraceStats | None = None, isp_origin: torch.Tensor | None = None):
     """Raw and camera-model images [H,W,3] of one camera (render.py's `raw` / `full`). isp_origin: take the camera
     model's exposure and colour as at this point (default: the camera's own origin; a fixed point for videos, so

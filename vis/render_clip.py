@@ -5,6 +5,8 @@
 Shot file (JSON):
   {"anchor_view": "MTN_1296",                 # test view used to place the objects
    "objects": [{"u": 0.40, "v": 0.72, "radius_fraction": 0.07, "lift": 1.0, "material": "mirror", "tint": [...]},
+               {"type": "mesh", "manifest": "$FALCON/source/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
+                "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "materials": {"caroseria": {"mode": ...}}},
                ...],                         # resting on the surface seen at image fraction (u, v) of the anchor view
    "frames": 120, "fps": 30,                  # the camera model's exposure is that of the anchor view
    "path": {"look_at_objects": 0.7,          # 0: the photos' own viewing direction, 1: aim at the objects
@@ -18,6 +20,7 @@ shot (with object centres in world units) to OUT/shot_resolved.json.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import subprocess
@@ -32,7 +35,8 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import render  # noqa: E402
-from vis.raytrace import SceneTracer, Sphere, TraceSettings, place_on_seabed, render_camera  # noqa: E402
+from vis.mesh import Mesh, load_manifest, place_mesh_on_seabed  # noqa: E402
+from vis.raytrace import SceneTracer, Sphere, TraceSettings, TraceStats, place_on_seabed, render_camera  # noqa: E402
 
 
 def catmull_rom(points: torch.Tensor, samples: int) -> torch.Tensor:
@@ -85,6 +89,37 @@ def camera_path(trainer, template, target: torch.Tensor, frames: int, look_at: f
     return cameras
 
 
+def build_objects(tracer, anchor, specs):
+    """Objects of a shot and their resolved form (world placement) for shot_resolved.json."""
+    objects, resolved = [], []
+    for spec in specs:
+        if spec.get("type", "sphere") == "mesh":
+            vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
+            world, info = place_mesh_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["span_fraction"], vertices,
+                                               spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
+            device = tracer.trainer.device
+            objects.append(Mesh(world, torch.as_tensor(faces, device=device), torch.as_tensor(part, device=device),
+                                materials, spec.get("name", "mesh"), ids))
+            resolved.append(dict(spec, placement=info, materials={i: vars(m) for i, m in zip(ids, materials)}))
+            continue
+        if "center" in spec:
+            center, radius = spec["center"], spec["radius"]
+        else:
+            center, radius, _ = place_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["radius_fraction"],
+                                                spec.get("lift", 1.0))
+        sphere = Sphere(center, radius, spec.get("material", "mirror"), tuple(spec.get("tint", (1, 1, 1))),
+                        spec.get("ior", 1.5 / 1.33), spec.get("kd", 1.0))
+        objects.append(sphere)
+        resolved.append(dict(type="sphere", center=center, radius=radius, material=sphere.material,
+                             tint=list(sphere.tint), ior=sphere.ior, kd=sphere.kd))
+    return objects, resolved
+
+
+def save_png(path: Path, image: torch.Tensor):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray((image.clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", type=Path, required=True)
@@ -92,39 +127,42 @@ def main():
     parser.add_argument("--shot", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--frames", type=int, help="override the shot's frame count (previews)")
+    parser.add_argument("--still", action="store_true", help="only the anchor view: OUT/still.png (+ no shadows)")
     args = parser.parse_args()
     shot = json.loads(args.shot.read_text())
     trainer = render.load_run(args.run.resolve(), "last", args.scene)
     anchor = {c.name: c for c in trainer.dataset.train + trainer.dataset.test}[shot["anchor_view"]]
     tracer = SceneTracer(trainer, anchor.origin)
 
-    objects = []
-    for spec in shot["objects"]:
-        if "center" in spec:
-            center, radius = spec["center"], spec["radius"]
-        else:
-            center, radius, _ = place_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["radius_fraction"],
-                                                spec.get("lift", 1.0))
-        objects.append(Sphere(center, radius, spec.get("material", "mirror"), tuple(spec.get("tint", (1, 1, 1))),
-                              spec.get("ior", 1.5 / 1.33)))
-    target = torch.tensor([o.center for o in objects], device=trainer.device).mean(0)
+    objects, resolved_objects = build_objects(tracer, anchor, shot["objects"])
+    settings = TraceSettings(**shot.get("trace", {}))
+    if args.still:
+        stats = TraceStats()
+        torch.cuda.synchronize(); start = time.time()
+        _, full = render_camera(tracer, anchor, objects, settings, stats)
+        torch.cuda.synchronize()
+        print(f"still: {time.time() - start:.2f} s, rays per depth {stats.rays_per_depth}")
+        save_png(args.out / "still.png", full)
+        if settings.shadows:
+            _, flat = render_camera(tracer, anchor, objects, dataclasses.replace(settings, shadows=False))
+            save_png(args.out / "still_noshadow.png", flat)
+        save_png(args.out / "still_reference.png", render_camera(tracer, anchor, [])[1])
+        return
+    target = torch.stack([torch.as_tensor(o.center, dtype=torch.float32, device=trainer.device) for o in objects]).mean(0)
     path = shot.get("path", {})
     frames = args.frames or shot.get("frames", 120)
     cameras = camera_path(trainer, anchor, target, frames, path.get("look_at_objects", 0.7), path.get("views"),
                           path.get("scale", 1.0))
-    settings = TraceSettings(**shot.get("trace", {}))
 
     out_frames = args.out / "frames"
     out_frames.mkdir(parents=True, exist_ok=True)
-    resolved = dict(shot, objects=[dict(center=o.center, radius=o.radius, material=o.material, tint=list(o.tint),
-                                        ior=o.ior) for o in objects], frames=frames,
+    resolved = dict(shot, objects=resolved_objects, frames=frames,
                     run=str(args.run), cameras=[render.camera_record(c) for c in cameras])
     (args.out / "shot_resolved.json").write_text(json.dumps(resolved, indent=1))
     start = time.time()
     for i, camera in enumerate(cameras):
         _, full = render_camera(tracer, camera, objects, settings, isp_origin=anchor.origin)
-        image = (full.cpu().numpy() * 255 + 0.5).astype(np.uint8)
-        Image.fromarray(image).save(out_frames / f"{i:04d}.png")
+        save_png(out_frames / f"{i:04d}.png", full)
         if i % 20 == 0:
             print(f"frame {i}/{frames}  {time.time() - start:.1f} s", flush=True)
     video = args.out.with_suffix(".mp4")
