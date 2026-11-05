@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 
 INF = float("inf")
+RAY_CHUNK = 4_000_000  # shadow / occlusion rays per batch (GPU memory)
 
 
 @dataclass
@@ -360,13 +361,19 @@ class SceneTracer:
     @torch.no_grad()
     def occlusion(self, points, normal, objects, distance: float, samples: int, epsilon: float) -> torch.Tensor:
         """[P] cosine-weighted fraction of the hemisphere around normal hidden by objects within distance."""
+        out = torch.zeros(points.shape[0], device=points.device)
         if points.shape[0] == 0 or not objects:
-            return torch.zeros(points.shape[0], device=points.device)
-        directions = around(cosine_directions(samples, points.device), normal)  # [P,K,3]
-        origins = (points + epsilon * normal)[:, None].expand_as(directions)
-        rays = torch.cat((origins, directions), -1).reshape(-1, 6).contiguous()
-        far = torch.full((rays.shape[0],), distance, device=points.device)
-        return self.blocked(rays, objects, far).reshape(-1, samples).float().mean(-1)
+            return out
+        local = cosine_directions(samples, points.device)
+        chunk = max(1, RAY_CHUNK // samples)
+        for begin in range(0, points.shape[0], chunk):
+            q, m = points[begin:begin + chunk], normal[begin:begin + chunk]
+            directions = around(local, m)  # [P,K,3]
+            origins = (q + epsilon * m)[:, None].expand_as(directions)
+            rays = torch.cat((origins, directions), -1).reshape(-1, 6).contiguous()
+            far = torch.full((rays.shape[0],), distance, device=points.device)
+            out[begin:begin + chunk] = self.blocked(rays, objects, far).reshape(-1, samples).float().mean(-1)
+        return out
 
     # --- recursive tracing ------------------------------------------------------------------------
     @torch.no_grad()
@@ -476,10 +483,12 @@ class SceneTracer:
         k = settings.shadow_samples
         eps = 1e-3 * mesh.radius
         cone_dirs = around(cone_directions(k, cone, p.device), up[None].expand(1, 3))[0]  # [K,3]
-        origins = (q + eps * m)[:, None].expand(-1, k, -1)
-        rays = torch.cat((origins, cone_dirs[None].expand_as(origins)), -1).reshape(-1, 6).contiguous()
-        hit = mesh.intersect(rays)[0] < INF
-        in_cone = hit.reshape(-1, k).float().mean(-1)
+        in_cone = torch.empty(q.shape[0], device=p.device)
+        chunk = max(1, RAY_CHUNK // k)
+        for begin in range(0, q.shape[0], chunk):
+            origins = (q[begin:begin + chunk] + eps * up)[:, None].expand(-1, k, -1)
+            rays = torch.cat((origins, cone_dirs[None].expand_as(origins)), -1).reshape(-1, 6).contiguous()
+            in_cone[begin:begin + chunk] = (mesh.intersect(rays)[0] < INF).reshape(-1, k).float().mean(-1)
         occluded = self.occlusion(q, m, [mesh], 2 * mesh.radius, k, eps)
         lit[near] = (1 - settings.shadow_strength * in_cone) * (1 - settings.occlusion_strength * occluded)
         return lit
