@@ -73,6 +73,14 @@ def test_seathru_short_training_runs_every_mechanism_and_renders(tmp_path):
     for mode in ("full", "gaussians"):
         np.testing.assert_allclose(np.load(tmp_path / "posed" / mode / f"{view.name}.npy"),
                                    np.load(out / mode / f"{view.name}.npy"), atol=1e-5)
+    # a run moved to another machine: the stored dataset path is gone, --scene points to the data
+    config_file = run / "joint/config.yaml"
+    config_file.write_text(config_file.read_text().replace(str(IUI3), "/nonexistent/IUI3-RedSea-Undistorted"))
+    with pytest.raises(FileNotFoundError, match="--scene"):
+        render.load_run(run, "last")
+    render.main(["--run", str(run), "--scene", str(IUI3), "--out", str(tmp_path / "moved"), "--modes", "full", "--npy"])
+    np.testing.assert_allclose(np.load(tmp_path / "moved" / "full" / f"{view.name}.npy"),
+                               np.load(out / "full" / f"{view.name}.npy"), atol=1e-5)
     png = np.asarray(Image.open(out / "gaussians" / f"{view.name}.png"))
     assert png.dtype == np.uint8 and png.shape == (view.height, view.width, 3)
 

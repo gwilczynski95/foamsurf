@@ -83,7 +83,11 @@ python render.py --run outputs/curacao                                   # widok
 python render.py --run outputs/curacao --views train --modes full,gaussians
 python render.py --run outputs/curacao --export-cameras kamery.json      # kamery zbioru danych jako szablon póz
 python render.py --run outputs/curacao --poses moje_pozy.json --modes gaussians,voronoi --npy
+python render.py --run modele/curacao --scene /dane/Curasao-Undistorted   # run wytrenowany na innym komputerze
 ```
+
+`render.py` potrzebuje zbioru danych runu (kamery i zdjęcia treningowe: model kamery i światło wody dopasowują się do
+nich przy wczytaniu). Ścieżka jest zapisana w runie; jeśli dane leżą gdzie indziej, podaj `--scene`.
 
 Tryby (`--modes`, PNG w `OUT/<tryb>/<widok>.png`, z `--npy` także tablice float32):
 

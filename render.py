@@ -4,6 +4,7 @@
     python render.py --run RUN_DIR --views train --modes full,gaussians
     python render.py --run RUN_DIR --poses cameras.json --modes gaussians,voronoi
     python render.py --run RUN_DIR --export-cameras cameras.json      # the dataset cameras as a pose template
+    python render.py --run RUN_DIR --scene /data/Curasao-Undistorted  # dataset not at the path it was trained with
 
 Modes (one PNG per view and mode, in OUT/<mode>/<view>.png; --npy also saves float arrays):
   full         the evaluation image: Gaussians + water medium, water light terms, camera model (PPISP)
@@ -55,12 +56,17 @@ def camera_from_record(record: dict, device):
                   intrinsics=(fx, fy, float(record["cx"]), float(record["cy"])))
 
 
-def load_run(run: Path, checkpoint: str):
-    """A trainer restored from the run's checkpoint (nothing in the run directory is written)."""
+def load_run(run: Path, checkpoint: str, scene: Path | None = None):
+    """A trainer restored from the run's checkpoint (nothing in the run directory is written). ``scene`` replaces
+    the dataset path stored in the run (a run trained on another machine)."""
     from training.config import ExperimentConfig
     from training.trainer import Trainer
     joint = run / "joint" if (run / "joint").is_dir() else run
     config = ExperimentConfig.load(joint / "config.yaml")
+    if scene is not None:
+        config.dataset.source_path = str(Path(scene).resolve())
+    if not Path(config.dataset.source_path).is_dir():
+        raise FileNotFoundError(f"scene {config.dataset.source_path} not found: pass --scene with the dataset directory")
     config.output_dir = tempfile.mkdtemp(prefix="foamsurf_render_")
     config.wandb.mode = "disabled"
     trainer = Trainer(config, resume=joint / "checkpoints" / f"{checkpoint}.pt")
@@ -125,6 +131,7 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", type=Path, required=True, help="run directory written by train.py")
     parser.add_argument("--checkpoint", default="last", choices=("last", "best"))
+    parser.add_argument("--scene", type=Path, help="dataset directory of the run, when not at the path it was trained with")
     parser.add_argument("--views", default="test", choices=("test", "train", "all"))
     parser.add_argument("--poses", type=Path, help="JSON list of cameras to render instead of the dataset views")
     parser.add_argument("--modes", default=",".join(MODES), help="comma-separated, from: " + ", ".join(MODES))
@@ -137,7 +144,7 @@ def main(argv=None) -> None:
     if unknown:
         parser.error(f"unknown modes: {', '.join(unknown)}")
 
-    trainer = load_run(args.run.resolve(), args.checkpoint)
+    trainer = load_run(args.run.resolve(), args.checkpoint, args.scene)
     dataset = trainer.dataset
     if args.export_cameras:
         records = [dict(camera_record(c), split=split) for split, cams in (("train", dataset.train), ("test", dataset.test))
