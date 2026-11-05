@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Single public FoamSurf training entry point.
+"""Train FoamSurf on one scene.
 
-Usage: python train.py --config configs/iui3_5k.yaml --output-dir outputs/my_run
-       python train.py --config configs/synthetic.yaml --output-dir outputs/lego
+    python train.py --scene /data/SeathruNeRF_dataset/Curasao-Undistorted --out outputs/curacao
+    python train.py --scene /data/foggy_garden/garden_easy --out outputs/garden_easy --config configs/garden_fog.yaml
+    python train.py ... --seed 43 --wandb my_project --set joint.optimization.iterations=10000
+
+The scene is a COLMAP dataset (images/ and sparse/0/). Every 500 iterations and at the end the test views
+are rendered and scored; the run directory then holds:
+    joint/checkpoints/last.pt (+ best.pt)   the model, its optimizers, camera model and water light terms
+    joint/metrics/train.csv, eval.csv       losses and statistics per step, test metrics per evaluation
+    joint/evaluation/iteration_*/           test renders (full image, Gaussians alone, medium alone, ...)
+    joint/summary.json                      final status, timing and model size
+Render a finished run with render.py. --resume continues a run with the same configuration.
 """
 import argparse
 import json
@@ -12,14 +21,16 @@ import sys
 
 import yaml
 
-from training.config import ExperimentConfig, drop_legacy_keys
-from training.end_to_end import EndToEndConfig, EndToEndTrainer, atomic_json, update_config
+from training.config import ExperimentConfig, atomic_json, drop_legacy_keys, update_config
 
 ROOT = Path(__file__).resolve().parent
 
 
 def load_iui3_source(config_path):
-    """Load the full IUI3 YAML or a small, explicit variant of it."""
+    """Load the full YAML (configs/base.yaml) or a variant of it: ``base_config`` plus ``overrides``.
+
+    A variant may itself be based on a variant (configs/garden_fog.yaml on configs/seathru.yaml): the
+    overrides of the chain are applied in order, base first."""
     path = Path(config_path)
     raw = yaml.safe_load(path.read_text())
     if "base_config" not in raw:
@@ -29,10 +40,12 @@ def load_iui3_source(config_path):
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"Unsupported IUI3 variant fields: {sorted(unknown)}")
-    base = yaml.safe_load((path.parent / raw["base_config"]).read_text())
-    if "capacity_loss" not in base or "base_config" in base:
+    base, base_variant = load_iui3_source(path.parent / raw["base_config"])
+    if "capacity_loss" not in base:
         raise ValueError("IUI3 variant must reference a full IUI3 configuration")
-    return base, raw
+    variant = {**base_variant, **{k: v for k, v in raw.items() if k != "overrides"}}
+    variant["overrides"] = list(base_variant.get("overrides", [])) + list(raw.get("overrides") or [])
+    return base, variant
 
 
 def apply_overrides(manifest, overrides, defaults=None):
@@ -187,60 +200,40 @@ def run_iui3_stage(output_dir, stage):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path)
-    parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--stage", choices=("warmup", "partition", "joint"))
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--gaussian-rgb-activation", choices=("identity", "sigmoid"))
-    parser.add_argument("--medium-color-activation", choices=("dc", "sigmoid"))
-    parser.add_argument("--wandb-project")
-    parser.add_argument("--set", dest="overrides", action="append", default=[],
-                        metavar="KEY.PATH=VALUE",
-                        help="IUI3 only: override an existing manifest key (repeatable)")
-    parser.add_argument("--run-suffix", help="IUI3 only: appended to joint run names")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--scene", type=Path, help="COLMAP scene directory (images/, sparse/0/)")
+    parser.add_argument("--out", "--output-dir", dest="output_dir", type=Path, help="run directory")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "seathru.yaml")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--wandb", metavar="PROJECT", help="log to Weights & Biases (default: off)")
+    parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY.PATH=VALUE",
+                        help="override a configuration value, e.g. joint.optimization.iterations=10000 (repeatable)")
+    parser.add_argument("--resume", action="store_true", help="continue an unfinished run")
+    parser.add_argument("--dry-run", action="store_true", help="print the resolved configuration and stop")
+    parser.add_argument("--stage", choices=("warmup", "joint"), help=argparse.SUPPRESS)  # internal: one stage
+    parser.add_argument("--run-suffix", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.stage:
         if not args.output_dir:
-            parser.error("--stage requires --output-dir")
-        root = args.output_dir.resolve()
-        manifest = json.loads((root / "pipeline_config.json").read_text())
-        if "capacity_loss" in manifest:
-            if args.stage == "partition":
-                parser.error("IUI3 has no partition stage")
-            run_iui3_stage(root, args.stage)
-        else:
-            from training.end_to_end import run_stage
-            run_stage(root, args.stage)
+            parser.error("--stage requires --out")
+        run_iui3_stage(args.output_dir.resolve(), args.stage)
         return
-    if not args.config:
-        parser.error("--config is required")
-    raw = yaml.safe_load(args.config.read_text())
-    output = args.output_dir or Path(raw["output_dir"])
-    if "capacity_loss" in raw or "base_config" in raw:
-        manifest = resolve_iui3(
-            args.config,
-            output,
-            gaussian_rgb_activation=args.gaussian_rgb_activation,
-            medium_color_activation=args.medium_color_activation,
-            wandb_project=args.wandb_project,
-            overrides=args.overrides,
-            run_suffix=args.run_suffix,
-        )
-        if args.dry_run:
-            print(json.dumps(manifest, indent=2))
-        else:
-            fit_iui3(manifest, resume=args.resume)
+    if not args.output_dir:
+        parser.error("--out is required")
+    overrides = [f"variant.seed={args.seed}", f"warmup.seed={args.seed}", f"joint.seed={args.seed}"]
+    if args.scene:
+        scene = args.scene.resolve()
+        if not (scene / "sparse").is_dir():
+            parser.error(f"{scene} is not a COLMAP scene (no sparse/)")
+        overrides += [f"warmup.dataset.source_path={scene}", f"joint.dataset.source_path={scene}"]
+    overrides += [f"joint.wandb.mode={'online' if args.wandb else 'disabled'}", "warmup.wandb.mode=disabled"]
+    manifest = resolve_iui3(args.config, args.output_dir, wandb_project=args.wandb,
+                            overrides=overrides + args.overrides,
+                            run_suffix=args.run_suffix or args.output_dir.name)
+    if args.dry_run:
+        print(json.dumps(manifest, indent=2))
     else:
-        if any((args.gaussian_rgb_activation, args.medium_color_activation, args.wandb_project,
-                args.overrides, args.run_suffix)):
-            parser.error("color activation and manifest overrides are supported only for IUI3")
-        config = EndToEndConfig.load(args.config, output_dir=output)
-        if args.dry_run:
-            print(json.dumps(config.manifest(), indent=2))
-        else:
-            EndToEndTrainer(config).fit(resume=args.resume)
+        fit_iui3(manifest, resume=args.resume)
 
 
 if __name__ == "__main__":

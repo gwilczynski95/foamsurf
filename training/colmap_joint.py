@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from training.config import ExperimentConfig
-from training.end_to_end import atomic_json
+from training.config import atomic_json
 from training.warmup_profile import WarmupProfile
 
 def transfer_medium(payload,device,color_activation='dc'):

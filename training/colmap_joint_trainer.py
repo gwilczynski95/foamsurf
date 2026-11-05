@@ -8,7 +8,7 @@ from training.trainer import Trainer
 from training.checkpoints import checkpoint_payload, save_checkpoint, load_checkpoint
 from dataclasses import replace
 from pathlib import Path
-from training.end_to_end import atomic_json
+from training.config import atomic_json
 from training.disentanglement import undirected_edges
 from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
     CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency,

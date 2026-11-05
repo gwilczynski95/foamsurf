@@ -41,7 +41,6 @@ from .optimizer import (
 )
 from .sampler import RandomCameraRaySampler
 from .camera_isp import CameraISP, pixel_grid
-from .water_direction import WaterDirectionGain
 from .water_extrapolation import WaterExtrapolation
 from .water_phase import WaterPhase
 from .oceansplat import DepthAwareOpacity, adjusted_scene, downscaled_target, ocean_terms
@@ -358,11 +357,6 @@ class Trainer:
             self.evaluator.camera_isp = lambda image, camera: self.camera_isp.apply(
                 image, pixel_grid(camera.height, camera.width, image.device).reshape(*image.shape[:-1], 2),
                 (camera.height, camera.width), None, camera.origin)
-        self.water_direction = None
-        if config.optimization.water_direction:
-            self.water_direction = WaterDirectionGain(self.device, config.optimization.water_direction_lr)
-            if payload is not None and payload.get("water_direction") is not None:
-                self.water_direction.load_state_dict(payload["water_direction"])
         self.water_phase = None
         if config.optimization.water_phase:
             up = -torch.stack([camera.down for camera in self.dataset.train]).mean(0)  # the cameras' mean "up"
@@ -372,7 +366,7 @@ class Trainer:
                 self.water_phase.load_state_dict(payload["water_phase"])
         self.water_extrapolation = None  # fitted from the training photos before each evaluation (_wext)
         if self._water_modules() or config.optimization.water_extrapolation:
-            self.evaluator.water_direction = self._evaluation_water_light
+            self.evaluator.water_light = self._evaluation_water_light
         self.alpha_mlp = self.alpha_optimizer = None
         if config.optimization.ocean_alpha_until > 0:
             self.alpha_mlp = DepthAwareOpacity().to(self.device)
@@ -434,15 +428,13 @@ class Trainer:
             extras.update(alpha_mlp=self.alpha_mlp.state_dict(), alpha_optimizer=self.alpha_optimizer.state_dict())
         if self.camera_isp is not None:
             extras["camera_isp"] = self.camera_isp.state_dict()
-        if self.water_direction is not None:
-            extras["water_direction"] = self.water_direction.state_dict()
         if self.water_phase is not None:
             extras["water_phase"] = self.water_phase.state_dict()
         return extras or None
 
     def _water_modules(self) -> list:
-        """The direction-dependent water light terms in use (water_direction, water_phase)."""
-        return [m for m in (self.water_direction, self.water_phase) if m is not None]
+        """The direction-dependent water light terms in use (the phase function)."""
+        return [m for m in (self.water_phase,) if m is not None]
 
     def _water_light_parts(self, image: torch.Tensor, backscatter: torch.Tensor, rays: torch.Tensor) -> torch.Tensor:
         """image + (gain - 1) backscatter with the product of the gains of every water light term."""

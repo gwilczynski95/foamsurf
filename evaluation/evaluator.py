@@ -115,7 +115,7 @@ class Evaluator:
         self.output_dir = output_dir
         # Optional camera model applied to the hybrid image: callable(image [H, W, 3], camera) -> image.
         self.camera_isp = None
-        self.water_direction = None  # callable(image, backscatter, rays) -> image, or None
+        self.water_light = None  # callable(image, backscatter, rays) -> image: the trained water light terms
 
     @torch.no_grad()
     def _timed(self, operation):
@@ -216,8 +216,8 @@ class Evaluator:
                     )
                 )
 
-                hybrid_raw = (hybrid.image if self.water_direction is None or hybrid.backscatter is None
-                              else self.water_direction(hybrid.image, hybrid.backscatter, rays))
+                hybrid_raw = (hybrid.image if self.water_light is None or hybrid.backscatter is None
+                              else self.water_light(hybrid.image, hybrid.backscatter, rays))
                 hybrid_image = (hybrid_raw if self.camera_isp is None
                                 else self.camera_isp(hybrid_raw, camera)).clamp(0.0, 1.0)
                 gaussian_image = gaussian.image.clamp(0.0, 1.0)

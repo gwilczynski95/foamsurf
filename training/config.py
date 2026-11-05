@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,9 @@ _LEGACY_SECTIONS = {
     ),
 }
 _LEGACY_ADAPTATION = {"min_opacity_densify": None, "opacity_reset_prune_grace": 0}
+# Removed optimization options (direction-dependent water gain, _wdir) with their inactive values.
+_LEGACY_OPTIMIZATION = {"water_direction": False}
+_LEGACY_OPTIMIZATION_FREE = ("water_direction_lr",)
 _LEGACY_DISENTANGLEMENT_PREFIXES = (
     "opaque_if_used_", "graph_tv_", "density_cap_", "optical_thickness_",
 )
@@ -54,6 +59,17 @@ def drop_legacy_keys(raw: dict[str, Any]) -> dict[str, Any]:
                 del adaptation[key]
         adaptation.pop("movement_threshold", None)
         raw["gaussian_adaptation"] = adaptation
+    optimization = raw.get("optimization")
+    if optimization is not None:
+        optimization = dict(optimization)
+        for key, inactive in _LEGACY_OPTIMIZATION.items():
+            if key in optimization:
+                if optimization[key] != inactive:
+                    raise ValueError(f"optimization.{key} is no longer supported")
+                del optimization[key]
+        for key in _LEGACY_OPTIMIZATION_FREE:
+            optimization.pop(key, None)
+        raw["optimization"] = optimization
     return raw
 
 
@@ -211,10 +227,6 @@ class OptimizationConfig:
     # camera_isp_neighbours nearest training photos (1 / distance weights; 0 = neutral).
     camera_isp: bool = False
     camera_isp_neighbours: int = 4
-    # Direction-dependent water light (training/water_direction.py): the backscatter of each ray x exp(W d), nine
-    # parameters per scene starting at 0; open water brightens toward the surface.
-    water_direction: bool = False
-    water_direction_lr: float = 0.005
     # Henyey-Greenstein phase function on the backscatter (training/water_phase.py): learned direction toward the
     # light (started at the cameras' mean up) and anisotropy g per channel (started at 0 = the plain model).
     water_phase: bool = False
@@ -605,8 +617,8 @@ class ExperimentConfig:
                 or optimization.ocean_from > optimization.ocean_until or optimization.ocean_alpha_until < 0 \
                 or optimization.ocean_every < 1:
             raise ValueError("invalid ocean settings (weights >= 0, downscale/samples/every >= 1, from <= until)")
-        if optimization.water_direction_lr <= 0 or optimization.water_phase_lr <= 0:
-            raise ValueError("optimization.water_direction_lr and water_phase_lr must be positive")
+        if optimization.water_phase_lr <= 0:
+            raise ValueError("optimization.water_phase_lr must be positive")
         if self.model.gaussian_mip_filter < 0:
             raise ValueError("gaussian_mip_filter is a variance in pixels^2 (>= 0)")
         if self.optimization.camera_isp_neighbours < 0:
@@ -970,3 +982,25 @@ class ExperimentConfig:
         Path(path).write_text(
             yaml.safe_dump(self.as_dict(), sort_keys=False)
         )
+
+
+def update_config(obj, changes: dict[str, Any]) -> None:
+    """Strict recursive overrides, with the same field names as the stage YAMLs."""
+    names = {f.name for f in fields(obj)}
+    for key, value in changes.items():
+        if key not in names:
+            raise ValueError(f"Unknown configuration field: {key}")
+        if is_dataclass(getattr(obj, key)):
+            if not isinstance(value, dict):
+                raise ValueError(f"{key} must be a mapping")
+            update_config(getattr(obj, key), value)
+        else:
+            setattr(obj, key, value)
+
+
+def atomic_json(path: str | Path, value: Any) -> None:
+    """Write JSON through a temporary file, so a crash never leaves a half-written file."""
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    os.replace(temporary, path)

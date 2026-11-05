@@ -1,0 +1,32 @@
+# FoamSurf on the foggy Mip-NeRF 360 Garden (WaterSplatting's synthetic fog, /shared/sets/datasets/foamsurf/foggy_garden):
+# configs/seathru.yaml with the differences below, the configuration of our Garden results (sweep 555613).
+# Test, seeds 42 and 43: restoration PSNR (Gaussians alone vs the clear photos, before the camera model)
+# easy 19.89 / hard 16.81 (WaterSplatting 19.69 / 15.46 in our protocol); foggy-image PSNR 34.05 / 38.43.
+#   python train.py --config configs/garden_fog.yaml --scene /path/to/foggy_garden/garden_easy --out outputs/garden_easy
+base_config: seathru.yaml
+overrides:
+  # no OceanSplat losses: its epipolar term has no visibility test and costs ~2 dB on 360-degree scenes
+  - joint.optimization.ocean_tri_weight=0.0
+  - joint.optimization.ocean_epi_weight_start=0.0
+  - joint.optimization.ocean_epi_weight_end=0.0
+  - joint.optimization.ocean_res_weight=0.0
+  - joint.optimization.ocean_alpha_until=0
+  # no water clearing (the fogged background is scene, not open water)
+  - medium_fix.water_clear_weight=0.0
+  # fog attenuation anchored to the fit on the COLMAP tracks
+  - medium_fix.water_anchor_weight=0.03
+  # opacity schedule, coverage prior and colour of the configuration tested on Garden (before the SeaThru additions)
+  - joint.gaussian_adaptation.min_opacity=0.1
+  - joint.gaussian_adaptation.min_opacity_initial=0.005
+  - joint.gaussian_adaptation.min_opacity_late=null
+  - joint.gaussian_adaptation.min_opacity_late_from=6667
+  - joint.gaussian_adaptation.max_opacity_prune_fraction=0.1
+  - joint.gaussian_adaptation.opacity_prune_ramp=2000
+  - joint.gaussian_adaptation.opacity_reset_interval=0
+  - joint.gaussian_adaptation.opacity_reset_value=0.01
+  - joint.disentanglement.opacity_binarization_weight=0.001
+  - medium_fix.surface_coverage_weight=0.003
+  - joint.model.gaussian_rgb_scale=1.0
+  - joint.optimization.water_phase=false
+  - joint.optimization.water_extrapolation=false
+  - joint.renderer.validation_transmittance_threshold=0.01

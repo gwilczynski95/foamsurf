@@ -298,7 +298,6 @@ cd .. && python -m pytest -q renderer/tests
 
 # Synthetic full-call benchmark; resolution means an R x R ray grid.
 python -m foamsurf.benchmark --resolution 800
-# Real-checkpoint equivalence and benchmark: scripts/renderer_check.py (repository root).
 ```
 
 The external-equivalence test may import original implementations as test

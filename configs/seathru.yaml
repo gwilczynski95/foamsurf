@@ -1,0 +1,105 @@
+# FoamSurf on SeaThru-NeRF: configs/base.yaml plus the settings below (the values that run; nothing is rescaled).
+# Test PSNR (seeds 42, 43, 44): IUI3 31.87, Curacao 34.29, Japanese Gardens 24.31, Panama 32.51, mean 30.74;
+# seabed Gaussian alpha 0.875, Gaussians in the open water 0.015 (SAM masks, evaluation only).
+#   python train.py --scene /path/to/SeathruNeRF_dataset/Curasao-Undistorted --out outputs/curacao
+base_config: base.yaml
+output_dir: outputs/seathru/run
+gaussian_rgb_activation: sigmoid     # Gaussian colour = gaussian_rgb_scale x sigmoid(SH)
+medium_color_activation: sigmoid     # medium cell colour = sigmoid(raw)
+wandb_project: foamsurf
+overrides:
+  # --- schedule: 20k iterations ---
+  - joint.optimization.iterations=20000
+  - joint.optimization.gaussian_means_lr_max_steps=23333
+  - joint.optimization.medium_lr_decay_from=10000
+  - joint.optimization.medium_lr_decay_until=20000
+  - joint.background=[0.0, 0.0, 0.0]
+  - warmup.background=[0.0, 0.0, 0.0]
+  - warmup.wandb.mode=disabled       # the medium initialization stage has no steps
+  # --- image loss: L1 and D-SSIM divided by the detached prediction (WaterSplatting / OceanSplat) ---
+  - joint.optimization.reconstruction_loss=reg_l1_reg_dssim
+  # resolution schedule 1/4 -> 1/2 -> full, every 4000 iterations
+  - joint.optimization.training_downscale_levels=2
+  - joint.optimization.training_downscale_interval=4000
+  # --- Gaussians (2D surfels) ---
+  - joint.model.appearance=sh
+  - joint.model.sh_degree=3
+  - joint.optimization.gaussian_sh_degree_interval=667
+  - joint.model.gaussian_rgb_scale=1.5                  # white objects behind water can reach the photo
+  - joint.model.gaussian_mip_filter=0.2                 # Mip-Splatting 3D filter
+  - joint.optimization.gaussian_max_scale_scene_fraction=0.05
+  # densification (gradient threshold, attenuation-compensated), at most 700k Gaussians
+  - joint.gaussian_adaptation.gradient_threshold=0.0002
+  - joint.gaussian_adaptation.gradient_attenuation_compensation=true
+  - joint.gaussian_adaptation.max_points=700000
+  - joint.gaussian_adaptation.densify_from=333
+  - joint.gaussian_adaptation.densify_until=10000
+  - joint.gaussian_adaptation.densification_interval=167
+  - joint.gaussian_adaptation.size_prune_from=2000
+  # opacity: pruned below 0.5 while densifying (0.1 after), reset to 0.5 every 500 iterations (WaterSplatting)
+  - joint.gaussian_adaptation.min_opacity=0.5
+  - joint.gaussian_adaptation.min_opacity_initial=0.5
+  - joint.gaussian_adaptation.min_opacity_late=0.1
+  - joint.gaussian_adaptation.min_opacity_late_from=10000
+  - joint.gaussian_adaptation.max_opacity_prune_fraction=1.0
+  - joint.gaussian_adaptation.opacity_prune_from=667
+  - joint.gaussian_adaptation.opacity_prune_interval=167
+  - joint.gaussian_adaptation.opacity_prune_ramp=0
+  - joint.gaussian_adaptation.opacity_prune_until=20000
+  - joint.gaussian_adaptation.opacity_reset_interval=500
+  - joint.gaussian_adaptation.opacity_reset_value=0.5
+  # opacity binarization: mean opacity x (1 - opacity), weight 0.01
+  - joint.disentanglement.opacity_binarization_weight=0.01
+  - joint.disentanglement.opacity_binarization_start=667
+  - joint.disentanglement.opacity_binarization_ramp=2000
+  # --- water medium (5000 Voronoi cells) ---
+  - joint.model.medium_initial_color_from_data=true      # colour started at the mean photo colour
+  - joint.model.medium_initial_water_fit=coefficients    # attenuation / backscatter fitted on the COLMAP tracks
+  - joint.voronoi_adaptation.densify_from=667
+  - joint.voronoi_adaptation.densify_until=10000
+  - joint.voronoi_adaptation.interval=333
+  # water light: Henyey-Greenstein phase function on the backscatter (training/water_phase.py)
+  - joint.optimization.water_phase=true
+  # evaluation only: water light continued beyond the training directions (training/water_extrapolation.py)
+  - joint.optimization.water_extrapolation=true
+  # --- camera model: PPISP, test views with the exposure and colour of their 4 nearest training photos ---
+  - joint.optimization.camera_isp=true
+  - joint.optimization.camera_isp_neighbours=4
+  # --- OceanSplat: trinocular, epipolar depth, residual and depth-aware opacity, iterations 2667-16000 ---
+  - joint.optimization.ocean_tri_weight=0.1
+  - joint.optimization.ocean_epi_weight_start=0.4
+  - joint.optimization.ocean_epi_weight_end=0.2
+  - joint.optimization.ocean_res_weight=0.01
+  - joint.optimization.ocean_from=2667
+  - joint.optimization.ocean_until=16000
+  - joint.optimization.ocean_every=2                     # on every 2nd step, weight x2
+  - joint.optimization.ocean_alpha_until=8000
+  - joint.optimization.trinocular_from=2667
+  - joint.optimization.trinocular_until=16000
+  # --- priors between the Gaussians and the water (training/losses.py MediumFixConfig) ---
+  - medium_fix.chroma_weight=1.0                         # backscatter in front of the seabed has the water's hue
+  - medium_fix.chroma_alpha_threshold=0.02
+  - medium_fix.chroma_start=667
+  - medium_fix.chroma_ramp=667
+  - medium_fix.surface_coverage_weight=0.03              # rays already > 90% covered pushed to full coverage
+  - medium_fix.surface_coverage_threshold=0.9
+  - medium_fix.surface_coverage_start=667
+  - medium_fix.surface_coverage_ramp=667
+  - medium_fix.water_clear_weight=0.01                   # rays < 30% covered pushed to no Gaussians
+  - medium_fix.water_clear_start=2667
+  - medium_fix.water_clear_ramp=1333
+  - medium_fix.camera_water_weight=0.01                  # water at the cameras pulled to the far free water
+  - medium_fix.camera_water_start=667
+  - medium_fix.camera_water_ramp=667
+  - rgb_surface.start=667                                # medium / surface overlap prior (weight in base.yaml)
+  - rgb_surface.ramp_steps=667
+  # --- evaluation: rays end at the training transmittance threshold ---
+  - joint.renderer.validation_transmittance_threshold=1.0e-4
+  # --- schedule values of mechanisms that are off (weight 0), kept equal to the tested runs ---
+  - capacity_loss.repulsion_start=667
+  - capacity_loss.repulsion_ramp=2000
+  - capacity_loss.direct_start=3333
+  - capacity_loss.direct_ramp=3333
+  - medium_fix.under_surface_start=667
+  - medium_fix.under_surface_ramp=667
+  - rgb_smoothing.ramp_steps=167
