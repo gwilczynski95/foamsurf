@@ -78,7 +78,13 @@ def test_seathru_short_training_runs_every_mechanism_and_renders(tmp_path):
     config_file.write_text(config_file.read_text().replace(str(IUI3), "/nonexistent/IUI3-RedSea-Undistorted"))
     with pytest.raises(FileNotFoundError, match="--scene"):
         render.load_run(run, "last")
-    render.main(["--run", str(run), "--scene", str(IUI3), "--out", str(tmp_path / "moved"), "--modes", "full", "--npy"])
+    render.main(["--run", str(run), "--scene", str(IUI3), "--out", str(tmp_path / "moved"), "--modes", "full", "--npy",
+                 "--metrics"])
+    metrics = json.loads((tmp_path / "moved/metrics.json").read_text())
+    image = torch.from_numpy(np.load(tmp_path / "moved/full" / f"{view.name}.npy"))
+    target = view.ground_truth(tuple(trainer.config.background)).cpu().reshape(image.shape)
+    assert abs(metrics["views"][view.name]["psnr"] - float(-10 * torch.log10(((image - target) ** 2).mean()))) < 1e-4
+    assert metrics["mean"]["psnr"] == pytest.approx(np.mean([v["psnr"] for v in metrics["views"].values()]))
     np.testing.assert_allclose(np.load(tmp_path / "moved" / "full" / f"{view.name}.npy"),
                                np.load(out / "full" / f"{view.name}.npy"), atol=1e-5)
     png = np.asarray(Image.open(out / "gaussians" / f"{view.name}.png"))

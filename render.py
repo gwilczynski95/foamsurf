@@ -5,6 +5,7 @@
     python render.py --run RUN_DIR --poses cameras.json --modes gaussians,voronoi
     python render.py --run RUN_DIR --export-cameras cameras.json      # the dataset cameras as a pose template
     python render.py --run RUN_DIR --scene /data/Curasao-Undistorted  # dataset not at the path it was trained with
+    python render.py --run RUN_DIR --modes full --metrics             # test PSNR / SSIM as in the evaluation
 
 Modes (one PNG per view and mode, in OUT/<mode>/<view>.png; --npy also saves float arrays):
   full         the evaluation image: Gaussians + water medium, water light terms, camera model (PPISP)
@@ -137,6 +138,8 @@ def main(argv=None) -> None:
     parser.add_argument("--modes", default=",".join(MODES), help="comma-separated, from: " + ", ".join(MODES))
     parser.add_argument("--out", type=Path, help="output directory (default RUN/renders)")
     parser.add_argument("--npy", action="store_true", help="also save float32 arrays (.npy)")
+    parser.add_argument("--metrics", action="store_true",
+                        help="dataset views: PSNR / SSIM of the full image against the photos, in OUT/metrics.json")
     parser.add_argument("--export-cameras", type=Path, metavar="JSON", help="write the dataset cameras and stop")
     args = parser.parse_args(argv)
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
@@ -157,15 +160,27 @@ def main(argv=None) -> None:
     else:
         cameras = {"test": dataset.test, "train": dataset.train, "all": dataset.train + dataset.test}[args.views]
     out = (args.out or args.run / "renders").resolve()
+    if args.metrics and (args.poses or "full" not in modes):
+        parser.error("--metrics needs dataset views (no --poses) and the full mode")
+    scores = {}
     for camera in cameras:
         images = render_view(trainer, camera, modes)
+        if args.metrics:
+            from evaluation.metrics import psnr, ssim
+            target = camera.ground_truth(tuple(trainer.config.background)).reshape(camera.height, camera.width, 3)
+            scores[camera.name] = {"psnr": float(psnr(images["full"], target)), "ssim": float(ssim(images["full"], target))}
         for name, image in images.items():
             folder = out / name
             folder.mkdir(parents=True, exist_ok=True)
             Image.fromarray(to_png(name, image)).save(folder / f"{camera.name}.png")
             if args.npy:
                 np.save(folder / f"{camera.name}.npy", image.float().cpu().numpy())
-        print(camera.name, ", ".join(images), flush=True)
+        print(camera.name, ", ".join(images), *(f"{k} {v:.3f}" for k, v in scores.get(camera.name, {}).items()), flush=True)
+    if args.metrics:
+        mean = {k: float(np.mean([v[k] for v in scores.values()])) for k in ("psnr", "ssim")}
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "metrics.json").write_text(json.dumps({"mean": mean, "views": scores}, indent=1))
+        print(f"mean PSNR {mean['psnr']:.3f}  SSIM {mean['ssim']:.4f}")
     print(f"renders in {out}")
 
 
