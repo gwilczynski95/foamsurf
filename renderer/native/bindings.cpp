@@ -404,6 +404,41 @@ py::tuple rgb_forward(TensorList values,
     return py::make_tuple(direct, backscatter, transmission, intersections);
 }
 
+// Forward only, for visualization: rgb_forward with a per-ray far plane
+// ray_far [R] (clamped to far_plane).
+py::tuple rgb_forward_limited(TensorList values,
+                              torch::Tensor ray_far,
+                              float near_plane,
+                              float far_plane,
+                              float threshold,
+                              uint32_t max_intersections) {
+    validate_rgb_inputs(values);
+    require_float_cuda(ray_far, "ray_far");
+    ray_far = ray_far.contiguous();
+    TORCH_CHECK(ray_far.numel() == values[6].size(0), "ray_far needs one value per ray");
+    auto settings = settings_for(values[0], values[10], values[6], values[8],
+                                 near_plane, far_plane, threshold,
+                                 max_intersections);
+    auto ray_count = values[6].size(0);
+    auto direct = torch::empty({ray_count, 3}, values[6].options());
+    auto backscatter = torch::empty({ray_count, 3}, values[6].options());
+    auto transmission = torch::empty({ray_count, 3}, values[6].options());
+    auto intersections = torch::empty(
+        {ray_count, 1}, values[6].options().dtype(torch::kUInt32));
+    auto scene = rgb_scene(values);
+    scene.ray_far = ray_far.data_ptr<float>();
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    foamsurf::rgb_forward_cuda(settings,
+                               scene,
+                               values[16].data_ptr<float>(),
+                               direct.data_ptr<float>(),
+                               backscatter.data_ptr<float>(),
+                               transmission.data_ptr<float>(),
+                               intersections.data_ptr<uint32_t>(),
+                               &stream);
+    return py::make_tuple(direct, backscatter, transmission, intersections);
+}
+
 py::tuple rgb_backward(TensorList values,
                        TensorList outputs,
                        TensorList output_grads,
@@ -517,6 +552,14 @@ void init_hybrid_bindings(py::module &module) {
     module.def("rgb_forward",
                rgb_forward,
                py::arg("tensors"),
+               py::arg("near_plane"),
+               py::arg("far_plane"),
+               py::arg("threshold") = 0.001f,
+               py::arg("max_intersections") = 1024);
+    module.def("rgb_forward_limited",
+               rgb_forward_limited,
+               py::arg("tensors"),
+               py::arg("ray_far"),
                py::arg("near_plane"),
                py::arg("far_plane"),
                py::arg("threshold") = 0.001f,
