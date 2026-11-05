@@ -1,4 +1,9 @@
-# Current SeaThru default (2026-10-30): OceanSplat + PPISP + homogeneous water at the cameras + Mip filter +
+# Current SeaThru default (2026-11-05): test PSNR (seeds 42 and 43, sweep 561669) IUI3 31.85, Curacao 34.32,
+# JG 24.31, Panama 32.55, mean 30.76 (WaterSplatting + PPISP 30.71, OceanSplat paper 30.71). It is the
+# 2026-10-30 default below plus, at the end of the list: opacity cull/reset as WaterSplatting (_cull05r),
+# opacity binarisation (_bin01), the water phase function (_wphase), Gaussian colour 1.5 x sigmoid (_rgbs15)
+# and, at evaluation, the water light continued beyond the training directions (_wext).
+# The 2026-10-30 default: OceanSplat + PPISP + homogeneous water at the cameras + Mip filter +
 # water attenuation fitted on the COLMAP tracks, 20k iterations = configs/iui3_default.yaml plus:
 # - Gaussian scale at most 5% of the scene (_clamp05);
 # - medium colour initialised from the training photos (_minit);
@@ -12,8 +17,8 @@
 # - Mip-Splatting 3D filter (_mip);
 # - medium attenuation and backscatter of every cell started from the fit on the COLMAP point tracks (_wfit);
 # - 20k iterations with every schedule scaled by 2/3 (_it20k; schedule.iterations, training/schedule.py).
-# Test PSNR (mean of seeds 42 and 43, neighbour exposure; run _wfit of sweep 553596): IUI3 31.47, Curacao
-# 33.82, JG 24.23, Panama 31.94, mean 30.36 (WaterSplatting 29.63, WaterSplatting + PPISP 30.71, our runs).
+# Test PSNR of that 2026-10-30 default (mean of seeds 42 and 43, neighbour exposure; run _wfit of sweep 553596,
+# evaluated at 1e-2): IUI3 31.47, Curacao 33.82, JG 24.23, Panama 31.94, mean 30.36 (30.42 with _vt).
 # Earlier defaults: without _wfit 30.22 (552797); without _camw, _oe2, _mip, _it20k 29.95 dB in 53 min
 # (551590). configs/iui3_default.yaml stays the base of the older sweep suffixes; tests/test_camera_isp.py
 # checks that this file equals it plus the suffixes above.
@@ -69,3 +74,21 @@ overrides:
   # _vt (2026-11-01): evaluation rays end at the training transmittance threshold 1e-4 instead of 1e-2
   # (+0.07 dB on 553596 seed 42 without retraining: the model is fitted with the longer rays)
   - joint.renderer.validation_transmittance_threshold=1.0e-4
+  # _cull05r (2026-11-02): opacity prune at 0.5 while densifying, reset to 0.5 every 750 (30k terms), as
+  # WaterSplatting (+0.08 dB)
+  - joint.gaussian_adaptation.min_opacity=0.5
+  - joint.gaussian_adaptation.min_opacity_initial=0.5
+  - joint.gaussian_adaptation.opacity_prune_ramp=0
+  - joint.gaussian_adaptation.min_opacity_late=0.1
+  - joint.gaussian_adaptation.min_opacity_late_from=15000
+  - joint.gaussian_adaptation.max_opacity_prune_fraction=1.0
+  - joint.gaussian_adaptation.opacity_reset_interval=750
+  - joint.gaussian_adaptation.opacity_reset_value=0.5
+  # _bin01: opacity binarisation x10 (+0.08 dB)
+  - joint.disentanglement.opacity_binarization_weight=0.01
+  # _wphase: Henyey-Greenstein phase function on the backscatter (training/water_phase.py; +0.04 dB)
+  - joint.optimization.water_phase=true
+  # _rgbs15 (2026-11-05): Gaussian colour = 1.5 x sigmoid, white objects behind water reach the photo
+  - joint.model.gaussian_rgb_scale=1.5
+  # _wext: evaluation only, water light continued beyond the training directions (training/water_extrapolation.py)
+  - joint.optimization.water_extrapolation=true
