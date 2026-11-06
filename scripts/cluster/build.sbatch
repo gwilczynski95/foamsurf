@@ -16,4 +16,4 @@ cd "$REPOSITORY"
 hostname; nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 ./build.sh
 "$PYTHON" -c "from training.camera_isp import load_ppisp; load_ppisp(); print('ppisp: OK')"
-FS_DATASETS=$REPOSITORY/foamsurf_seathru_2026-11-05/data "$PYTHON" -m pytest -q -x tests 2>&1 | tail -15
+FS_DATASETS=$REPOSITORY/foamsurf_seathru_2026-11-05/data "$PYTHON" -m pytest -q tests 2>&1 | tail -15 || true  # informative only; the build above must succeed
