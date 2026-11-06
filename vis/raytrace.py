@@ -648,22 +648,29 @@ def lift_clear(tracer, center: torch.Tensor, radius: float, margin: float = 0.03
 
 @torch.no_grad()
 def place_on_seabed(tracer, camera, u: float, v: float, radius_fraction: float, lift: float = 1.0,
-                    height: float = 0.0, depth_fraction: float | None = None, clear: bool = True):
+                    height: float = 0.0, depth_fraction: float | None = None, clear: bool = True,
+                    distance: float | None = None):
     """Sphere at image fraction (u, v) of the camera; radius = radius_fraction of the distance to the surface seen
     there. Default: resting on that surface (centre lift radii above it; lift < 1 sinks it), plus height radii
     (floating). depth_fraction: centre on the pixel's ray at that fraction of the surface distance (in the water,
-    closer to the camera). clear: lifted out of any surface it would cut (see lift_clear)."""
+    closer to the camera). distance: centre on the pixel's ray at this distance from the camera (in the open water
+    too; radius = radius_fraction x distance). clear: lifted out of any surface it would cut (see lift_clear)."""
     from evaluation.evaluator import _rays
     rays = _rays(camera)
     y, x = int(v * camera.height), int(u * camera.width)
     ray = rays[y, x][None].contiguous()
     only = tracer.renderer.render_gaussians(ray, tracer.gaussians, background=(0.0, 0.0, 0.0))
     depth = float(only.surface_depth.reshape(-1)[0])
-    radius = radius_fraction * depth
     up = tracer.up.to(ray)
-    if depth_fraction is not None:
+    if distance is not None:
+        depth = distance
+        radius = radius_fraction * depth
+        center = ray[0, :3] + distance * ray[0, 3:] + up * radius * height
+    elif depth_fraction is not None:
+        radius = radius_fraction * depth
         center = ray[0, :3] + depth_fraction * depth * ray[0, 3:] + up * radius * height
     else:
+        radius = radius_fraction * depth
         center = ray[0, :3] + depth * ray[0, 3:] + up * radius * (lift + height)
     moved = 0.0
     if clear:

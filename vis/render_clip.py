@@ -6,7 +6,8 @@ Shot file (JSON):
   {"anchor_view": "MTN_1296",                 # test view used to place the objects
    "objects": [{"u": 0.40, "v": 0.72, "radius_fraction": 0.07, "material": "mirror", "tint": [...],
                 "height": 0.0,                # radii above the surface (floating); or "depth_fraction": 0.5 puts
-                                              # the centre on the pixel's ray, at half the surface distance
+                                              # the centre on the pixel's ray, at half the surface distance;
+                                              # "distance": 30 at 30 world units (also in the open water)
                 "clear": true},               # lifted out of the reef if it would cut into it
                {"type": "mesh", "manifest": "$FALCON/source/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
                 "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "materials": {"caroseria": {"mode": ...}}},
@@ -134,7 +135,8 @@ def build_objects(tracer, anchor, specs):
         else:
             center, radius, _, moved = place_on_seabed(
                 tracer, anchor, spec["u"], spec["v"], spec["radius_fraction"], spec.get("lift", 1.0),
-                spec.get("height", 0.0), spec.get("depth_fraction"), spec.get("clear", True))
+                spec.get("height", 0.0), spec.get("depth_fraction"), spec.get("clear", True),
+                spec.get("distance"))
             if moved:
                 print(f"{spec.get('material', 'sphere')} sphere lifted {moved:.1f} radii out of the surface")
         sphere = Sphere(center, radius, spec.get("material", "mirror"), tuple(spec.get("tint", (1, 1, 1))),
