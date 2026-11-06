@@ -98,6 +98,32 @@ def corner_normals(vertices: torch.Tensor, faces: torch.Tensor, crease_deg: floa
     return torch.where(keep, smooth, unit)
 
 
+def mirror_panel(aspect: float = 0.6, border: float = 0.06, thickness: float = 0.04, lean_deg: float = 15.0,
+                 mirror: dict | None = None, frame_material: dict | None = None):
+    """A standing framed mirror, as FALCON's procedural mirror quads: a box frame (width = aspect x height) with the
+    mirror pane on its +z face (+z faces the anchor camera after place_mesh_on_seabed), the top leaned towards +z by
+    lean_deg (the pane then reflects the seabed in front of it rather than the water behind the camera).
+    Same normalization as load_manifest; returns vertices, faces, per-face part, materials, part ids."""
+    w, h, t = aspect, 1.0, thickness
+    box = np.array([[x, y, z] for x in (-w / 2, w / 2) for y in (0.0, h) for z in (-t / 2, t / 2)], dtype=np.float32)
+    quads = [(0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3)]
+    pane = np.array([[-w / 2 + border, border, t / 2 + 1e-3], [w / 2 - border, border, t / 2 + 1e-3],
+                     [w / 2 - border, h - border, t / 2 + 1e-3], [-w / 2 + border, h - border, t / 2 + 1e-3]],
+                    dtype=np.float32)
+    vertices = np.concatenate((box, pane))
+    faces = [f for a, b, c, d in quads for f in ((a, b, c), (a, c, d))] + [(8, 9, 10), (8, 10, 11)]
+    part = np.array([1] * 12 + [0] * 2)
+    a = math.radians(lean_deg)  # rotate about x: the top moves towards +z
+    y, z = vertices[:, 1].copy(), vertices[:, 2].copy()
+    vertices[:, 1], vertices[:, 2] = y * math.cos(a) - z * math.sin(a), y * math.sin(a) + z * math.cos(a)
+    vertices[:, 1] -= vertices[:, 1].min()
+    vertices /= float((vertices.max(0) - vertices.min(0)).max())
+    materials = [Material.from_falcon(dict({"mode": "mirror", "rgb": [0.92, 0.92, 0.97]}, **(mirror or {}))),
+                 Material.from_falcon(dict({"mode": "ceramic", "rgb": [0.96, 0.96, 0.98], "kd": 0.9, "eta": 1.025},
+                                           **(frame_material or {})))]
+    return vertices, np.array(faces, dtype=np.int64), part, materials, ["mirror", "frame"]
+
+
 class Mesh:
     """A triangle mesh in world coordinates with per-face materials and a Warp BVH."""
 

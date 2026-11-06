@@ -10,6 +10,8 @@ Shot file (JSON):
                 "clear": true},               # lifted out of the reef if it would cut into it
                {"type": "mesh", "manifest": "$FALCON/source/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
                 "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "materials": {"caroseria": {"mode": ...}}},
+               {"type": "mirror_panel", "u": .., "v": .., "span_fraction": 0.2, "yaw_deg": 0, "lean_deg": 15,
+                "aspect": 0.6},              # standing framed mirror (FALCON's), pane facing the anchor camera
                ...],                         # resting on the surface seen at image fraction (u, v) of the anchor view
    "frames": 120, "fps": 30,                  # the camera model's exposure is that of the anchor view
    "path": {"look_at_objects": 0.7,          # 0: the photos' own viewing direction, 1: aim at the objects
@@ -41,7 +43,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import render  # noqa: E402
-from vis.mesh import Mesh, load_manifest, place_mesh_on_seabed  # noqa: E402
+from vis.mesh import Mesh, load_manifest, mirror_panel, place_mesh_on_seabed  # noqa: E402
 from vis.raytrace import SceneTracer, Sphere, TraceSettings, TraceStats, place_on_seabed, render_camera  # noqa: E402
 
 
@@ -112,8 +114,14 @@ def build_objects(tracer, anchor, specs):
     """Objects of a shot and their resolved form (world placement) for shot_resolved.json."""
     objects, resolved = [], []
     for spec in specs:
-        if spec.get("type", "sphere") == "mesh":
-            vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
+        kind = spec.get("type", "sphere")
+        if kind in ("mesh", "mirror_panel"):
+            if kind == "mesh":
+                vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
+            else:
+                vertices, faces, part, materials, ids = mirror_panel(
+                    spec.get("aspect", 0.6), spec.get("border", 0.06), spec.get("thickness", 0.04),
+                    spec.get("lean_deg", 15.0), spec.get("mirror"), spec.get("frame"))
             world, info = place_mesh_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["span_fraction"], vertices,
                                                spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
             device = tracer.trainer.device
