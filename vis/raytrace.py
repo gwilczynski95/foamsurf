@@ -69,9 +69,12 @@ class TraceSettings:
     epsilon: float = 1e-4  # secondary ray offset, in units of the object's radius
     ambient: tuple[float, float, float] = (0.0, 0.0, 0.0)  # extra constant light on matte surfaces (raw space)
     # The trained water light extrapolation (HG phase, g up to ~0.93) explodes for rays looking up, which the
-    # photos never saw but mirrors do (Curacao: x4500 straight up). Directions are tilted down to this cosine
-    # with the cameras' "up" before the water light is evaluated; None keeps the trained behaviour.
+    # photos never saw but mirrors do (Curacao: x4500 straight up). Above this cosine with the cameras' "up" the
+    # water light is the one at that elevation (same azimuth; near the zenith, where the azimuth is undefined, its
+    # mean over azimuths) times the trained growth towards the zenith, softly limited per channel to
+    # water_light_max_gain: the water stays brighter towards the surface without the blow-up. None: trained.
     water_light_max_up: float | None = 0.6
+    water_light_max_gain: float = 2.0
     # Shadows of the objects on the scene's surfaces (only the direct light D of a segment is darkened, at the
     # first Gaussian surface the ray meets; the water's backscatter stays). Underwater light comes from above
     # through the surface and is soft: a cone of half-angle shadow_cone_deg around the cameras' "up", plus the
@@ -96,6 +99,11 @@ class TraceSettings:
     # None: environment only.
     seabed_albedo: float | None = 0.7
     sky_exponent: float = 2.0
+    # Pixels next to an object's outline (different object, or object / scene, in a 4-neighbour; dilated by one
+    # pixel) and pixels of mirror, metal and glass spheres are averaged with antialias extra rays spread over the
+    # pixel: no stair-stepped outlines, and the reef a sphere squeezes into a thin band along its horizon becomes a
+    # texture instead of single-pixel speckles. 0: off.
+    antialias: int = 4
 
 
 @dataclass
@@ -255,6 +263,7 @@ class SceneTracer:
         self.gaussians = None
         self._environment = {}
         self.image_shape = None  # (h, w) while render_camera traces a camera's rays
+        self.shadow_map = None  # [H*W] the blurred shadow factor of the last camera (render_camera)
         if color_origin is not None:
             self.set_color_origin(color_origin)
 
@@ -301,19 +310,38 @@ class SceneTracer:
         return direct, scattered, transmission
 
     @torch.no_grad()
-    def water_light(self, direct, scattered, rays, max_up: float | None = None):
+    def water_light(self, direct, scattered, rays, max_up: float | None = None, max_gain: float = 2.0):
         light = self.trainer.evaluator.water_light
         if light is None:
             return direct + scattered
-        if max_up is not None:
-            d = rays[:, 3:]
-            up = self.up.to(d)
-            cos = (d * up).sum(-1, keepdim=True)
-            horizontal = F.normalize(d - cos * up + 1e-8 * self.side.to(d), dim=-1)
-            tilted = horizontal * (1 - max_up ** 2) ** 0.5 + up * max_up
-            rays = torch.cat((rays[:, :3], torch.where(cos > max_up, tilted, d)), -1)
-        return light(direct + scattered, scattered, rays)
-
+        out = light(direct + scattered, scattered, rays)
+        if max_up is None:
+            return out
+        d = rays[:, 3:]
+        up = self.up.to(d)
+        cos = (d * up).sum(-1)
+        high = cos > max_up
+        if not high.any():
+            return out
+        d, cos = d[high], cos[high, None]
+        image, back, origins = (direct + scattered)[high], scattered[high], rays[high, :3]
+        at = lambda directions: light(image, back, torch.cat((origins, directions), -1))
+        ring = lambda horizontal: horizontal * (1 - max_up ** 2) ** 0.5 + up * max_up
+        side = self.side.to(d)
+        other = torch.linalg.cross(up, side)
+        mean = sum(at(ring((math.cos(a) * side + math.sin(a) * other).expand_as(d)))
+                   for a in torch.linspace(0, 2 * math.pi, 9)[:-1].tolist()) / 8
+        horizontal = d - cos * up
+        length = horizontal.norm(dim=-1, keepdim=True)
+        same_azimuth = at(ring(horizontal / length.clamp_min(1e-6)))
+        w = ((length - 0.05) / 0.25).clamp(0, 1)  # 0 within ~3 deg of the zenith, 1 beyond ~17 deg
+        w = w * w * (3 - 2 * w)
+        reference = (w * same_azimuth + (1 - w) * mean).clamp_min(1e-6)
+        ratio = out[high] / reference
+        span = max_gain - 1
+        limited = torch.where(ratio > 1, 1 + span * torch.tanh((ratio - 1) / span), ratio)
+        out[high] = reference * limited
+        return out
     @property
     def up(self) -> torch.Tensor:
         up = -torch.stack([c.down for c in self.trainer.dataset.train]).mean(0)
@@ -327,7 +355,8 @@ class SceneTracer:
     @torch.no_grad()
     def environment(self, center: torch.Tensor, samples: int, settings: TraceSettings):
         """Directions [K,3] and the scene's radiance [K,3] arriving at a point (objects not included); cached."""
-        key = (tuple(round(float(x), 5) for x in center), samples, settings.water_light_max_up)
+        key = (tuple(round(float(x), 5) for x in center), samples, settings.water_light_max_up,
+               settings.water_light_max_gain)
         if key not in self._environment:
             directions = sphere_directions(samples, center.device)
             rays = torch.cat((center.expand_as(directions), directions), -1).contiguous()
@@ -378,8 +407,10 @@ class SceneTracer:
     # --- recursive tracing ------------------------------------------------------------------------
     @torch.no_grad()
     def trace(self, rays: torch.Tensor, objects: list, settings: TraceSettings = TraceSettings(),
-              depth: int = 0, weight: torch.Tensor | None = None, start_points=None, stats: TraceStats | None = None):
-        """Raw radiance [R,3] (water light applied, before the camera model)."""
+              depth: int = 0, weight: torch.Tensor | None = None, start_points=None, stats: TraceStats | None = None,
+              shadow: torch.Tensor | None = None):
+        """Raw radiance [R,3] (water light applied, before the camera model). shadow: [R] factor of the direct light
+        to use instead of computing it."""
         count = rays.shape[0]
         if stats is not None:
             while len(stats.rays_per_depth) <= depth:
@@ -391,15 +422,17 @@ class SceneTracer:
             weight = torch.ones(count, 3, device=rays.device)
         if not objects:
             direct, scattered, _ = self.segment(rays, torch.full((count,), INF, device=rays.device), start_points)
-            return self.water_light(direct, scattered, rays, settings.water_light_max_up)
+            return self.water_light(direct, scattered, rays, settings.water_light_max_up, settings.water_light_max_gain)
         hits = intersect(rays, objects)
         direct, scattered, transmission = self.segment(rays, hits.t, start_points)
-        if settings.shadows:
+        if settings.shadows and shadow is not None:
+            direct = direct * shadow[:, None]
+        elif settings.shadows:
             factor = self.shadow_factor(rays, hits.t, objects, settings)
             if depth == 0 and self.image_shape is not None and settings.shadow_blur_px > 0:
                 factor = self._blur_shadow(factor, rays, hits.t, settings.shadow_blur_px)
             direct = direct * factor[:, None]
-        out = self.water_light(direct, scattered, rays, settings.water_light_max_up)
+        out = self.water_light(direct, scattered, rays, settings.water_light_max_up, settings.water_light_max_gain)
         if not bool((hits.obj >= 0).any()) or depth >= settings.max_depth:  # past the last bounce: black
             return out
         # Light leaving the objects towards the ray origin, attenuated by the water in front of them.
@@ -467,7 +500,9 @@ class SceneTracer:
             image = F.conv2d(F.pad(image, (radius, radius, 0, 0), mode="replicate"), kernel.view(1, 1, 1, -1))
             image = F.conv2d(F.pad(image, (0, 0, radius, radius), mode="replicate"), kernel.view(1, 1, -1, 1))
             return image.reshape(-1)
-        smooth = blur(factor * valid) / blur(valid).clamp_min(1e-6)
+        weight = blur(valid)
+        smooth = blur(factor * valid) / weight.clamp_min(1e-6)
+        self.shadow_map = torch.where(weight > 1e-3, smooth, factor)  # also behind objects, for the antialias rays
         return torch.where(valid > 0, smooth, factor)
 
     def _mesh_shadow(self, mesh, p, n, up, cone: float, settings) -> torch.Tensor:
@@ -588,19 +623,52 @@ class SceneTracer:
 
 
 @torch.no_grad()
-def place_on_seabed(tracer, camera, u: float, v: float, radius_fraction: float, lift: float = 1.0):
-    """Sphere resting on the surface seen at image fraction (u, v): radius = fraction of the hit distance."""
+def surface_distance(tracer, center: torch.Tensor, samples: int = 1024) -> torch.Tensor:
+    """[K] distance from a point to the first Gaussian surface along K directions (inf: none)."""
+    directions = sphere_directions(samples, center.device)
+    rays = torch.cat((center.expand_as(directions), directions), -1).contiguous()
+    depth = tracer.renderer.render_gaussians(rays, tracer.gaussians, background=(0.0, 0.0, 0.0)).surface_depth
+    depth = depth.reshape(-1)
+    return torch.where(depth > 0, depth, torch.full_like(depth, INF))
+
+
+@torch.no_grad()
+def lift_clear(tracer, center: torch.Tensor, radius: float, margin: float = 0.03, steps: int = 40):
+    """Move a sphere up (cameras' "up") until no surface lies within (1 + margin) radius of its centre: a sphere
+    cutting into the reef shows the inside of the reconstruction (no surfaces there, only water)."""
+    up = tracer.up.to(center)
+    moved = 0.0
+    for _ in range(steps):
+        if float(surface_distance(tracer, center).min()) >= (1 + margin) * radius:
+            break
+        center = center + up * (0.1 * radius)
+        moved += 0.1
+    return center, moved
+
+
+@torch.no_grad()
+def place_on_seabed(tracer, camera, u: float, v: float, radius_fraction: float, lift: float = 1.0,
+                    height: float = 0.0, depth_fraction: float | None = None, clear: bool = True):
+    """Sphere at image fraction (u, v) of the camera; radius = radius_fraction of the distance to the surface seen
+    there. Default: resting on that surface (centre lift radii above it; lift < 1 sinks it), plus height radii
+    (floating). depth_fraction: centre on the pixel's ray at that fraction of the surface distance (in the water,
+    closer to the camera). clear: lifted out of any surface it would cut (see lift_clear)."""
     from evaluation.evaluator import _rays
     rays = _rays(camera)
     y, x = int(v * camera.height), int(u * camera.width)
     ray = rays[y, x][None].contiguous()
     only = tracer.renderer.render_gaussians(ray, tracer.gaussians, background=(0.0, 0.0, 0.0))
     depth = float(only.surface_depth.reshape(-1)[0])
-    point = ray[0, :3] + depth * ray[0, 3:]
-    up = tracer.up.to(point)
     radius = radius_fraction * depth
-    center = point + up * radius * lift  # lift < 1 sinks the sphere into the surface
-    return center.tolist(), radius, depth
+    up = tracer.up.to(ray)
+    if depth_fraction is not None:
+        center = ray[0, :3] + depth_fraction * depth * ray[0, 3:] + up * radius * height
+    else:
+        center = ray[0, :3] + depth * ray[0, 3:] + up * radius * (lift + height)
+    moved = 0.0
+    if clear:
+        center, moved = lift_clear(tracer, center, radius)
+    return center.tolist(), radius, depth, moved
 
 
 @torch.no_grad()
@@ -612,14 +680,56 @@ def render_camera(tracer: SceneTracer, camera, objects: list, settings: TraceSet
     from evaluation.evaluator import _rays
     from training.camera_isp import pixel_grid
     tracer.set_color_origin(camera.origin)
-    rays = _rays(camera).reshape(-1, 6).contiguous()
-    tracer.image_shape = (camera.height, camera.width)
+    grid = _rays(camera)
+    rays = grid.reshape(-1, 6).contiguous()
+    h, w = camera.height, camera.width
+    tracer.image_shape = (h, w)
+    tracer.shadow_map = None
     try:
         raw = tracer.trace(rays, objects, settings, stats=stats)
     finally:
         tracer.image_shape = None
+    if objects and settings.antialias > 0:
+        raw = _antialias(tracer, grid, raw, objects, settings, stats)
     isp = tracer.trainer.camera_isp
-    h, w = camera.height, camera.width
     full = raw if isp is None else isp.apply(raw, pixel_grid(h, w, raw.device).reshape(-1, 2), (h, w), None,
                                              camera.origin if isp_origin is None else isp_origin)
     return raw.reshape(h, w, 3), full.clamp(0, 1).reshape(h, w, 3)
+
+
+@torch.no_grad()
+def _antialias(tracer, grid: torch.Tensor, raw: torch.Tensor, objects, settings, stats):
+    h, w = grid.shape[:2]
+    hits = intersect(grid.reshape(-1, 6).contiguous(), objects)
+    obj = hits.obj.reshape(h, w)
+    table, _ = material_table(objects)
+    shiny = [i for i, (o, m) in enumerate(table) if m.kind in ("mirror", "metal", "glass") and not is_mesh(objects[o])]
+    shiny = torch.isin(hits.material, torch.tensor(shiny, device=raw.device, dtype=hits.material.dtype))
+    padded = F.pad(obj[None, None].float(), (1, 1, 1, 1), mode="replicate")[0, 0]
+    edge = torch.zeros(h, w, dtype=torch.bool, device=raw.device)
+    for dy, dx in ((0, 1), (2, 1), (1, 0), (1, 2)):
+        edge |= padded[dy:dy + h, dx:dx + w] != obj
+    edge = (F.max_pool2d(edge[None, None].float(), 3, 1, 1)[0, 0] > 0) | shiny.reshape(h, w)
+    ys, xs = edge.nonzero(as_tuple=True)
+    if ys.numel() == 0:
+        return raw
+    d = grid[..., 3:]
+    ddx = (d[:, torch.clamp(torch.arange(w, device=d.device) + 1, max=w - 1)]
+           - d[:, torch.clamp(torch.arange(w, device=d.device) - 1, min=0)]) / 2
+    ddy = (d[torch.clamp(torch.arange(h, device=d.device) + 1, max=h - 1)]
+           - d[torch.clamp(torch.arange(h, device=d.device) - 1, min=0)]) / 2
+    if settings.antialias <= 4:
+        offsets = [(-0.375, -0.125), (0.125, -0.375), (0.375, 0.125), (-0.125, 0.375)][:settings.antialias]
+    else:  # Fibonacci lattice over the pixel
+        n = settings.antialias
+        offsets = [(((i * 0.618034) % 1) - 0.5, ((i + 0.5) / n) - 0.5) for i in range(n)]
+    index = ys * w + xs
+    shadow = None if tracer.shadow_map is None else tracer.shadow_map[index]
+    total = raw[index].clone()
+    for ox, oy in offsets:
+        directions = F.normalize(d[ys, xs] + ox * ddx[ys, xs] + oy * ddy[ys, xs], dim=-1)
+        sub = torch.cat((grid[ys, xs, :3], directions), -1).contiguous()
+        total += tracer.trace(sub, objects, settings, stats=stats, shadow=shadow)
+    raw = raw.clone()
+    raw[index] = total / (len(offsets) + 1)
+    return raw

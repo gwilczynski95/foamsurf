@@ -45,11 +45,11 @@ def main():
           f"max |full - render.py full| = {(full - reference['full']).abs().max():.3e}")
 
     behind = Sphere(center=(camera.origin + 1e4 * camera.forward).tolist(), radius=1.0)
-    raw_far, _ = render_camera(tracer, camera, [behind])
+    raw_far, _ = render_camera(tracer, camera, [behind], TraceSettings(antialias=0))
     print(f"sphere behind everything: max |raw - raw| = {(raw_far - reference['raw']).abs().max():.3e}")
 
-    mirror_c, mirror_r, d1 = place_on_seabed(tracer, camera, 0.40, 0.72, 0.07)
-    glass_c, glass_r, d2 = place_on_seabed(tracer, camera, 0.64, 0.68, 0.07)
+    mirror_c, mirror_r, d1, _ = place_on_seabed(tracer, camera, 0.40, 0.72, 0.07)
+    glass_c, glass_r, d2, _ = place_on_seabed(tracer, camera, 0.64, 0.68, 0.07)
     print(f"mirror at depth {d1:.3f} r {mirror_r:.3f}; glass at depth {d2:.3f} r {glass_r:.3f}")
     objects = [Sphere(mirror_c, mirror_r, "mirror", (0.95, 0.95, 0.95)),
                Sphere(glass_c, glass_r, "glass", (0.98, 0.99, 1.0), ior=1.5 / 1.33)]

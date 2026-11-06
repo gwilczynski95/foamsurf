@@ -4,7 +4,10 @@
 
 Shot file (JSON):
   {"anchor_view": "MTN_1296",                 # test view used to place the objects
-   "objects": [{"u": 0.40, "v": 0.72, "radius_fraction": 0.07, "lift": 1.0, "material": "mirror", "tint": [...]},
+   "objects": [{"u": 0.40, "v": 0.72, "radius_fraction": 0.07, "material": "mirror", "tint": [...],
+                "height": 0.0,                # radii above the surface (floating); or "depth_fraction": 0.5 puts
+                                              # the centre on the pixel's ray, at half the surface distance
+                "clear": true},               # lifted out of the reef if it would cut into it
                {"type": "mesh", "manifest": "$FALCON/source/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
                 "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "materials": {"caroseria": {"mode": ...}}},
                ...],                         # resting on the surface seen at image fraction (u, v) of the anchor view
@@ -12,7 +15,9 @@ Shot file (JSON):
    "path": {"look_at_objects": 0.7,          # 0: the photos' own viewing direction, 1: aim at the objects
             "views": null,                   # views to pass through (default: all training views, along their main axis)
             "nearest": null,                 # or the N training views nearest the anchor, along their main axis
-            "scale": 1.0},                   # image size factor
+            "scale": 1.0,                    # image size factor
+            "trim": [0.0, 1.0],              # part of the spline used (fractions), e.g. to skip a poorly covered end
+            "zoom": 1.0},                    # focal length factor (> 1 crops the frame edges the photos missed)
    "trace": {...}}                           # TraceSettings overrides
 The camera follows a Catmull-Rom spline through the chosen training camera positions (novel views stay close to
 the photos), rolled level with the cameras' mean "up". Frames go to OUT/frames, the video to OUT.mp4, the resolved
@@ -60,8 +65,11 @@ def smooth(values: torch.Tensor, passes: int = 3) -> torch.Tensor:
     return values
 
 
-def camera_path(trainer, template, target: torch.Tensor, frames: int, look_at: float, views=None, scale=1.0,
-                nearest=None):
+def camera_path(trainer, template, target: torch.Tensor, frames: int, path: dict):
+    """Cameras of a shot's path (see the module doc for the keys of `path`)."""
+    look_at, views, nearest = path.get("look_at_objects", 0.7), path.get("views"), path.get("nearest")
+    scale, zoom = path.get("scale", 1.0), path.get("zoom", 1.0)
+    trim = path.get("trim", (0.0, 1.0))
     train = list(trainer.dataset.train)
     if views:
         by_name = {c.name: c for c in train + list(trainer.dataset.test)}
@@ -73,8 +81,14 @@ def camera_path(trainer, template, target: torch.Tensor, frames: int, look_at: f
         origins = torch.stack([c.origin for c in train])
         axis = torch.linalg.svd(origins - origins.mean(0)).Vh[0]
         train = [train[i] for i in ((origins - origins.mean(0)) @ axis).argsort().tolist()]
-    origins = smooth(catmull_rom(torch.stack([c.origin for c in train]), frames), passes=frames // 10)
-    own = catmull_rom(torch.stack([c.forward for c in train]), frames)
+    # The spline is sampled densely and the part trim = (start, end) (fractions of it) is resampled to the frames.
+    dense = max(frames, int(round(frames / max(trim[1] - trim[0], 1e-3))))
+    keep = slice(int(round(trim[0] * (dense - 1))), int(round(trim[1] * (dense - 1))) + 1)
+    origins = catmull_rom(torch.stack([c.origin for c in train]), dense)[keep]
+    own = catmull_rom(torch.stack([c.forward for c in train]), dense)[keep]
+    resample = lambda x: F.interpolate(x.T[None], size=frames, mode="linear", align_corners=True)[0].T
+    origins, own = resample(origins), resample(own)
+    origins = smooth(origins, passes=frames // 10)
     up = -torch.stack([c.down for c in trainer.dataset.train]).mean(0)
     up = up / up.norm()
     aim = F.normalize(target[None] - origins, dim=-1)
@@ -88,8 +102,8 @@ def camera_path(trainer, template, target: torch.Tensor, frames: int, look_at: f
         down = torch.linalg.cross(f, right)
         cameras.append(render.camera_from_record(dict(
             name=f"frame_{i:04d}", origin=origins[i].tolist(), right=right.tolist(), down=down.tolist(),
-            forward=f.tolist(), width=width, height=height, fx=record["fx"] * width / record["width"],
-            fy=record["fy"] * height / record["height"], cx=record["cx"] * width / record["width"],
+            forward=f.tolist(), width=width, height=height, fx=zoom * record["fx"] * width / record["width"],
+            fy=zoom * record["fy"] * height / record["height"], cx=record["cx"] * width / record["width"],
             cy=record["cy"] * height / record["height"]), trainer.device))
     return cameras
 
@@ -110,8 +124,11 @@ def build_objects(tracer, anchor, specs):
         if "center" in spec:
             center, radius = spec["center"], spec["radius"]
         else:
-            center, radius, _ = place_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["radius_fraction"],
-                                                spec.get("lift", 1.0))
+            center, radius, _, moved = place_on_seabed(
+                tracer, anchor, spec["u"], spec["v"], spec["radius_fraction"], spec.get("lift", 1.0),
+                spec.get("height", 0.0), spec.get("depth_fraction"), spec.get("clear", True))
+            if moved:
+                print(f"{spec.get('material', 'sphere')} sphere lifted {moved:.1f} radii out of the surface")
         sphere = Sphere(center, radius, spec.get("material", "mirror"), tuple(spec.get("tint", (1, 1, 1))),
                         spec.get("ior", 1.5 / 1.33), spec.get("kd", 1.0))
         objects.append(sphere)
@@ -156,8 +173,7 @@ def main():
     target = torch.stack([torch.as_tensor(o.center, dtype=torch.float32, device=trainer.device) for o in objects]).mean(0)
     path = shot.get("path", {})
     frames = args.frames or shot.get("frames", 120)
-    cameras = camera_path(trainer, anchor, target, frames, path.get("look_at_objects", 0.7), path.get("views"),
-                          path.get("scale", 1.0), path.get("nearest"))
+    cameras = camera_path(trainer, anchor, target, frames, path)
 
     out_frames = args.out / "frames"
     out_frames.mkdir(parents=True, exist_ok=True)

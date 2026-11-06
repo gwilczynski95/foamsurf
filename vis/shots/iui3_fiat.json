@@ -43,7 +43,8 @@
     0.95,
     0.95,
     0.95
-   ]
+   ],
+   "height": 1.5
   }
  ],
  "frames": 150,
@@ -51,9 +52,11 @@
  "path": {
   "look_at_objects": 0.7,
   "scale": 1.0,
-  "nearest": 7
+  "nearest": 7,
+  "zoom": 1.1
  },
  "trace": {
-  "max_depth": 4
+  "max_depth": 4,
+  "antialias": 8
  }
 }

@@ -1,13 +1,13 @@
 {
- "anchor_view": "MTN_1090",
+ "anchor_view": "MTN_1094",
  "objects": [
   {
    "type": "mesh",
    "name": "fiat126p",
    "manifest": "$FALCON/source/fiat_bicycle/manifest.json",
-   "u": 0.72,
-   "v": 0.78,
-   "span_fraction": 0.22,
+   "u": 0.58,
+   "v": 0.84,
+   "span_fraction": 0.2,
    "yaw_deg": -30,
    "materials": {
     "caroseria": {
@@ -23,9 +23,10 @@
    }
   },
   {
-   "u": 0.45,
-   "v": 0.72,
-   "radius_fraction": 0.05,
+   "u": 0.3,
+   "v": 0.66,
+   "radius_fraction": 0.045,
+   "height": 1.5,
    "material": "mirror",
    "tint": [
     0.95,
@@ -37,11 +38,19 @@
  "frames": 150,
  "fps": 30,
  "path": {
-  "look_at_objects": 0.7,
-  "scale": 1.0,
-  "nearest": 7
+  "look_at_objects": 0.4,
+  "views": [
+   "MTN_1092",
+   "MTN_1093",
+   "MTN_1094",
+   "MTN_1095",
+   "MTN_1096"
+  ],
+  "zoom": 1.1,
+  "scale": 1.0
  },
  "trace": {
-  "max_depth": 4
+  "max_depth": 4,
+  "antialias": 8
  }
 }
