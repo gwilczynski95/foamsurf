@@ -22,7 +22,7 @@ mkdir -p "$OUT"
 SETS=()
 for item in ${EXTRA:-}; do SETS+=(--set "$item"); done
 {
-  date -Is; git -C "$REPOSITORY" rev-parse HEAD; git -C "$REPOSITORY" status --short | head
+  date -Is; git -C "$REPOSITORY" rev-parse HEAD; git -C "$REPOSITORY" status --short 2>&1 | head || true
   hostname; nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
   echo "train.py --scene $DATA --out $OUT --seed 42 ${SETS[*]}"
 } > "$OUT/provenance.txt"
