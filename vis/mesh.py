@@ -238,5 +238,7 @@ def place_mesh_on_seabed(tracer, camera, u: float, v: float, span_fraction: floa
         base = anchor
     bx, by, bz = frame(normal, ax, 0.0)
     world = base + size * (local[:, :1] * bx + local[:, 1:2] * by + local[:, 2:] * bz) - by * (sink * size)
+    origin = base - by * (sink * size)
     return world, dict(anchor=anchor.tolist(), size=size, depth=depth, up=by.tolist(),
-                       footprint_hits=int(ok.sum()))
+                       footprint_hits=int(ok.sum()), origin=origin.tolist(),
+                       axes=[bx.tolist(), by.tolist(), bz.tolist()])  # world = origin + size * local @ axes

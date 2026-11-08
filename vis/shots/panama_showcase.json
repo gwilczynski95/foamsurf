@@ -105,6 +105,31 @@
     0.85,
     0.85
    ]
+  },
+  {
+   "type": "bubbles",
+   "source": "fiat126p",
+   "local": [
+    -0.12,
+    0.07,
+    0.5
+   ],
+   "direction": [
+    0,
+    -0.2,
+    1
+   ],
+   "rate": 16,
+   "life": 6,
+   "rise": 0.4,
+   "speed": 0.5,
+   "radius": [
+    0.01,
+    0.032
+   ],
+   "wobble": 0.03,
+   "drift": 0.06,
+   "seed": 1
   }
  ],
  "frames": 150,
@@ -123,5 +148,7 @@
   "max_depth": 4,
   "antialias": 8
  },
- "_note": "Best objects so far on the water-anchor models; the 5 white spheres are identical (radius 0.46 world units) at 12..65 units from the anchor camera."
+ "_note": "Best objects so far on the water-anchor models; the 5 white spheres are identical (radius 0.46 world units) at 12..65 units from the anchor camera. Air bubbles (ior 1/1.333) stream from the exhaust under the rear bumper.",
+ "still_time": 6.0,
+ "start_time": 6.0
 }

@@ -13,6 +13,8 @@ Shot file (JSON):
                 "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "materials": {"caroseria": {"mode": ...}}},
                {"type": "mirror_panel", "u": .., "v": .., "span_fraction": 0.2, "yaw_deg": 0, "lean_deg": 15,
                 "aspect": 0.6},              # standing framed mirror (FALCON's), pane facing the anchor camera
+               {"type": "bubbles", "source": "fiat126p", "local": [x, y, z],  # gas bubbles streaming from a point
+                "rate": 14, "rise": 0.6, "radius": [0.012, 0.03], ...},  # of a mesh (its normalized frame), see bubbles_at
                ...],                         # resting on the surface seen at image fraction (u, v) of the anchor view
    "frames": 120, "fps": 30,                  # the camera model's exposure is that of the anchor view
    "path": {"look_at_objects": 0.7,          # 0: the photos' own viewing direction, 1: aim at the objects
@@ -116,6 +118,9 @@ def build_objects(tracer, anchor, specs):
     objects, resolved = [], []
     for spec in specs:
         kind = spec.get("type", "sphere")
+        if kind == "bubbles":  # per frame, see bubbles_at
+            resolved.append(dict(spec))
+            continue
         if kind in ("mesh", "mirror_panel"):
             if kind == "mesh":
                 vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
@@ -147,6 +152,54 @@ def build_objects(tracer, anchor, specs):
     return objects, resolved
 
 
+def bubbles_at(spec: dict, resolved: list, up, t: float) -> list:
+    """Gas bubbles of a "bubbles" spec at time t (seconds): a steady stream from `local` (a point in the normalized
+    frame of the mesh named `source`), pushed out along `direction` (same frame) and rising along the world "up" at
+    `rise` mesh sizes per second (larger bubbles faster), wobbling sideways (`wobble` sizes, `wobble_hz`) and drifting
+    apart (`drift` sizes per second). Bubble k is born at k / rate with
+    a random radius in `radius` (mesh sizes, growing by `grow` per second as the pressure drops) and lives `life`
+    seconds. Deterministic for a seed, so every frame of a clip shows the same bubbles further along."""
+    mesh = next(r for r in resolved if r.get("name") == spec["source"])["placement"]
+    size = mesh["size"]
+    origin, axes = np.array(mesh["origin"]), np.array(mesh["axes"])
+    source = origin + size * np.array(spec["local"]) @ axes
+    push = np.array(spec.get("direction", [0.0, 0.0, 1.0])) @ axes
+    push /= np.linalg.norm(push)
+    up = np.asarray(up, dtype=np.float64)
+    side = np.cross(up, push); side /= np.linalg.norm(side)
+    back = np.cross(side, up)
+    rate, life, rise = spec.get("rate", 14.0), spec.get("life", 4.0), spec.get("rise", 0.6) * size
+    speed, settle = spec.get("speed", 0.5) * size, spec.get("settle", 0.4)
+    r_lo, r_hi = spec.get("radius", (0.012, 0.03))
+    wobble, hz, grow = spec.get("wobble", 0.03) * size, spec.get("wobble_hz", 1.5), spec.get("grow", 0.1)
+    spheres = []
+    for k in range(int(math.floor((t - life) * rate)), int(math.floor(t * rate)) + 1):
+        age = t - k / rate
+        if not 0.0 <= age <= life:
+            continue
+        rng = np.random.default_rng([spec.get("seed", 0), k & 0xFFFFFFFF])
+        jitter, phase, scale = rng.normal(size=3) * spec.get("spread", 0.01) * size, rng.uniform(0, 2 * math.pi, 2), rng.uniform()
+        drift = rng.normal(size=2) * spec.get("drift", 0.06) * size  # the plume widens as it rises
+        radius = (r_lo + (r_hi - r_lo) * scale ** 2) * size * (1 + grow * age)
+        climb = rise * (0.6 + 0.4 * math.sqrt(scale))  # larger bubbles rise faster
+        out = speed * settle * (1 - math.exp(-age / settle))  # the exhaust jet slows down in the water
+        sway = wobble * min(age, 1.0) * (math.sin(2 * math.pi * hz * age + phase[0]) * side
+                                         + math.cos(2 * math.pi * hz * age + phase[1]) * back)
+        center = source + jitter + out * push + climb * age * up + sway + age * (drift[0] * side + drift[1] * back)
+        spheres.append(Sphere(tuple(center.tolist()), float(radius), "glass", tuple(spec.get("tint", (1.0, 1.0, 1.0))),
+                              spec.get("ior", 1 / 1.333), 1.0, shadow=False))
+    return spheres
+
+
+def frame_objects(objects: list, specs: list, resolved: list, up, t: float) -> list:
+    """The shot's objects plus its bubbles at time t."""
+    extra = []
+    for spec in specs:
+        if spec.get("type") == "bubbles":
+            extra += bubbles_at(spec, resolved, up, t)
+    return objects + extra
+
+
 def save_png(path: Path, image: torch.Tensor):
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray((image.clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(path)
@@ -160,6 +213,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--frames", type=int, help="override the shot's frame count (previews)")
     parser.add_argument("--still", action="store_true", help="only the anchor view: OUT/still.png (+ no shadows)")
+    parser.add_argument("--part", type=int, nargs=2, metavar=("K", "N"),
+                        help="render only part K of N (contiguous frames, 0-based) and no video, for parallel jobs")
     args = parser.parse_args()
     shot = json.loads(args.shot.read_text())
     trainer = render.load_run(args.run.resolve(), "last", args.scene)
@@ -168,7 +223,10 @@ def main():
 
     objects, resolved_objects = build_objects(tracer, anchor, shot["objects"])
     settings = TraceSettings(**shot.get("trace", {}))
+    up = tracer.up.cpu().numpy()
+    fps = shot.get("fps", 30)
     if args.still:
+        objects = frame_objects(objects, shot["objects"], resolved_objects, up, shot.get("still_time", 3.0))
         stats = TraceStats()
         torch.cuda.synchronize(); start = time.time()
         _, full = render_camera(tracer, anchor, objects, settings, stats)
@@ -191,11 +249,21 @@ def main():
                     run=str(args.run), cameras=[render.camera_record(c) for c in cameras])
     (args.out / "shot_resolved.json").write_text(json.dumps(resolved, indent=1))
     start = time.time()
+    first, last = 0, frames
+    if args.part:
+        k, n = args.part
+        first, last = k * frames // n, (k + 1) * frames // n
     for i, camera in enumerate(cameras):
-        _, full = render_camera(tracer, camera, objects, settings, isp_origin=anchor.origin)
+        if not first <= i < last:
+            continue
+        now = frame_objects(objects, shot["objects"], resolved_objects, up, shot.get("start_time", 3.0) + i / fps)
+        _, full = render_camera(tracer, camera, now, settings, isp_origin=anchor.origin)
         save_png(out_frames / f"{i:04d}.png", full)
-        if i % 20 == 0:
+        if (i - first) % 20 == 0:
             print(f"frame {i}/{frames}  {time.time() - start:.1f} s", flush=True)
+    if args.part:
+        print(f"frames {first}-{last - 1} in {time.time() - start:.1f} s")
+        return
     video = args.out.with_suffix(".mp4")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(shot.get("fps", 30)), "-i",
                     str(out_frames / "%04d.png"), "-c:v", "libx264", "-crf", "16", "-preset", "slow",

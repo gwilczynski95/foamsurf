@@ -50,16 +50,39 @@ class Sphere:
     radius: float
     material: str = "mirror"  # mirror | glass | diffuse | metal | ceramic
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    ior: float = 1.5  # glass, relative to water
+    ior: float = 1.5  # glass, relative to water (< 1: a gas bubble, air/water = 1/1.333 = 0.75)
     kd: float = 1.0
+    shadow: bool = True  # casts a shadow on the scene (gas bubbles: no)
 
     @property
     def materials(self) -> list[Material]:
         return [Material(self.material, tuple(self.tint), self.ior, self.kd)]
 
     def tensors(self, device):
-        return (torch.tensor(self.center, dtype=torch.float32, device=device),
-                torch.tensor(self.tint, dtype=torch.float32, device=device))
+        cache = self.__dict__.setdefault("_tensors", {})  # traced thousands of times per frame
+        key = str(device)
+        if key not in cache:
+            cache[key] = (torch.tensor(self.center, dtype=torch.float32, device=device),
+                          torch.tensor(self.tint, dtype=torch.float32, device=device))
+        return cache[key]
+
+
+@dataclass
+class SphereBatch:
+    """Spheres hit by a group of rays, one per ray: what the glass-sphere shading needs (centre, radius [R,1])."""
+    center: torch.Tensor
+    radius: torch.Tensor
+    tint: torch.Tensor
+
+    @staticmethod
+    def of(objects: list, index: torch.Tensor) -> "SphereBatch":
+        device = index.device
+        centers = torch.tensor([o.center if not is_mesh(o) else (0.0, 0.0, 0.0) for o in objects], device=device)
+        radii = torch.tensor([o.radius if not is_mesh(o) else 0.0 for o in objects], device=device)
+        return SphereBatch(centers[index], radii[index][:, None], torch.ones(3, device=device))
+
+    def tensors(self, device):
+        return self.center, self.tint
 
 
 @dataclass
@@ -171,6 +194,31 @@ def sphere_hit(rays: torch.Tensor, sphere: Sphere) -> torch.Tensor:
     return torch.where((disc > 0) & (t > 0), t, torch.full_like(t, INF))
 
 
+def spheres_hit(rays: torch.Tensor, centers: torch.Tensor, radii: torch.Tensor, chunk: int = 1 << 18):
+    """Nearest of many spheres at once: (t [R], index into centers [R]); t = INF where none is hit."""
+    t_out = torch.full((rays.shape[0],), INF, device=rays.device)
+    i_out = torch.zeros(rays.shape[0], dtype=torch.long, device=rays.device)
+    if centers.shape[0] > 4:  # only the rays through a sphere bounding them all (a bubble plume is narrow)
+        middle = centers.mean(0)
+        bound = Sphere(tuple(middle.tolist()), float(((centers - middle).norm(dim=-1) + radii).max()))
+        near = (sphere_hit(rays, bound) < INF).nonzero().squeeze(-1)
+        if near.numel() < rays.shape[0]:
+            if near.numel():
+                t_out[near], i_out[near] = spheres_hit(rays[near], centers, radii, chunk)
+            return t_out, i_out
+    for begin in range(0, rays.shape[0], chunk):
+        r = rays[begin:begin + chunk]
+        oc = r[:, None, :3] - centers[None]  # [C,S,3]
+        b = (oc * r[:, None, 3:]).sum(-1)
+        disc = b * b - ((oc * oc).sum(-1) - radii[None] ** 2)
+        root = disc.clamp_min(0).sqrt()
+        near, far = -b - root, -b + root
+        t = torch.where(near > 0, near, far)
+        t = torch.where((disc > 0) & (t > 0), t, torch.full_like(t, INF))
+        t_out[begin:begin + chunk], i_out[begin:begin + chunk] = t.min(-1)
+    return t_out, i_out
+
+
 @dataclass
 class Hits:
     t: torch.Tensor  # [R] inf: none
@@ -195,12 +243,19 @@ def intersect(rays: torch.Tensor, objects: list, max_t: torch.Tensor | None = No
     best = torch.full((count,), INF, device=device) if max_t is None else max_t.clone()
     index = torch.full((count,), -1, dtype=torch.long, device=device)
     faces = {}
+    spheres = [i for i, obj in enumerate(objects) if not is_mesh(obj)]
+    if spheres:  # all at once (bubble streams have dozens), before the meshes so they get a tighter max_t
+        centers = torch.stack([objects[i].tensors(device)[0] for i in spheres])
+        radii = torch.tensor([objects[i].radius for i in spheres], dtype=torch.float32, device=device)
+        t, which = spheres_hit(rays, centers, radii)
+        closer = t < best
+        best = torch.where(closer, t, best)
+        index = torch.where(closer, torch.tensor(spheres, device=device)[which], index)
     for i, obj in enumerate(objects):
-        if is_mesh(obj):
-            t, face, bary = obj.intersect(rays, best)
-            faces[i] = (face, bary)
-        else:
-            t = sphere_hit(rays, obj)
+        if not is_mesh(obj):
+            continue
+        t, face, bary = obj.intersect(rays, best)
+        faces[i] = (face, bary)
         closer = t < best
         best = torch.where(closer, t, best)
         index = torch.where(closer, torch.full_like(index, i), index)
@@ -439,11 +494,20 @@ class SceneTracer:
         carried = transmission * weight
         table, _ = material_table(objects)
         alive = (hits.obj >= 0) & (carried.amax(-1) > settings.min_weight)
+        # Glass spheres of one material are shaded together (a bubble stream is dozens of spheres; one by one,
+        # every bounce would be traced per sphere).
+        groups = {}
         for m in hits.material[alive].unique().tolist():
-            mask = alive & (hits.material == m)
             obj_index, material = table[m]
+            glass_sphere = material.kind == "glass" and not is_mesh(objects[obj_index])
+            key = ("glass", material.tint, material.ior) if glass_sphere else m
+            groups.setdefault(key, []).append(m)
+        for key, ms in groups.items():
+            mask = alive & torch.isin(hits.material, torch.tensor(ms, device=rays.device))
+            obj_index, material = table[ms[0]]
+            obj = objects[obj_index] if len(ms) == 1 else SphereBatch.of(objects, hits.obj[mask])
             sub = Hits(*(x[mask] for x in (hits.t, hits.obj, hits.material, hits.point, hits.normal, hits.geometric)))
-            out[mask] += transmission[mask] * self.shade(objects[obj_index], material, rays[mask], sub, settings,
+            out[mask] += transmission[mask] * self.shade(obj, material, rays[mask], sub, settings,
                                                          depth, carried[mask], objects, stats)
         return out
 
@@ -467,6 +531,8 @@ class SceneTracer:
         for obj in objects:
             if is_mesh(obj):
                 lit = lit * self._mesh_shadow(obj, p, n, up, float(cone), settings)
+                continue
+            if not obj.shadow:
                 continue
             center, _ = obj.tensors(d.device)
             v = center - p
@@ -575,7 +641,10 @@ class SceneTracer:
             return self._glass_mesh(obj, material, rays, hits, kr, tint, settings, depth, weight, objects, stats)
         # Glass sphere: Fresnel split; the refracted ray crosses the solid sphere (no water inside) and leaves it at
         # the far side. A sphere never totally reflects on the way out, so the path is analytic.
-        inside, _ = refract(d, n, 1.0 / material.ior)
+        inside, tir_in = refract(d, n, 1.0 / material.ior)
+        if material.ior < 1.0:  # air bubble: entering the thinner medium can totally reflect (bright rim)
+            cos_t = -(inside * n).sum(-1, keepdim=True)
+            kr = torch.where(tir_in[:, None], torch.ones_like(cos_t), fresnel_schlick(cos_t, 1.0, material.ior))
         center, _ = obj.tensors(device)
         oc = hits.point - center
         b = (oc * inside).sum(-1, keepdim=True)
