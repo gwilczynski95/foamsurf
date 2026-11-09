@@ -200,6 +200,19 @@ def surface_heights(tracer, points: torch.Tensor, up: torch.Tensor, above: float
 
 
 @torch.no_grad()
+def tilt_local(vertices: np.ndarray, pitch_deg: float = 0.0, roll_deg: float = 0.0) -> np.ndarray:
+    """Tilt a normalized mesh (y-up, foot at 0) before placement: pitch about x (positive lowers the +z end), roll
+    about z (positive lowers the +x side); the foot is put back at y = 0."""
+    if not pitch_deg and not roll_deg:
+        return vertices
+    p, r = math.radians(pitch_deg), math.radians(roll_deg)
+    rx = np.array([[1, 0, 0], [0, math.cos(p), -math.sin(p)], [0, math.sin(p), math.cos(p)]], dtype=np.float32)
+    rz = np.array([[math.cos(r), -math.sin(r), 0], [math.sin(r), math.cos(r), 0], [0, 0, 1]], dtype=np.float32)
+    out = vertices @ (rz @ rx).T
+    out[:, 1] -= out[:, 1].min()
+    return out.astype(np.float32)
+
+
 def place_mesh_on_seabed(tracer, camera, u: float, v: float, span_fraction: float, local_vertices: np.ndarray,
                          yaw_deg: float = 0.0, sink: float = 0.0, max_tilt_deg: float = 10.0):
     """World vertices of a normalized mesh (y-up, foot at 0, extent 1) resting on the seabed seen at image fraction

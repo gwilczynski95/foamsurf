@@ -10,7 +10,7 @@ Shot file (JSON):
                                               # "distance": 30 at 30 world units (also in the open water)
                 "clear": true},               # lifted out of the reef if it would cut into it
                {"type": "mesh", "manifest": "$FALCON/source/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
-                "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "materials": {"caroseria": {"mode": ...}}},
+                "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "pitch_deg": 0, "materials": {"caroseria": {"mode": ...}}},
                {"type": "mirror_panel", "u": .., "v": .., "span_fraction": 0.2, "yaw_deg": 0, "lean_deg": 15,
                 "aspect": 0.6},              # standing framed mirror (FALCON's), pane facing the anchor camera
                {"type": "bubbles", "source": "fiat126p", "local": [x, y, z],  # gas bubbles streaming from a point
@@ -46,7 +46,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import render  # noqa: E402
-from vis.mesh import Mesh, load_manifest, mirror_panel, place_mesh_on_seabed  # noqa: E402
+from vis.mesh import Mesh, load_manifest, mirror_panel, place_mesh_on_seabed, tilt_local  # noqa: E402
 from vis.raytrace import SceneTracer, Sphere, TraceSettings, TraceStats, place_on_seabed, render_camera  # noqa: E402
 
 
@@ -128,6 +128,7 @@ def build_objects(tracer, anchor, specs):
                 vertices, faces, part, materials, ids = mirror_panel(
                     spec.get("aspect", 0.6), spec.get("border", 0.06), spec.get("thickness", 0.04),
                     spec.get("lean_deg", 15.0), spec.get("mirror"), spec.get("frame"))
+            vertices = tilt_local(vertices, spec.get("pitch_deg", 0.0), spec.get("roll_deg", 0.0))
             world, info = place_mesh_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["span_fraction"], vertices,
                                                spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
             device = tracer.trainer.device
