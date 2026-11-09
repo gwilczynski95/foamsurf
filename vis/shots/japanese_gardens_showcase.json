@@ -25,11 +25,12 @@
   {
    "type": "mirror_panel",
    "name": "mirror_panel",
-   "u": 0.4,
+   "u": 0.36,
    "v": 0.8,
    "span_fraction": 0.18,
    "yaw_deg": -35,
-   "lean_deg": 0
+   "lean_deg": 0,
+   "sink": -0.04
   },
   {
    "material": "mirror",
