@@ -29,7 +29,7 @@
    "v": 0.8,
    "span_fraction": 0.18,
    "yaw_deg": -35,
-   "lean_deg": 30
+   "lean_deg": 0
   },
   {
    "material": "mirror",
