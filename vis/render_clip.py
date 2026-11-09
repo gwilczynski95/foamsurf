@@ -215,6 +215,8 @@ def main():
     parser.add_argument("--still", action="store_true", help="only the anchor view: OUT/still.png (+ no shadows)")
     parser.add_argument("--part", type=int, nargs=2, metavar=("K", "N"),
                         help="render only part K of N (contiguous frames, 0-based) and no video, for parallel jobs")
+    parser.add_argument("--only", type=int, nargs="+", metavar="I",
+                        help="render only these frames of the path (stills at the clip's camera and time), no video")
     args = parser.parse_args()
     shot = json.loads(args.shot.read_text())
     trainer = render.load_run(args.run.resolve(), "last", args.scene)
@@ -254,15 +256,15 @@ def main():
         k, n = args.part
         first, last = k * frames // n, (k + 1) * frames // n
     for i, camera in enumerate(cameras):
-        if not first <= i < last:
+        if not first <= i < last or (args.only and i not in args.only):
             continue
         now = frame_objects(objects, shot["objects"], resolved_objects, up, shot.get("start_time", 3.0) + i / fps)
         _, full = render_camera(tracer, camera, now, settings, isp_origin=anchor.origin)
         save_png(out_frames / f"{i:04d}.png", full)
         if (i - first) % 20 == 0:
             print(f"frame {i}/{frames}  {time.time() - start:.1f} s", flush=True)
-    if args.part:
-        print(f"frames {first}-{last - 1} in {time.time() - start:.1f} s")
+    if args.part or args.only:
+        print(f"frames {args.only or f'{first}-{last - 1}'} in {time.time() - start:.1f} s")
         return
     video = args.out.with_suffix(".mp4")
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(shot.get("fps", 30)), "-i",
