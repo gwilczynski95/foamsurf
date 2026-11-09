@@ -32,16 +32,39 @@ RAY_CHUNK = 4_000_000  # shadow / occlusion rays per batch (GPU memory)
 
 @dataclass
 class Material:
-    kind: str = "mirror"  # mirror | glass | diffuse | metal | ceramic
+    kind: str = "mirror"  # mirror | glass | diffuse | metal | ceramic | pbr
     tint: tuple[float, float, float] = (1.0, 1.0, 1.0)  # reflectance / transmittance / albedo
     ior: float = 1.5  # glass and ceramic Fresnel, relative to water
     kd: float = 1.0  # metal: mirror fraction (rest diffuse); ceramic: diffuse weight
+    maps: dict | None = None  # pbr: {"albedo" (sRGB), "metal", "rough": image paths}, sampled at the mesh's UVs
 
     @staticmethod
     def from_falcon(spec: dict) -> "Material":
         """FALCON material {"mode", "rgb", "kd", "eta"}."""
         return Material(kind=spec.get("mode", "ceramic"), tint=tuple(spec.get("rgb", (1, 1, 1))),
-                        ior=float(spec.get("eta", 1.5)), kd=float(spec.get("kd", 1.0)))
+                        ior=float(spec.get("eta", 1.5)), kd=float(spec.get("kd", 1.0)), maps=spec.get("maps"))
+
+
+_TEXTURES: dict = {}
+
+
+def texture(path: str, device, srgb: bool) -> torch.Tensor:
+    """[1,C,H,W] float texture (linear values; sRGB decoded), cached per path and device."""
+    key = (path, str(device))
+    if key not in _TEXTURES:
+        import numpy as np
+        from PIL import Image
+        image = torch.from_numpy(np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0)
+        image = image ** 2.2 if srgb else image[..., :1]
+        _TEXTURES[key] = image.permute(2, 0, 1)[None].contiguous().to(device)
+    return _TEXTURES[key]
+
+
+def sample(image: torch.Tensor, uv: torch.Tensor) -> torch.Tensor:
+    """Bilinear lookup [R,C] of a [1,C,H,W] texture at UVs [R,2] (Blender convention: v up), wrapping."""
+    uv = torch.remainder(uv, 1.0)
+    grid = torch.stack((uv[:, 0] * 2 - 1, 1 - uv[:, 1] * 2), -1)[None, None]
+    return F.grid_sample(image, grid, mode="bilinear", align_corners=False)[0, :, 0].T
 
 
 @dataclass
@@ -227,6 +250,7 @@ class Hits:
     point: torch.Tensor  # [R,3]
     normal: torch.Tensor  # [R,3] shading normal, facing the ray
     geometric: torch.Tensor  # [R,3] geometric normal, facing the ray
+    uv: torch.Tensor | None = None  # [R,2] texture coordinates of mesh hits (meshes with UVs), else 0
 
 
 def material_table(objects):
@@ -264,6 +288,8 @@ def intersect(rays: torch.Tensor, objects: list, max_t: torch.Tensor | None = No
     normal = torch.zeros_like(point)
     geometric = torch.zeros_like(point)
     material = torch.full_like(index, -1)
+    uv = torch.zeros(count, 2, device=device) if any(getattr(o, "corner_uv", None) is not None for o in objects) \
+        else None
     _, offsets = material_table(objects)
     for i, obj in enumerate(objects):
         mask = index == i
@@ -274,6 +300,8 @@ def intersect(rays: torch.Tensor, objects: list, max_t: torch.Tensor | None = No
             shading, geo = obj.surface(face[mask], bary[mask])
             normal[mask], geometric[mask] = shading, geo
             material[mask] = offsets[i] + obj.face_material[face[mask]]
+            if uv is not None and obj.corner_uv is not None:
+                uv[mask] = obj.surface_uv(face[mask], bary[mask])
         else:
             center, _ = obj.tensors(device)
             normal[mask] = geometric[mask] = F.normalize(point[mask] - center, dim=-1)
@@ -285,7 +313,7 @@ def intersect(rays: torch.Tensor, objects: list, max_t: torch.Tensor | None = No
     geometric = torch.where(flip, -geometric, geometric)
     normal = torch.where(flip, -normal, normal)
     normal = torch.where((normal * d).sum(-1, keepdim=True) >= 0, geometric, normal)
-    return Hits(best, index, material, point, normal, geometric)
+    return Hits(best, index, material, point, normal, geometric, uv)
 
 
 def reflect(d: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
@@ -506,7 +534,8 @@ class SceneTracer:
             mask = alive & torch.isin(hits.material, torch.tensor(ms, device=rays.device))
             obj_index, material = table[ms[0]]
             obj = objects[obj_index] if len(ms) == 1 else SphereBatch.of(objects, hits.obj[mask])
-            sub = Hits(*(x[mask] for x in (hits.t, hits.obj, hits.material, hits.point, hits.normal, hits.geometric)))
+            sub = Hits(*(None if x is None else x[mask] for x in (hits.t, hits.obj, hits.material, hits.point,
+                                                                   hits.normal, hits.geometric, hits.uv)))
             out[mask] += transmission[mask] * self.shade(obj, material, rays[mask], sub, settings,
                                                          depth, carried[mask], objects, stats)
         return out
@@ -624,6 +653,8 @@ class SceneTracer:
         kind = material.kind
         if kind == "diffuse":
             return tint * self._matte(obj, hits, objects, settings)
+        if kind == "pbr":
+            return self._pbr(obj, material, tint, rays, hits, settings, depth, weight, objects, stats)
         reflected = self._secondary(hits.point, reflect(d, n), obj, settings)
         if kind == "mirror":
             return tint * self._branch(reflected, objects, settings, depth, weight * tint, stats)
@@ -659,6 +690,29 @@ class SceneTracer:
         refracted = self._secondary(exit_point, outgoing, obj, settings)
         refracted_light = self._branch(refracted, objects, settings, depth, weight * kt * tint, stats)
         return kr * reflected_light + kt * tint * refracted_light
+
+    def _pbr(self, obj, material, tint, rays, hits, settings, depth, weight, objects, stats):
+        """Textured metal/roughness surface (Poly Haven style) with the tracer's lighting: a mirror reflection for
+        the glossy share of the Fresnel term (one ray, no blur), the scene irradiance for the rough share and the
+        diffuse (non-metal) base. F0 = 0.04 for dielectrics, the albedo for metals."""
+        maps = material.maps or {}
+        uv = hits.uv if hits.uv is not None else torch.zeros(rays.shape[0], 2, device=rays.device)
+        albedo = tint * (sample(texture(maps["albedo"], rays.device, True), uv) if "albedo" in maps else 1.0)
+        metal = sample(texture(maps["metal"], rays.device, False), uv) if "metal" in maps else \
+            torch.zeros(rays.shape[0], 1, device=rays.device)
+        rough = sample(texture(maps["rough"], rays.device, False), uv) if "rough" in maps else \
+            torch.full((rays.shape[0], 1), 0.5, device=rays.device)
+        d, n = rays[:, 3:], hits.normal
+        cos_i = (-(d * n).sum(-1, keepdim=True)).clamp(0, 1)
+        f0 = 0.04 * (1 - metal) + albedo * metal
+        fresnel = f0 + (1 - f0) * (1 - cos_i) ** 5 * (1 - rough) ** 2  # rough surfaces lose the grazing boost
+        gloss = (1 - rough).clamp(0, 1) ** 2
+        mirror_weight = fresnel * gloss
+        light = self._matte(obj, hits, objects, settings)
+        reflected = self._secondary(hits.point, reflect(d, n), obj, settings)
+        mirror = self._branch(reflected, objects, settings, depth, weight * mirror_weight, stats)
+        diffuse = (1 - metal) * (1 - fresnel) * albedo
+        return mirror_weight * mirror + (diffuse + fresnel * (1 - gloss)) * light
 
     def _glass_mesh(self, mesh, material, rays, hits, kr, tint, settings, depth, weight, objects, stats):
         """Glass part of a mesh, entered from the water: refract in, find the exit on the same mesh (no water

@@ -53,13 +53,31 @@ def read_ply(path: Path):
     return vertices, np.asarray(faces, dtype=np.int64).reshape(-1, 3)
 
 
-def load_manifest(path: str | Path, overrides: dict | None = None):
+def load_manifest(path: str | Path, overrides: dict | None = None, with_uv: bool = False):
     """Parts of a manifest as one normalized mesh: vertices [V,3] (y-up, foot at 0, max extent 1), faces [F,3],
     (the part PLYs are taken as y-down, as FALCON's, unless the manifest says "flip_yz": false)
-    per-face part index [F], materials (one per part), part ids. overrides: {part id: FALCON material dict}."""
+    per-face part index [F], materials (one per part), part ids. overrides: {part id: FALCON material dict}.
+    A manifest with "format": "npz" (vis/export_blend.py) holds one y-up mesh with per-corner UVs and textured
+    "pbr" materials (map paths relative to the manifest). with_uv: also return the corner UVs [F,3,2] (or None)."""
     path = Path(os.path.expandvars(str(path)))
     manifest = json.loads(path.read_text())
     overrides = overrides or {}
+    if manifest.get("format") == "npz":
+        data = np.load(path.parent / manifest["mesh"])
+        vertices = data["vertices"].astype(np.float32)
+        materials, ids = [], []
+        for part in manifest["parts"]:
+            spec = dict(part.get("material", {}), **overrides.get(part["id"], {}))
+            if "maps" in spec:
+                spec["maps"] = {k: str(path.parent / v) for k, v in spec["maps"].items()}
+            materials.append(Material.from_falcon(spec))
+            ids.append(part["id"])
+        low, high = vertices.min(0), vertices.max(0)
+        vertices = vertices - 0.5 * (low + high)
+        vertices[:, 1] -= vertices[:, 1].min()
+        vertices /= float((high - low).max())
+        out = vertices, data["faces"].astype(np.int64), data["part"].astype(np.int64), materials, ids
+        return (*out, data["corner_uv"].astype(np.float32)) if with_uv else out
     vertices, faces, part_of_face, materials, ids = [], [], [], [], []
     offset = 0
     for index, part in enumerate(manifest["parts"]):
@@ -79,7 +97,8 @@ def load_manifest(path: str | Path, overrides: dict | None = None):
     vertices = vertices - center
     vertices[:, 1] -= vertices[:, 1].min()
     vertices /= float((high - low).max())
-    return vertices, np.concatenate(faces), np.concatenate(part_of_face), materials, ids
+    out = vertices, np.concatenate(faces), np.concatenate(part_of_face), materials, ids
+    return (*out, None) if with_uv else out
 
 
 def corner_normals(vertices: torch.Tensor, faces: torch.Tensor, crease_deg: float = 40.0) -> torch.Tensor:
@@ -128,8 +147,10 @@ class Mesh:
     """A triangle mesh in world coordinates with per-face materials and a Warp BVH."""
 
     def __init__(self, vertices: torch.Tensor, faces: torch.Tensor, face_material: torch.Tensor,
-                 materials: list[Material], name: str = "mesh", part_ids: list[str] | None = None):
+                 materials: list[Material], name: str = "mesh", part_ids: list[str] | None = None,
+                 corner_uv: torch.Tensor | None = None):
         self.name = name
+        self.corner_uv = None if corner_uv is None else corner_uv.float().to(vertices.device).contiguous()
         self.vertices = vertices.float().contiguous()
         self.faces = faces.long().contiguous()
         self.face_material = face_material.long().contiguous()
@@ -175,6 +196,12 @@ class Mesh:
         corners = self.corner_normal[face]  # Warp: p = u p0 + v p1 + (1-u-v) p2
         shading = F.normalize(u * corners[:, 0] + v * corners[:, 1] + (1 - u - v) * corners[:, 2], dim=-1)
         return shading, self.face_normal[face]
+
+    def surface_uv(self, face: torch.Tensor, bary: torch.Tensor) -> torch.Tensor:
+        """Texture coordinates [R,2] of hits (same barycentric convention as surface)."""
+        u, v = bary[:, :1], bary[:, 1:]
+        corners = self.corner_uv[face]
+        return u * corners[:, 0] + v * corners[:, 1] + (1 - u - v) * corners[:, 2]
 
 
 def frame(up: torch.Tensor, reference: torch.Tensor, yaw_deg: float):

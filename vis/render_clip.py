@@ -122,8 +122,10 @@ def build_objects(tracer, anchor, specs):
             resolved.append(dict(spec))
             continue
         if kind in ("mesh", "mirror_panel"):
+            uv = None
             if kind == "mesh":
-                vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
+                vertices, faces, part, materials, ids, uv = load_manifest(spec["manifest"], spec.get("materials"),
+                                                                          with_uv=True)
             else:
                 vertices, faces, part, materials, ids = mirror_panel(
                     spec.get("aspect", 0.6), spec.get("border", 0.06), spec.get("thickness", 0.04),
@@ -133,7 +135,8 @@ def build_objects(tracer, anchor, specs):
                                                spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
             device = tracer.trainer.device
             objects.append(Mesh(world, torch.as_tensor(faces, device=device), torch.as_tensor(part, device=device),
-                                materials, spec.get("name", "mesh"), ids))
+                                materials, spec.get("name", "mesh"), ids,
+                                None if uv is None else torch.as_tensor(uv, device=device)))
             resolved.append(dict(spec, placement=info, materials={i: vars(m) for i, m in zip(ids, materials)}))
             continue
         if "center" in spec:
