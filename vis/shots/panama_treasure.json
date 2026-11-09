@@ -135,19 +135,30 @@
    "type": "mesh",
    "name": "treasure_chest",
    "manifest": "assets/models/treasure_chest/manifest.json",
-   "u": 0.62,
-   "v": 0.82,
-   "span_fraction": 0.11,
-   "yaw_deg": 35
+   "u": 0.76,
+   "v": 0.64,
+   "span_fraction": 0.12,
+   "yaw_deg": -25,
+   "sink": 0.35,
+   "materials": {
+    "treasure_chest": {
+     "rgb": [
+      2.5,
+      2.5,
+      2.5
+     ]
+    }
+   }
   },
   {
    "type": "mesh",
    "name": "rubber_duck",
    "manifest": "assets/models/rubber_duck/manifest.json",
-   "u": 0.3,
-   "v": 0.74,
-   "span_fraction": 0.06,
-   "yaw_deg": -30
+   "u": 0.55,
+   "v": 0.72,
+   "span_fraction": 0.05,
+   "yaw_deg": -20,
+   "sink": -6
   }
  ],
  "frames": 150,
@@ -166,7 +177,7 @@
   "max_depth": 4,
   "antialias": 8
  },
- "_note": "panama_showcase plus Poly Haven's treasure_chest and rubber_duck_toy (CC0), textured (pbr). Assets: blender -b <name>_4k.blend --python vis/export_blend.py -- assets/models/<name>",
+ "_note": "panama_showcase plus Poly Haven's treasure_chest and rubber_duck_toy (CC0), textured (pbr). Assets: blender -b <name>_4k.blend --python vis/export_blend.py -- assets/models/<name>. Chest under the mirror sphere, 35 % sunk into the coral, its aged-wood albedo (~0.12) x2.5; the duck floats 6 sizes above the reef.",
  "still_time": 6.0,
  "start_time": 6.0
 }
