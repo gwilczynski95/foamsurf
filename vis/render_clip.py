@@ -131,8 +131,11 @@ def build_objects(tracer, anchor, specs):
                     spec.get("aspect", 0.6), spec.get("border", 0.06), spec.get("thickness", 0.04),
                     spec.get("lean_deg", 15.0), spec.get("mirror"), spec.get("frame"))
             vertices = tilt_local(vertices, spec.get("pitch_deg", 0.0), spec.get("roll_deg", 0.0))
-            world, info = place_mesh_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["span_fraction"], vertices,
-                                               spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
+            if "near" in spec:  # floating next to an object built earlier, see near_point
+                world, info = place_mesh_near(tracer, anchor, objects, spec, vertices)
+            else:
+                world, info = place_mesh_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["span_fraction"],
+                                                   vertices, spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
             device = tracer.trainer.device
             objects.append(Mesh(world, torch.as_tensor(faces, device=device), torch.as_tensor(part, device=device),
                                 materials, spec.get("name", "mesh"), ids,
@@ -147,16 +150,9 @@ def build_objects(tracer, anchor, specs):
             local = torch.tensor(spec["local"], dtype=torch.float32)
             center = (torch.tensor(info["origin"], dtype=torch.float32) + info["size"] * local @ axes).tolist()
             radius = spec.get("radius_local", 0.006) * info["size"]
-        elif "near" in spec:  # next to an object built earlier: offset [right, up, towards the camera] in units
-            target = next(o for o in objects if getattr(o, "name", None) == spec["near"])  # of its radius
-            base = torch.as_tensor(target.center, dtype=torch.float32).cpu()
-            up = tracer.up.float().cpu()
-            right = F.normalize(anchor.right.float().cpu() - (anchor.right.float().cpu() @ up) * up, dim=0)
-            back = torch.linalg.cross(right, up)
-            if float(back @ (anchor.origin.float().cpu() - base)) < 0:
-                back = -back
-            off = spec.get("offset", [0.0, 2.0, 0.0])
-            center = (base + target.radius * (off[0] * right + off[1] * up + off[2] * back)).tolist()
+        elif "near" in spec:
+            center, target = near_point(tracer, anchor, objects, spec)
+            center = center.tolist()
             radius = spec.get("radius_of_near", 0.06) * target.radius
         else:
             center, radius, _, moved = place_on_seabed(
@@ -191,6 +187,39 @@ def build_objects(tracer, anchor, specs):
         resolved.append(dict(type="sphere", center=center, radius=radius, material=sphere.material,
                              tint=list(sphere.tint), ior=sphere.ior, kd=sphere.kd))
     return objects, resolved
+
+
+def near_point(tracer, anchor, objects, spec: dict):
+    """A point next to an object built earlier (spec["near"], by name): its centre plus spec["offset"] = [right,
+    up, towards the anchor camera] in units of the object's radius. Returns the point (cpu) and the object."""
+    target = next(o for o in objects if getattr(o, "name", None) == spec["near"])
+    base = torch.as_tensor(target.center, dtype=torch.float32).cpu()
+    up = tracer.up.float().cpu()
+    right = F.normalize(anchor.right.float().cpu() - (anchor.right.float().cpu() @ up) * up, dim=0)
+    back = torch.linalg.cross(right, up)
+    if float(back @ (anchor.origin.float().cpu() - base)) < 0:
+        back = -back
+    off = spec.get("offset", [0.0, 2.0, 0.0])
+    return base + target.radius * (off[0] * right + off[1] * up + off[2] * back), target
+
+
+def place_mesh_near(tracer, anchor, objects, spec: dict, vertices):
+    """World vertices of a normalized mesh floating (upright, turned by yaw_deg) with its bounding-box centre at
+    near_point; its largest extent is spec["size_of_near"] x the object's radius. Same info as
+    place_mesh_on_seabed."""
+    from vis.mesh import frame
+    center, target = near_point(tracer, anchor, objects, spec)
+    device = tracer.trainer.device
+    size = spec.get("size_of_near", 2.0) * target.radius
+    up = tracer.up.to(device).float()
+    bx, by, bz = frame(up, anchor.right.to(device).float(), spec.get("yaw_deg", 0.0))
+    axes = torch.stack((bx, by, bz))
+    local = torch.as_tensor(vertices, device=device)
+    middle = 0.5 * (local.min(0).values + local.max(0).values)
+    origin = center.to(device) - size * middle @ axes
+    world = origin + size * local @ axes
+    return world, dict(anchor=center.tolist(), size=size, origin=origin.tolist(), up=by.tolist(),
+                       axes=axes.tolist())
 
 
 def spot_axis(tracer, anchor, spec: dict) -> tuple:
