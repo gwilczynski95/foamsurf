@@ -141,6 +141,12 @@ def build_objects(tracer, anchor, specs):
             continue
         if "center" in spec:
             center, radius = spec["center"], spec["radius"]
+        elif "attach" in spec:  # fixed to a mesh built earlier: "local" point and "aim_local" beam axis in its
+            info = next(r["placement"] for r in resolved if r.get("name") == spec["attach"])  # normalized frame
+            axes = torch.tensor(info["axes"], dtype=torch.float32)  # rows: the mesh's x, y, z in the world
+            local = torch.tensor(spec["local"], dtype=torch.float32)
+            center = (torch.tensor(info["origin"], dtype=torch.float32) + info["size"] * local @ axes).tolist()
+            radius = spec.get("radius_local", 0.006) * info["size"]
         elif "near" in spec:  # next to an object built earlier: offset [right, up, towards the camera] in units
             target = next(o for o in objects if getattr(o, "name", None) == spec["near"])  # of its radius
             base = torch.as_tensor(target.center, dtype=torch.float32).cpu()
@@ -165,7 +171,13 @@ def build_objects(tracer, anchor, specs):
             ambient = float(tracer.ambient_up().mean())  # light from above; spot: beam axis (world) or
             sphere.power = spec.get("power", 10.0) * ambient  # "down_deg" tilt from straight down towards yaw
             sphere.shadow = False
-            if "aim" in spec:  # spot aimed at an object built earlier (by name)
+            if "aim_local" in spec:  # spot along a direction in the attached mesh's frame
+                info = next(r["placement"] for r in resolved if r.get("name") == spec["attach"])
+                axis = torch.tensor(spec["aim_local"], dtype=torch.float32) @ torch.tensor(info["axes"])
+                sphere.spot = tuple(F.normalize(axis, dim=0).tolist())
+                sphere.cone_deg = spec.get("cone_deg", 20.0)
+                sphere.softness_deg = spec.get("softness_deg", 5.0)
+            elif "aim" in spec:  # spot aimed at an object built earlier (by name)
                 target = next(o for o in objects if getattr(o, "name", None) == spec["aim"])
                 axis = torch.as_tensor(target.center, dtype=torch.float32).cpu() - torch.tensor(center, dtype=torch.float32)
                 sphere.spot = tuple(F.normalize(axis.cpu(), dim=0).tolist())
