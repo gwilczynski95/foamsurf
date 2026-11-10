@@ -76,6 +76,10 @@ class Sphere:
     ior: float = 1.5  # glass, relative to water (< 1: a gas bubble, air/water = 1/1.333 = 0.75)
     kd: float = 1.0
     shadow: bool = True  # casts a shadow on the scene (gas bubbles: no)
+    power: float = 0.0  # "emissive": a lamp of radiant intensity power x tint (raw units per steradian), see lamps
+    spot: tuple[float, float, float] | None = None  # lamp: beam axis (unit), None: shines in all directions
+    cone_deg: float = 30.0  # spot: half-angle of the beam (full intensity inside cone_deg - softness_deg)
+    softness_deg: float = 8.0
 
     @property
     def materials(self) -> list[Material]:
@@ -150,6 +154,17 @@ class TraceSettings:
     # pixel: no stair-stepped outlines, and the reef a sphere squeezes into a thin band along its horizon becomes a
     # texture instead of single-pixel speckles. 0: off.
     antialias: int = 4
+    # Lamps (emissive spheres with power > 0): their light reaches surfaces (Gaussians: relit in proportion to
+    # their colour over the scene's light from above; objects: added to the matte light) and is scattered by the
+    # water towards the camera (single scattering, Henyey-Greenstein phase lamp_g, lamp_samples equiangular
+    # samples per ray; the scattering coefficient is the attenuation times the water colour over the ambient
+    # radiance, i.e. B_inf = b L / c). lamp_volume_shadows: the camera rays' samples test visibility of the lamp
+    # (beams and shadows in the water).
+    lamps: bool = True
+    lamp_g: float = 0.9
+    lamp_samples: int = 24
+    lamp_volume_shadows: bool = True
+    lamp_blur_px: float = 2.5  # camera rays: the lamp light on the scene smoothed over the image (glow: x1.5)
 
 
 @dataclass
@@ -200,6 +215,10 @@ def around(local: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
 
 
 # --- intersections ---------------------------------------------------------------------------------------------
+def lamps_of(objects) -> list:
+    return [o for o in objects if not is_mesh(o) and o.material == "emissive" and o.power > 0]
+
+
 def is_mesh(obj) -> bool:
     return hasattr(obj, "faces")
 
@@ -466,6 +485,8 @@ class SceneTracer:
         """[R] bool: some inserted object lies on the ray before max_t."""
         hit = torch.zeros(rays.shape[0], dtype=torch.bool, device=rays.device)
         for obj in objects:
+            if not is_mesh(obj) and obj.material == "emissive":
+                continue
             t = obj.intersect(rays, max_t)[0] if is_mesh(obj) else sphere_hit(rays, obj)
             hit |= t < max_t
         return hit
@@ -506,8 +527,20 @@ class SceneTracer:
         if not objects:
             direct, scattered, _ = self.segment(rays, torch.full((count,), INF, device=rays.device), start_points)
             return self.water_light(direct, scattered, rays, settings.water_light_max_up, settings.water_light_max_gain)
+        lamps = lamps_of(objects) if settings.lamps else []
+        if lamps:  # their caches trace the scene (segment), which would overwrite last_surface below
+            self.water_coefficients()
+            self.ambient_up()
         hits = intersect(rays, objects)
         direct, scattered, transmission = self.segment(rays, hits.t, start_points)
+        image = depth == 0 and self.image_shape is not None and \
+            count == self.image_shape[0] * self.image_shape[1]
+        lamp_direct = None
+        if lamps:
+            ratio, valid = self.lamp_surface(rays, hits.t, objects, lamps)
+            if image and settings.lamp_blur_px > 0:
+                ratio = self._blur_image(ratio, valid.float(), settings.lamp_blur_px)
+            lamp_direct = direct * ratio
         if settings.shadows and shadow is not None:
             direct = direct * shadow[:, None]
         elif settings.shadows:
@@ -516,6 +549,12 @@ class SceneTracer:
                 factor = self._blur_shadow(factor, rays, hits.t, settings.shadow_blur_px)
             direct = direct * factor[:, None]
         out = self.water_light(direct, scattered, rays, settings.water_light_max_up, settings.water_light_max_gain)
+        if lamps:
+            glow = self.lamp_inscatter(rays, hits.t, objects, lamps, settings,
+                                       settings.lamp_volume_shadows and depth == 0)
+            if image and settings.lamp_blur_px > 0:
+                glow = self._blur_image(glow, torch.ones(count, device=rays.device), 1.5 * settings.lamp_blur_px)
+            out = out + lamp_direct + glow
         if not bool((hits.obj >= 0).any()) or depth >= settings.max_depth:  # past the last bounce: black
             return out
         # Light leaving the objects towards the ray origin, attenuated by the water in front of them.
@@ -538,6 +577,142 @@ class SceneTracer:
                                                                    hits.normal, hits.geometric, hits.uv)))
             out[mask] += transmission[mask] * self.shade(obj, material, rays[mask], sub, settings,
                                                          depth, carried[mask], objects, stats)
+        return out
+
+    # --- lamps ---------------------------------------------------------------------------------------
+    def water_coefficients(self):
+        """Mean attenuation c [3] and scattering b [3] of the water (b = c B_inf / ambient radiance: single
+        scattering of the scene's own light gives the trained water colour B_inf), cached."""
+        if getattr(self, "_water", None) is None:
+            v = self.medium
+            c = v.attenuation.mean(0)
+            _, radiance = self.environment(self.color_origin.to(c).float(), 256, TraceSettings())
+            b = c * v.colors.mean(0) / radiance.mean(0).clamp_min(1e-6)
+            self._water = (c, b)
+        return self._water
+
+    def gaussian_hit(self, rays: torch.Tensor, chunk: int = 1 << 21) -> torch.Tensor:
+        """[R] depth of the first Gaussian surface along rays (inf: none)."""
+        out = torch.empty(rays.shape[0], device=rays.device)
+        for begin in range(0, rays.shape[0], chunk):
+            depth = self.renderer.render_gaussians(rays[begin:begin + chunk].contiguous(), self.gaussians,
+                                                   background=(0.0, 0.0, 0.0)).surface_depth.reshape(-1)
+            out[begin:begin + chunk] = torch.where(torch.isfinite(depth) & (depth > 0), depth,
+                                                   torch.full_like(depth, INF))
+        return out
+
+    def lamp_reach(self, points: torch.Tensor, lamp, objects, visibility: bool = True):
+        """Light of a lamp arriving at points [P,3]: unit directions to the lamp [P,3] and irradiance on a surface
+        facing it [P,3] (intensity / r^2, water attenuation over r, spot profile, shadows of objects and Gaussians)."""
+        c, _ = self.water_coefficients()
+        center, color = lamp.tensors(points.device)
+        v = center - points
+        r = v.norm(dim=-1, keepdim=True).clamp_min(lamp.radius)
+        l = v / r
+        e = lamp.power * color * torch.exp(-c * r) / (r * r)
+        if lamp.spot is not None:
+            axis = torch.tensor(lamp.spot, dtype=torch.float32, device=points.device)
+            cos = (-l * axis).sum(-1, keepdim=True)
+            inner, outer = (math.cos(math.radians(max(lamp.cone_deg - lamp.softness_deg, 0.0))),
+                            math.cos(math.radians(lamp.cone_deg + lamp.softness_deg)))
+            w = ((cos - outer) / max(inner - outer, 1e-6)).clamp(0, 1)
+            e = e * (w * w * (3 - 2 * w))
+        if visibility:
+            live = e.amax(-1) > 1e-5
+            if live.any():
+                rays = torch.cat((points[live], l[live]), -1).contiguous()
+                max_t = (r[live, 0] - lamp.radius).clamp_min(0)
+                seen = (self.gaussian_hit(rays) >= max_t) & ~self.blocked(rays, objects, max_t)
+                e[live] = e[live] * seen[:, None]
+        return l, e
+
+    def lamp_light(self, points, normals, objects, lamps) -> torch.Tensor:
+        """[P,3] lamp light on matte surfaces, in the units of irradiance() (cosine-weighted)."""
+        total = torch.zeros_like(points)
+        for lamp in lamps:
+            l, e = self.lamp_reach(points, lamp, objects)
+            total = total + e * (normals * l).sum(-1, keepdim=True).clamp_min(0) / math.pi
+        return total
+
+    def ambient_up(self) -> torch.Tensor:
+        """[3] the scene's light on a surface facing up (what the Gaussian colours were lit by), cached."""
+        if getattr(self, "_ambient_up", None) is None:
+            center = self.color_origin.cuda().float()
+            directions, radiance = self.environment(center, 256, TraceSettings())
+            up = self.up.to(center)
+            light = 4.0 / directions.shape[0] * (directions @ up).clamp_min(0) @ radiance
+            down = (-(directions @ up)).clamp_min(0)
+            seabed = (down[:, None] * radiance).sum(0) / down.sum().clamp_min(1e-6)
+            self._ambient_up = light + seabed / TraceSettings().seabed_albedo
+        return self._ambient_up
+
+    def lamp_surface(self, rays, t_hit, objects, lamps):
+        """Lamp light on the first Gaussian surface of each ray over the scene's light from above, [R,3], and the
+        rays that have one [R]: the surface's direct light D (which already holds the water from the surface to
+        the camera) times this ratio is the lamp's light leaving it towards the camera."""
+        from training.oceansplat import rotation_columns
+        depth, index = (x.reshape(-1) for x in self.last_surface)
+        valid = (index >= 0) & (depth > 0) & (depth < t_hit)
+        out = torch.zeros_like(rays[:, :3])
+        if not valid.any():
+            return out, valid
+        d = rays[valid, 3:]
+        p = rays[valid, :3] + depth[valid, None] * d
+        _, _, n = rotation_columns(self.gaussians.quaternions[index[valid].long()])
+        n = F.normalize(n, dim=-1)
+        n = torch.where((n * d).sum(-1, keepdim=True) > 0, -n, n)
+        light = self.lamp_light(p - d * 1e-3 + n * 2e-2, n, objects, lamps)
+        out[valid] = light / self.ambient_up().clamp_min(1e-6)
+        return out, valid
+
+    def _blur_image(self, values: torch.Tensor, valid: torch.Tensor, sigma: float) -> torch.Tensor:
+        """[N,C] per-pixel values of the camera image smoothed over the valid pixels (normalized convolution)."""
+        h, w = self.image_shape
+        radius = int(3 * sigma)
+        x = torch.arange(-radius, radius + 1, device=values.device, dtype=torch.float32)
+        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+        kernel = kernel / kernel.sum()
+
+        def blur(image):  # [C,H,W]
+            c = image.shape[0]
+            image = image[:, None]
+            image = F.conv2d(F.pad(image, (radius, radius, 0, 0), mode="replicate"), kernel.view(1, 1, 1, -1))
+            image = F.conv2d(F.pad(image, (0, 0, radius, radius), mode="replicate"), kernel.view(1, 1, -1, 1))
+            return image[:, 0].reshape(c, -1)
+        weight = blur(valid.reshape(1, h, w))[0]
+        smooth = blur((values * valid[:, None]).T.reshape(-1, h, w)).T / weight.clamp_min(1e-6)[:, None]
+        return torch.where(valid[:, None] > 0, smooth, values)
+
+    def lamp_inscatter(self, rays, t_hit, objects, lamps, settings, volume_shadows: bool) -> torch.Tensor:
+        """[R,3] lamp light scattered once by the water towards the ray origin, up to the ray's first surface
+        (Gaussian or object): equiangular sampling about each lamp (Kulla & Fajardo 2012), stratified."""
+        c, b = self.water_coefficients()
+        depth, index = (x.reshape(-1) for x in self.last_surface)
+        end = torch.where((index >= 0) & (depth > 0), depth, torch.full_like(depth, self.renderer.far))
+        end = torch.minimum(end, t_hit.nan_to_num(posinf=self.renderer.far)).clamp(max=self.renderer.far)
+        o, d = rays[:, :3], rays[:, 3:]
+        g = settings.lamp_g
+        out = torch.zeros_like(o)
+        n = settings.lamp_samples
+        for lamp in lamps:
+            center, _ = lamp.tensors(o.device)
+            along = ((center - o) * d).sum(-1)
+            h = (o + along[:, None] * d - center).norm(dim=-1).clamp_min(0.5 * lamp.radius)
+            theta_a, theta_b = torch.atan2(-along, h), torch.atan2(end - along, h)
+            span = (theta_b - theta_a).clamp_min(0)
+            jitter = torch.rand(o.shape[0], device=o.device)
+            acc = torch.zeros_like(o)
+            for k in range(n):
+                theta = theta_a + span * (k + jitter) / n
+                t = along + h * torch.tan(theta)
+                x = o + t[:, None] * d
+                l, e = self.lamp_reach(x, lamp, objects, visibility=volume_shadows)
+                cos = (l * d).sum(-1, keepdim=True)  # light travels along -l, scattered into -d: cos = l.d
+                phase = (1 - g * g) / (4 * math.pi * (1 + g * g - 2 * g * cos).clamp_min(1e-6) ** 1.5)
+                r = (center - x).norm(dim=-1, keepdim=True).clamp_min(lamp.radius)
+                # e = I exp(-c r) / r^2; the pdf of t is h / (span r^2): integrand / pdf = e r^2 span / h
+                acc = acc + b * phase * e * torch.exp(-c * t[:, None]) * (r * r) * (span / h)[:, None]
+            out = out + acc / n
         return out
 
     @torch.no_grad()
@@ -642,6 +817,10 @@ class SceneTracer:
             hidden = self.occlusion(hits.point, hits.geometric, meshes, settings.occlusion_distance * obj.radius,
                                     settings.occlusion_samples, 1e-3 * obj.radius)
             light = light * (1 - hidden)[:, None]
+        lamps = lamps_of(objects) if settings.lamps else []
+        if lamps:
+            light = light + self.lamp_light(hits.point + hits.geometric * (1e-3 * obj.radius), hits.normal,
+                                            objects, lamps)
         return light
 
     @torch.no_grad()
@@ -653,6 +832,8 @@ class SceneTracer:
         kind = material.kind
         if kind == "diffuse":
             return tint * self._matte(obj, hits, objects, settings)
+        if kind == "emissive":  # a lamp's surface: radiance = intensity / (pi R^2)
+            return (tint * obj.power / (math.pi * obj.radius ** 2)).expand(rays.shape[0], 3)
         if kind == "pbr":
             return self._pbr(obj, material, tint, rays, hits, settings, depth, weight, objects, stats)
         reflected = self._secondary(hits.point, reflect(d, n), obj, settings)

@@ -141,6 +141,17 @@ def build_objects(tracer, anchor, specs):
             continue
         if "center" in spec:
             center, radius = spec["center"], spec["radius"]
+        elif "near" in spec:  # next to an object built earlier: offset [right, up, towards the camera] in units
+            target = next(o for o in objects if getattr(o, "name", None) == spec["near"])  # of its radius
+            base = torch.as_tensor(target.center, dtype=torch.float32).cpu()
+            up = tracer.up.float().cpu()
+            right = F.normalize(anchor.right.float().cpu() - (anchor.right.float().cpu() @ up) * up, dim=0)
+            back = torch.linalg.cross(right, up)
+            if float(back @ (anchor.origin.float().cpu() - base)) < 0:
+                back = -back
+            off = spec.get("offset", [0.0, 2.0, 0.0])
+            center = (base + target.radius * (off[0] * right + off[1] * up + off[2] * back)).tolist()
+            radius = spec.get("radius_of_near", 0.06) * target.radius
         else:
             center, radius, _, moved = place_on_seabed(
                 tracer, anchor, spec["u"], spec["v"], spec["radius_fraction"], spec.get("lift", 1.0),
@@ -150,10 +161,34 @@ def build_objects(tracer, anchor, specs):
                 print(f"{spec.get('material', 'sphere')} sphere lifted {moved:.1f} radii out of the surface")
         sphere = Sphere(center, radius, spec.get("material", "mirror"), tuple(spec.get("tint", (1, 1, 1))),
                         spec.get("ior", 1.5 / 1.33), spec.get("kd", 1.0))
+        if sphere.material == "emissive":  # a lamp: power = its light at 1 world unit (no water) / the scene's
+            ambient = float(tracer.ambient_up().mean())  # light from above; spot: beam axis (world) or
+            sphere.power = spec.get("power", 10.0) * ambient  # "down_deg" tilt from straight down towards yaw
+            sphere.shadow = False
+            if "aim" in spec:  # spot aimed at an object built earlier (by name)
+                target = next(o for o in objects if getattr(o, "name", None) == spec["aim"])
+                axis = torch.as_tensor(target.center, dtype=torch.float32).cpu() - torch.tensor(center, dtype=torch.float32)
+                sphere.spot = tuple(F.normalize(axis.cpu(), dim=0).tolist())
+                sphere.cone_deg = spec.get("cone_deg", 20.0)
+                sphere.softness_deg = spec.get("softness_deg", 5.0)
+            elif "spot" in spec or "down_deg" in spec:
+                sphere.spot = tuple(spec["spot"]) if "spot" in spec else spot_axis(tracer, anchor, spec)
+                sphere.cone_deg = spec.get("cone_deg", 30.0)
+                sphere.softness_deg = spec.get("softness_deg", 8.0)
         objects.append(sphere)
         resolved.append(dict(type="sphere", center=center, radius=radius, material=sphere.material,
                              tint=list(sphere.tint), ior=sphere.ior, kd=sphere.kd))
     return objects, resolved
+
+
+def spot_axis(tracer, anchor, spec: dict) -> tuple:
+    """Beam axis of a spot lamp: straight down tilted by down_deg towards the anchor camera's right turned by
+    yaw_deg about up."""
+    from vis.mesh import frame
+    up = tracer.up.to(anchor.right.device).float()
+    x, _, _ = frame(up, anchor.right.float(), spec.get("yaw_deg", 0.0))
+    a = math.radians(spec.get("down_deg", 0.0))
+    return tuple((-up * math.cos(a) + x * math.sin(a)).tolist())
 
 
 def bubbles_at(spec: dict, resolved: list, up, t: float) -> list:
