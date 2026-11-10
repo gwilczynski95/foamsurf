@@ -1,0 +1,133 @@
+{
+ "anchor_view": "MTN_1529",
+ "objects": [
+  {
+   "type": "mesh",
+   "name": "fiat126p",
+   "manifest": "$FALCON/source/fiat_bicycle/manifest.json",
+   "u": 0.5,
+   "v": 0.62,
+   "span_fraction": 0.22,
+   "yaw_deg": 30,
+   "materials": {
+    "caroseria": {
+     "mode": "metal",
+     "rgb": [
+      0.95,
+      0.95,
+      0.97
+     ],
+     "kd": 0.92
+    }
+   }
+  },
+  {
+   "u": 0.3,
+   "v": 0.7,
+   "radius_fraction": 0.06,
+   "material": "glass",
+   "tint": [
+    0.98,
+    0.99,
+    1.0
+   ],
+   "ior": 1.128,
+   "height": 0.8
+  },
+  {
+   "type": "bubbles",
+   "source": "fiat126p",
+   "local": [
+    -0.12,
+    0.07,
+    0.5
+   ],
+   "direction": [
+    0,
+    -0.2,
+    1
+   ],
+   "rate": 16,
+   "life": 6,
+   "rise": 0.4,
+   "speed": 0.5,
+   "radius": [
+    0.01,
+    0.032
+   ],
+   "wobble": 0.03,
+   "drift": 0.06,
+   "seed": 1
+  },
+  {
+   "type": "mesh",
+   "name": "submarine",
+   "manifest": "assets/models/submarine_01/manifest.json",
+   "near": "fiat126p",
+   "offset": [
+    3.2,
+    1.8,
+    -3.0
+   ],
+   "size_of_near": 3.0,
+   "yaw_deg": 200
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.507,
+    0.2255,
+    0.031
+   ],
+   "radius_local": 0.006,
+   "material": "emissive",
+   "tint": [
+    1,
+    0.95,
+    0.85
+   ],
+   "power": 250,
+   "aim": "fiat126p",
+   "cone_deg": 12,
+   "softness_deg": 4
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.507,
+    0.2255,
+    -0.031
+   ],
+   "radius_local": 0.006,
+   "material": "emissive",
+   "tint": [
+    1,
+    0.95,
+    0.85
+   ],
+   "power": 250,
+   "aim": "fiat126p",
+   "cone_deg": 12,
+   "softness_deg": 4
+  }
+ ],
+ "frames": 150,
+ "fps": 30,
+ "path": {
+  "look_at_objects": 0.5,
+  "scale": 1.0,
+  "nearest": 7,
+  "zoom": 1.1,
+  "trim": [
+   0.3,
+   1.0
+  ]
+ },
+ "trace": {
+  "max_depth": 4,
+  "antialias": 8
+ },
+ "_note": "Chrome Fiat with bubbles, the glass sphere (the mirror sphere would sit right behind the submarine), and the research submarine (submarine-01.stl painted by vis/export_stl.py: python vis/export_stl.py submarine-01.stl assets/models/submarine_01 --hull_size 0.02 --stripes '[[-22,-15],[-6,1],[10,17]]') floating behind and right of the Fiat, its two headlights (12 deg spots) aimed at the car.",
+ "still_time": 6.0,
+ "start_time": 6.0
+}
