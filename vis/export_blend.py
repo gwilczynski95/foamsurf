@@ -1,6 +1,7 @@
 """Export a Poly Haven style .blend (meshes + a Principled BSDF with image textures) for vis/render_clip.py.
 
     blender -b MODEL.blend --python vis/export_blend.py -- OUT_DIR [--size 2048]
+    blender -b --python vis/export_blend.py -- OUT_DIR --import MODEL.gltf   (glTF / glb: imported first)
 
 Writes OUT_DIR/mesh.npz (vertices [V,3] y-up, faces [F,3], corner_uv [F,3,2], part [F] = material slot),
 OUT_DIR/<material>_{albedo,metal,rough}.png (textures resized to --size, metal/rough as greyscale) and
@@ -19,6 +20,9 @@ argv = sys.argv[sys.argv.index("--") + 1:]
 out = Path(argv[0])
 size = int(argv[argv.index("--size") + 1]) if "--size" in argv else 2048
 out.mkdir(parents=True, exist_ok=True)
+if "--import" in argv:  # a glTF / glb into an empty scene
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.gltf(filepath=argv[argv.index("--import") + 1])
 
 materials = []  # names, in part order
 vertices, faces, uvs, parts = [], [], [], []
@@ -55,33 +59,43 @@ np.savez_compressed(out / "mesh.npz", vertices=v, faces=np.concatenate(faces), c
                     part=np.concatenate(parts))
 
 
+CHANNELS = {"Red": 0, "R": 0, "Green": 1, "G": 1, "Blue": 2, "B": 2}
+
+
 def socket_image(node, socket_name):
-    """Image texture feeding a BSDF input (through normal-map / reroute nodes)."""
+    """Image texture feeding a BSDF input (through normal-map / reroute / separate-colour nodes) and the channel a
+    separate-colour node picks from it (glTF imports pack metal in blue and roughness in green), or None."""
     socket = node.inputs.get(socket_name)
+    channel = None
     while socket is not None and socket.is_linked:
-        src = socket.links[0].from_node
+        link = socket.links[0]
+        src = link.from_node
         if src.type == "TEX_IMAGE":
-            return src.image
+            return src.image, channel
+        if src.type in ("SEPARATE_COLOR", "SEPRGB"):
+            channel = CHANNELS.get(link.from_socket.name, channel)
         socket = next((s for s in src.inputs if s.is_linked), None)
-    return None
+    return None, None
 
 
-def save(image, path, grey):
+def save(image, path, grey, channel=None):
     image = image.copy()
     image.scale(size, size)
     pixels = np.array(image.pixels[:], dtype=np.float32).reshape(size, size, 4)[::-1]  # Blender: bottom row first
     if image.colorspace_settings.name not in ("sRGB",) and not grey:
         pixels[..., :3] = np.clip(pixels[..., :3], 0, 1) ** (1 / 2.2)
-    data = np.clip(pixels[..., :1] if grey else pixels[..., :3], 0, 1)
+    c = channel or 0
+    data = np.clip(pixels[..., c:c + 1] if grey else pixels[..., :3], 0, 1)
     from PIL import Image  # noqa: E402  (Blender's Python may lack PIL: fall back to Blender's writer)
     Image.fromarray((data[..., 0] if grey else data).__mul__(255).round().astype(np.uint8)).save(path)
 
 
-def save_blender(image, path, grey):
+def save_blender(image, path, grey, channel=None):
     image = image.copy()
     image.scale(size, size)
     if grey:
         px = np.array(image.pixels[:], dtype=np.float32).reshape(-1, 4)
+        px[:, 0] = px[:, channel or 0]
         px[:, 1] = px[:, 2] = px[:, 0]
         px[:, 3] = 1
         image.pixels[:] = px.reshape(-1)
@@ -96,14 +110,14 @@ for name in materials:
     bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None) if mat and mat.use_nodes else None
     maps = {}
     for key, socket, grey in (("albedo", "Base Color", False), ("metal", "Metallic", True), ("rough", "Roughness", True)):
-        image = socket_image(bsdf, socket) if bsdf else None
+        image, channel = socket_image(bsdf, socket) if bsdf else (None, None)
         if image is None:
             continue
         path = out / f"{name}_{key}.png"
         try:
-            save(image, path, grey)
+            save(image, path, grey, channel)
         except ImportError:
-            save_blender(image, path, grey)
+            save_blender(image, path, grey, channel)
         maps[key] = path.name
     parts_json.append({"id": name, "material": {"mode": "pbr", "rgb": [1, 1, 1], "maps": maps}})
 (out / "manifest.json").write_text(json.dumps({"format": "npz", "mesh": "mesh.npz", "parts": parts_json}, indent=1))

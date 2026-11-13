@@ -142,6 +142,10 @@ def build_objects(tracer, anchor, specs):
                 vertices, faces, part, materials, ids = mirror_panel(
                     spec.get("aspect", 0.6), spec.get("border", 0.06), spec.get("thickness", 0.04),
                     spec.get("lean_deg", 15.0), spec.get("mirror"), spec.get("frame"))
+            if spec.get("hide_parts"):  # e.g. a wreck's sails
+                keep = ~np.isin(part, [ids.index(i) for i in spec["hide_parts"]])
+                faces, part = faces[keep], part[keep]
+                uv = None if uv is None else uv[keep]
             vertices = tilt_local(vertices, spec.get("pitch_deg", 0.0), spec.get("roll_deg", 0.0))
             if "near" in spec:  # floating next to an object built earlier, see near_point
                 world, info = place_mesh_near(tracer, anchor, objects, spec, vertices)
@@ -232,10 +236,16 @@ def build_school(tracer, anchor, spec: dict):
     """A school of fish (or any small mesh) as one Mesh: `count` copies of spec["manifest"], each `length` world
     units long (+- size_jitter), scattered in an ellipsoid of half-axes `spread` = [along the heading, up, across]
     (world units) around the point at `distance` along the anchor ray through (u, v), keeping `gap` lengths apart.
-    All swim along the heading yaw_deg (from the anchor camera's right, about up) +- heading_jitter_deg, pitched by
+    `forward`: the mesh axis its head points along (x, -x, z, -z). All swim along the heading yaw_deg (from the anchor camera's right, about up) +- heading_jitter_deg, pitched by
     +- pitch_jitter_deg. Deterministic for a seed."""
     from vis.mesh import frame
-    vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
+    vertices, faces, part, materials, ids, uv = load_manifest(spec["manifest"], spec.get("materials"), with_uv=True)
+    forward = spec.get("forward", "x")  # the mesh's head direction: x, -x, z or -z
+    sign = -1.0 if forward.startswith("-") else 1.0
+    if forward.endswith("z"):
+        vertices = np.stack((sign * vertices[:, 2], vertices[:, 1], -sign * vertices[:, 0]), -1)
+    elif sign < 0:
+        vertices = vertices * np.array([-1.0, 1.0, -1.0], dtype=np.float32)
     vertices = vertices - 0.5 * (vertices.min(0) + vertices.max(0))
     device = tracer.trainer.device
     up = tracer.up.float().cpu()
@@ -266,8 +276,9 @@ def build_school(tracer, anchor, spec: dict):
         all_f.append(torch.as_tensor(faces) + k * len(vertices))
         all_p.append(torch.as_tensor(part))
     world = torch.cat(all_v).to(device)
+    corner_uv = None if uv is None else torch.as_tensor(uv).repeat(len(spots), 1, 1).to(device)
     mesh = Mesh(world, torch.cat(all_f).to(device), torch.cat(all_p).to(device), materials,
-                spec.get("name", "school"), ids)
+                spec.get("name", "school"), ids, corner_uv)
     return mesh, dict(center=center.tolist(), count=len(spots), heading=hx.tolist())
 
 

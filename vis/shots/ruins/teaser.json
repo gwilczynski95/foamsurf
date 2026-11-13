@@ -38,6 +38,29 @@
   },
   {
    "type": "mesh",
+   "name": "amphora",
+   "manifest": "assets/models/antique_ceramic_vase_01/manifest.json",
+   "u": 0.145,
+   "v": 0.83,
+   "span_fraction": 0.05,
+   "yaw_deg": 10
+  },
+  {
+   "type": "mesh",
+   "name": "wreck",
+   "manifest": "assets/models/dutch_ship_large_01/manifest.json",
+   "u": 0.22,
+   "v": 0.48,
+   "span_fraction": 0.4,
+   "yaw_deg": 60,
+   "roll_deg": 20,
+   "sink": 0.15,
+   "hide_parts": [
+    "dutch_ship_large_01_sails"
+   ]
+  },
+  {
+   "type": "mesh",
    "name": "submarine",
    "manifest": "assets/models/submarine_01/manifest.json",
    "u": 0.57,
@@ -60,13 +83,13 @@
     0.98,
     0.93
    ],
-   "power": 1800,
-   "cone_deg": 12,
-   "softness_deg": 4,
+   "power": 1300,
    "aim_uv": [
     0.46,
     0.8
-   ]
+   ],
+   "cone_deg": 12,
+   "softness_deg": 4
   },
   {
    "attach": "submarine",
@@ -82,13 +105,101 @@
     0.98,
     0.93
    ],
-   "power": 1800,
-   "cone_deg": 12,
-   "softness_deg": 4,
+   "power": 1300,
    "aim_uv": [
     0.46,
     0.8
-   ]
+   ],
+   "cone_deg": 12,
+   "softness_deg": 4
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.492,
+    0.192,
+    0.045
+   ],
+   "radius_local": 0.005,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.98,
+    0.93
+   ],
+   "power": 700,
+   "aim_uv": [
+    0.21,
+    0.86
+   ],
+   "cone_deg": 14,
+   "softness_deg": 5
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.492,
+    0.192,
+    -0.045
+   ],
+   "radius_local": 0.005,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.98,
+    0.93
+   ],
+   "power": 700,
+   "aim_uv": [
+    0.21,
+    0.86
+   ],
+   "cone_deg": 14,
+   "softness_deg": 5
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.487,
+    0.27,
+    0.038
+   ],
+   "radius_local": 0.005,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.98,
+    0.93
+   ],
+   "power": 1200,
+   "aim_uv": [
+    0.42,
+    0.68
+   ],
+   "cone_deg": 10,
+   "softness_deg": 3
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.487,
+    0.27,
+    -0.038
+   ],
+   "radius_local": 0.005,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.98,
+    0.93
+   ],
+   "power": 1200,
+   "aim_uv": [
+    0.42,
+    0.68
+   ],
+   "cone_deg": 10,
+   "softness_deg": 3
   },
   {
    "type": "bubbles",
@@ -116,106 +227,91 @@
    "seed": 2
   },
   {
-   "name": "temple_lamp",
-   "u": 0.37,
-   "v": 0.5,
-   "distance": 47,
-   "radius_fraction": 0.006,
+   "type": "mesh",
+   "name": "searchlight",
+   "manifest": "assets/models/portable_searchlight/manifest.json",
+   "u": 0.53,
+   "v": 0.78,
+   "span_fraction": 0.04,
+   "yaw_deg": 150
+  },
+  {
+   "attach": "searchlight",
+   "local": [
+    0.0,
+    0.326,
+    0.44
+   ],
+   "radius_local": 0.1,
    "material": "emissive",
    "tint": [
     1.0,
-    0.7,
-    0.38
+    0.97,
+    0.9
    ],
-   "power": 3000
+   "power": 2500,
+   "aim_uv": [
+    0.37,
+    0.55
+   ],
+   "cone_deg": 22,
+   "softness_deg": 6
   },
   {
    "type": "school",
-   "name": "sardines",
-   "manifest": "assets/models/fish_silver/manifest.json",
-   "u": 0.66,
-   "v": 0.4,
+   "name": "barramundi",
+   "manifest": "assets/models/barramundi/manifest.json",
+   "forward": "z",
+   "u": 0.74,
+   "v": 0.42,
    "distance": 17,
-   "count": 45,
-   "length": 0.45,
+   "count": 22,
+   "length": 0.6,
    "spread": [
-    2.6,
+    3.5,
     0.8,
     1.6
    ],
-   "yaw_deg": 170,
+   "yaw_deg": 165,
+   "gap": 1.3,
    "seed": 3
   },
   {
    "type": "school",
-   "name": "sardines_far",
-   "manifest": "assets/models/fish_silver/manifest.json",
-   "u": 0.15,
-   "v": 0.25,
-   "distance": 38,
-   "count": 60,
-   "length": 0.5,
+   "name": "barramundi_far",
+   "manifest": "assets/models/barramundi/manifest.json",
+   "forward": "z",
+   "u": 0.22,
+   "v": 0.27,
+   "distance": 36,
+   "count": 40,
+   "length": 1.0,
    "spread": [
-    5.0,
-    1.5,
-    3.0
+    7.0,
+    2.0,
+    4.0
    ],
    "yaw_deg": 150,
    "seed": 4
   },
   {
    "type": "school",
-   "name": "tangs",
-   "manifest": "assets/models/fish_tang/manifest.json",
-   "u": 0.8,
-   "v": 0.6,
-   "distance": 8,
-   "count": 4,
-   "length": 0.35,
-   "spread": [
-    0.9,
-    0.35,
-    0.6
-   ],
-   "yaw_deg": 15,
-   "gap": 1.8,
-   "seed": 5
-  },
-  {
-   "type": "school",
-   "name": "clowns",
-   "manifest": "assets/models/fish_clown/manifest.json",
-   "u": 0.27,
-   "v": 0.78,
+   "name": "barramundi_near",
+   "manifest": "assets/models/barramundi/manifest.json",
+   "forward": "z",
+   "u": 0.86,
+   "v": 0.5,
    "distance": 9,
    "count": 3,
-   "length": 0.32,
+   "length": 0.6,
    "spread": [
-    0.5,
-    0.2,
-    0.3
-   ],
-   "yaw_deg": -30,
-   "gap": 1.6,
-   "seed": 7
-  },
-  {
-   "type": "school",
-   "name": "tangs_arch",
-   "manifest": "assets/models/fish_tang/manifest.json",
-   "u": 0.1,
-   "v": 0.45,
-   "distance": 15,
-   "count": 6,
-   "length": 0.4,
-   "spread": [
-    1.6,
-    0.6,
+    1.2,
+    0.4,
     0.8
    ],
-   "yaw_deg": -10,
-   "gap": 1.8,
-   "seed": 11
+   "yaw_deg": 20,
+   "gap": 1.5,
+   "seed": 5
   }
  ],
  "trace": {
@@ -225,5 +321,5 @@
   "lamp_samples": 32
  },
  "still_time": 4.0,
- "_note": "Teaser of the synthetic ruins (C16 V1): glass sphere (refraction) and chrome sphere (reflection) on the plaza, the research submarine floating above with its headlights aimed at the floor behind the glass sphere (beams, lit spot, its bubbles), a warm lamp inside the temple, schools of procedural fish (vis/make_fish.py) at 8-38 m showing the water veil, a treasure chest. lamp_g 0.75: with 0.9 the beams seen from the side vanish."
+ "_note": "Teaser of the synthetic ruins (C16 V1): glass sphere (refraction) and chrome sphere (reflection) on the plaza; the research submarine with six lamps (headlights on the floor behind the glass sphere, a lower pair on the treasure chest, an upper pair towards the temple steps) and its bubbles; a portable searchlight (Poly Haven) on the plaza floodlighting the temple; a Dutch ship wreck (Poly Haven, sails hidden) in the haze behind the arch; amphora and chest; schools of barramundi (Khronos glTF sample, CC0) at 8-36 m. Models: python vis/fetch_polyhaven.py dutch_ship_large_01 portable_searchlight antique_ceramic_vase_01; barramundi: export_blend.py --import. lamp_g 0.75: with 0.9 the beams seen from the side vanish."
 }
