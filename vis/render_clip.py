@@ -4,6 +4,8 @@
 
 Shot file (JSON):
   {"anchor_view": "MTN_1296",                 # test view used to place the objects
+   "camera": "poses.json",                    # or a pose file (render.py's format, relative to the shot file):
+                                              # its first camera is the anchor (any size)
    "objects": [{"u": 0.40, "v": 0.72, "radius_fraction": 0.07, "material": "mirror", "tint": [...],
                 "height": 0.0,                # radii above the surface (floating); or "depth_fraction": 0.5 puts
                                               # the centre on the pixel's ray, at half the surface distance;
@@ -11,6 +13,11 @@ Shot file (JSON):
                 "clear": true},               # lifted out of the reef if it would cut into it
                {"type": "mesh", "manifest": "$FALCON/source/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
                 "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "pitch_deg": 0, "materials": {"caroseria": {"mode": ...}}},
+               {"type": "mesh", ..., "u": .., "v": .., "distance": 12, "size": 3},  # floating in the water:
+                                              # bbox centre 12 units along the (u, v) ray, 3 units long
+               {"type": "school", "manifest": "assets/models/fish_silver/manifest.json", "u": .., "v": ..,
+                "distance": 14, "count": 40, "length": 0.3, "spread": [2.5, 0.8, 1.5], "yaw_deg": 160},  # see
+                                              # build_school
                {"type": "mirror_panel", "u": .., "v": .., "span_fraction": 0.2, "yaw_deg": 0, "lean_deg": 15,
                 "aspect": 0.6},              # standing framed mirror (FALCON's), pane facing the anchor camera
                {"type": "bubbles", "source": "fiat126p", "local": [x, y, z],  # gas bubbles streaming from a point
@@ -121,6 +128,11 @@ def build_objects(tracer, anchor, specs):
         if kind == "bubbles":  # per frame, see bubbles_at
             resolved.append(dict(spec))
             continue
+        if kind == "school":  # many copies of one small mesh merged into one object, see build_school
+            mesh, info = build_school(tracer, anchor, spec)
+            objects.append(mesh)
+            resolved.append(dict(spec, placement=info))
+            continue
         if kind in ("mesh", "mirror_panel"):
             uv = None
             if kind == "mesh":
@@ -133,6 +145,8 @@ def build_objects(tracer, anchor, specs):
             vertices = tilt_local(vertices, spec.get("pitch_deg", 0.0), spec.get("roll_deg", 0.0))
             if "near" in spec:  # floating next to an object built earlier, see near_point
                 world, info = place_mesh_near(tracer, anchor, objects, spec, vertices)
+            elif "distance" in spec:  # in the open water, see place_mesh_in_water
+                world, info = place_mesh_in_water(tracer, anchor, spec, vertices)
             else:
                 world, info = place_mesh_on_seabed(tracer, anchor, spec["u"], spec["v"], spec["span_fraction"],
                                                    vertices, spec.get("yaw_deg", 0.0), spec.get("sink", 0.0))
@@ -163,6 +177,7 @@ def build_objects(tracer, anchor, specs):
                 print(f"{spec.get('material', 'sphere')} sphere lifted {moved:.1f} radii out of the surface")
         sphere = Sphere(center, radius, spec.get("material", "mirror"), tuple(spec.get("tint", (1, 1, 1))),
                         spec.get("ior", 1.5 / 1.33), spec.get("kd", 1.0))
+        sphere.name = spec.get("name")  # a target for "aim" and "near"
         if sphere.material == "emissive":  # a lamp: power = its light at 1 world unit (no water) / the scene's
             ambient = float(tracer.ambient_up().mean())  # light from above; spot: beam axis (world) or
             sphere.power = spec.get("power", 10.0) * ambient  # "down_deg" tilt from straight down towards yaw
@@ -170,6 +185,11 @@ def build_objects(tracer, anchor, specs):
             if "aim_local" in spec:  # spot along a direction in the attached mesh's frame
                 info = next(r["placement"] for r in resolved if r.get("name") == spec["attach"])
                 axis = torch.tensor(spec["aim_local"], dtype=torch.float32) @ torch.tensor(info["axes"])
+                sphere.spot = tuple(F.normalize(axis, dim=0).tolist())
+                sphere.cone_deg = spec.get("cone_deg", 20.0)
+                sphere.softness_deg = spec.get("softness_deg", 5.0)
+            elif "aim_uv" in spec:  # spot aimed at the surface seen at image fraction (u, v) of the anchor
+                axis = seabed_point(tracer, anchor, *spec["aim_uv"]) - torch.tensor(center, dtype=torch.float32)
                 sphere.spot = tuple(F.normalize(axis, dim=0).tolist())
                 sphere.cone_deg = spec.get("cone_deg", 20.0)
                 sphere.softness_deg = spec.get("softness_deg", 5.0)
@@ -187,6 +207,68 @@ def build_objects(tracer, anchor, specs):
         resolved.append(dict(type="sphere", center=center, radius=radius, material=sphere.material,
                              tint=list(sphere.tint), ior=sphere.ior, kd=sphere.kd))
     return objects, resolved
+
+
+def anchor_point(anchor, u: float, v: float, distance: float) -> torch.Tensor:
+    """The point at `distance` world units along the anchor camera's ray through image fraction (u, v) (cpu)."""
+    from evaluation.evaluator import _rays
+    grid = _rays(anchor)
+    h, w = grid.shape[:2]
+    ray = grid[min(int(v * h), h - 1), min(int(u * w), w - 1)].float().cpu()
+    return ray[:3] + distance * F.normalize(ray[3:], dim=0)
+
+
+def seabed_point(tracer, anchor, u: float, v: float) -> torch.Tensor:
+    """The first surface point seen at image fraction (u, v) of the anchor camera (cpu)."""
+    from evaluation.evaluator import _rays
+    grid = _rays(anchor)
+    h, w = grid.shape[:2]
+    ray = grid[min(int(v * h), h - 1), min(int(u * w), w - 1)][None].contiguous()
+    depth = tracer.renderer.render_gaussians(ray, tracer.gaussians, background=(0.0, 0.0, 0.0)).surface_depth
+    return (ray[0, :3] + float(depth.reshape(-1)[0]) * ray[0, 3:]).float().cpu()
+
+
+def build_school(tracer, anchor, spec: dict):
+    """A school of fish (or any small mesh) as one Mesh: `count` copies of spec["manifest"], each `length` world
+    units long (+- size_jitter), scattered in an ellipsoid of half-axes `spread` = [along the heading, up, across]
+    (world units) around the point at `distance` along the anchor ray through (u, v), keeping `gap` lengths apart.
+    All swim along the heading yaw_deg (from the anchor camera's right, about up) +- heading_jitter_deg, pitched by
+    +- pitch_jitter_deg. Deterministic for a seed."""
+    from vis.mesh import frame
+    vertices, faces, part, materials, ids = load_manifest(spec["manifest"], spec.get("materials"))
+    vertices = vertices - 0.5 * (vertices.min(0) + vertices.max(0))
+    device = tracer.trainer.device
+    up = tracer.up.float().cpu()
+    hx, hy, hz = frame(up, anchor.right.float().cpu(), spec.get("yaw_deg", 0.0))
+    center = anchor_point(anchor, spec["u"], spec["v"], spec["distance"])
+    rng = np.random.default_rng(spec.get("seed", 0))
+    length, spread = spec.get("length", 0.25), np.array(spec.get("spread", [2.0, 0.6, 1.0]))
+    gap = spec.get("gap", 1.1) * length
+    spots = []
+    for _ in range(50 * spec.get("count", 20)):
+        if len(spots) == spec.get("count", 20):
+            break
+        p = rng.normal(size=3)
+        p = p / max(1.0, float(np.linalg.norm(p))) * spread * rng.uniform() ** (1 / 3)
+        if all(np.linalg.norm(p - q) > gap for q in spots):
+            spots.append(p)
+    all_v, all_f, all_p = [], [], []
+    for k, p in enumerate(spots):
+        yaw = math.radians(rng.normal() * spec.get("heading_jitter_deg", 10.0))
+        pitch = math.radians(rng.normal() * spec.get("pitch_jitter_deg", 6.0))
+        size = length * (1 + spec.get("size_jitter", 0.15) * rng.normal())
+        fx = math.cos(pitch) * (math.cos(yaw) * hx + math.sin(yaw) * hz) + math.sin(pitch) * hy
+        fz = -math.sin(yaw) * hx + math.cos(yaw) * hz
+        fy = torch.linalg.cross(fz, fx)
+        axes = torch.stack((fx, fy, fz))
+        position = center + float(p[0]) * hx + float(p[1]) * hy + float(p[2]) * hz
+        all_v.append(position + size * torch.as_tensor(vertices) @ axes)
+        all_f.append(torch.as_tensor(faces) + k * len(vertices))
+        all_p.append(torch.as_tensor(part))
+    world = torch.cat(all_v).to(device)
+    mesh = Mesh(world, torch.cat(all_f).to(device), torch.cat(all_p).to(device), materials,
+                spec.get("name", "school"), ids)
+    return mesh, dict(center=center.tolist(), count=len(spots), heading=hx.tolist())
 
 
 def near_point(tracer, anchor, objects, spec: dict):
@@ -220,6 +302,23 @@ def place_mesh_near(tracer, anchor, objects, spec: dict, vertices):
     world = origin + size * local @ axes
     return world, dict(anchor=center.tolist(), size=size, origin=origin.tolist(), up=by.tolist(),
                        axes=axes.tolist())
+
+
+def place_mesh_in_water(tracer, anchor, spec: dict, vertices):
+    """World vertices of a normalized mesh floating upright (turned by yaw_deg) with its bounding-box centre at
+    `distance` world units along the anchor ray through (u, v) and its largest extent `size` world units. Same
+    info as place_mesh_on_seabed."""
+    from vis.mesh import frame
+    center = anchor_point(anchor, spec["u"], spec["v"], spec["distance"])
+    device = tracer.trainer.device
+    size = spec["size"]
+    bx, by, bz = frame(tracer.up.to(device).float(), anchor.right.to(device).float(), spec.get("yaw_deg", 0.0))
+    axes = torch.stack((bx, by, bz))
+    local = torch.as_tensor(vertices, device=device)
+    middle = 0.5 * (local.min(0).values + local.max(0).values)
+    origin = center.to(device) - size * middle @ axes
+    return origin + size * local @ axes, dict(anchor=center.tolist(), size=size, origin=origin.tolist(),
+                                              up=by.tolist(), axes=axes.tolist())
 
 
 def spot_axis(tracer, anchor, spec: dict) -> tuple:
@@ -280,6 +379,18 @@ def frame_objects(objects: list, specs: list, resolved: list, up, t: float) -> l
     return objects + extra
 
 
+def _raise_ray_buffer(rays: int):
+    """The renderer's ray buffer is sized for the training images; a larger camera needs a larger one."""
+    from training.config import ExperimentConfig
+    load = ExperimentConfig.load.__func__
+
+    def patched(cls, path, *a, **k):
+        config = load(cls, path, *a, **k)
+        config.optimization.rays_per_batch = max(config.optimization.rays_per_batch, rays)
+        return config
+    ExperimentConfig.load = classmethod(patched)
+
+
 def save_png(path: Path, image: torch.Tensor):
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray((image.clamp(0, 1).cpu().numpy() * 255 + 0.5).astype(np.uint8)).save(path)
@@ -299,8 +410,16 @@ def main():
                         help="render only these frames of the path (stills at the clip's camera and time), no video")
     args = parser.parse_args()
     shot = json.loads(args.shot.read_text())
+    record = None
+    if "camera" in shot:  # a pose file in render.py's format (e.g. a teaser camera): its first camera
+        record = json.loads((args.shot.parent / shot["camera"]).read_text())
+        record = record[0] if isinstance(record, list) else record
+        _raise_ray_buffer(int(record["width"]) * int(record["height"]))
     trainer = render.load_run(args.run.resolve(), "last", args.scene)
-    anchor = {c.name: c for c in trainer.dataset.train + trainer.dataset.test}[shot["anchor_view"]]
+    if record is not None:
+        anchor = render.camera_from_record(record, trainer.device)
+    else:
+        anchor = {c.name: c for c in trainer.dataset.train + trainer.dataset.test}[shot["anchor_view"]]
     tracer = SceneTracer(trainer, anchor.origin)
 
     objects, resolved_objects = build_objects(tracer, anchor, shot["objects"])

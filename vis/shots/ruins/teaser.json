@@ -1,0 +1,229 @@
+{
+ "camera": "teaser_camera.json",
+ "objects": [
+  {
+   "name": "glass",
+   "u": 0.43,
+   "v": 0.88,
+   "radius_fraction": 0.055,
+   "material": "glass",
+   "tint": [
+    0.98,
+    0.99,
+    1.0
+   ],
+   "ior": 1.128
+  },
+  {
+   "name": "chrome",
+   "u": 0.63,
+   "v": 0.9,
+   "radius_fraction": 0.06,
+   "material": "mirror",
+   "tint": [
+    0.95,
+    0.95,
+    0.97
+   ]
+  },
+  {
+   "type": "mesh",
+   "name": "chest",
+   "manifest": "assets/models/treasure_chest/manifest.json",
+   "u": 0.21,
+   "v": 0.88,
+   "span_fraction": 0.1,
+   "yaw_deg": 25,
+   "sink": 0.0
+  },
+  {
+   "type": "mesh",
+   "name": "submarine",
+   "manifest": "assets/models/submarine_01/manifest.json",
+   "u": 0.57,
+   "v": 0.24,
+   "distance": 17,
+   "size": 4.5,
+   "yaw_deg": 155
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.507,
+    0.2255,
+    0.031
+   ],
+   "radius_local": 0.006,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.98,
+    0.93
+   ],
+   "power": 1800,
+   "cone_deg": 12,
+   "softness_deg": 4,
+   "aim_uv": [
+    0.46,
+    0.8
+   ]
+  },
+  {
+   "attach": "submarine",
+   "local": [
+    0.507,
+    0.2255,
+    -0.031
+   ],
+   "radius_local": 0.006,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.98,
+    0.93
+   ],
+   "power": 1800,
+   "cone_deg": 12,
+   "softness_deg": 4,
+   "aim_uv": [
+    0.46,
+    0.8
+   ]
+  },
+  {
+   "type": "bubbles",
+   "source": "submarine",
+   "local": [
+    -0.48,
+    0.3,
+    0.0
+   ],
+   "direction": [
+    -1,
+    0.4,
+    0
+   ],
+   "rate": 18,
+   "life": 5,
+   "rise": 0.12,
+   "speed": 0.2,
+   "radius": [
+    0.004,
+    0.012
+   ],
+   "wobble": 0.01,
+   "drift": 0.02,
+   "seed": 2
+  },
+  {
+   "name": "temple_lamp",
+   "u": 0.37,
+   "v": 0.5,
+   "distance": 47,
+   "radius_fraction": 0.006,
+   "material": "emissive",
+   "tint": [
+    1.0,
+    0.7,
+    0.38
+   ],
+   "power": 3000
+  },
+  {
+   "type": "school",
+   "name": "sardines",
+   "manifest": "assets/models/fish_silver/manifest.json",
+   "u": 0.66,
+   "v": 0.4,
+   "distance": 17,
+   "count": 45,
+   "length": 0.45,
+   "spread": [
+    2.6,
+    0.8,
+    1.6
+   ],
+   "yaw_deg": 170,
+   "seed": 3
+  },
+  {
+   "type": "school",
+   "name": "sardines_far",
+   "manifest": "assets/models/fish_silver/manifest.json",
+   "u": 0.15,
+   "v": 0.25,
+   "distance": 38,
+   "count": 60,
+   "length": 0.5,
+   "spread": [
+    5.0,
+    1.5,
+    3.0
+   ],
+   "yaw_deg": 150,
+   "seed": 4
+  },
+  {
+   "type": "school",
+   "name": "tangs",
+   "manifest": "assets/models/fish_tang/manifest.json",
+   "u": 0.8,
+   "v": 0.6,
+   "distance": 8,
+   "count": 4,
+   "length": 0.35,
+   "spread": [
+    0.9,
+    0.35,
+    0.6
+   ],
+   "yaw_deg": 15,
+   "gap": 1.8,
+   "seed": 5
+  },
+  {
+   "type": "school",
+   "name": "clowns",
+   "manifest": "assets/models/fish_clown/manifest.json",
+   "u": 0.27,
+   "v": 0.78,
+   "distance": 9,
+   "count": 3,
+   "length": 0.32,
+   "spread": [
+    0.5,
+    0.2,
+    0.3
+   ],
+   "yaw_deg": -30,
+   "gap": 1.6,
+   "seed": 7
+  },
+  {
+   "type": "school",
+   "name": "tangs_arch",
+   "manifest": "assets/models/fish_tang/manifest.json",
+   "u": 0.1,
+   "v": 0.45,
+   "distance": 15,
+   "count": 6,
+   "length": 0.4,
+   "spread": [
+    1.6,
+    0.6,
+    0.8
+   ],
+   "yaw_deg": -10,
+   "gap": 1.8,
+   "seed": 11
+  }
+ ],
+ "trace": {
+  "max_depth": 4,
+  "antialias": 8,
+  "lamp_g": 0.75,
+  "lamp_samples": 32
+ },
+ "still_time": 4.0,
+ "_note": "Teaser of the synthetic ruins (C16 V1): glass sphere (refraction) and chrome sphere (reflection) on the plaza, the research submarine floating above with its headlights aimed at the floor behind the glass sphere (beams, lit spot, its bubbles), a warm lamp inside the temple, schools of procedural fish (vis/make_fish.py) at 8-38 m showing the water veil, a treasure chest. lamp_g 0.75: with 0.9 the beams seen from the side vanish."
+}
