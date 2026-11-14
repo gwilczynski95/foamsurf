@@ -104,6 +104,56 @@ Tryby (`--modes`, PNG w `OUT/<tryb>/<widok>.png`, z `--npy` także tablice float
 Plik póz: lista kamer w układzie świata zbioru danych (COLMAP), format jak w `--export-cameras`:
 `{"name", "origin", "right", "down", "forward", "width", "height", "fx", "fy", "cx", "cy"}`.
 
+## Transfer stylu
+
+Stylizacja wytrenowanego runu obrazem (albo opisem tekstowym), **osobno dla każdej reprezentacji**: Gaussów
+(powierzchnia: dno, rafa) albo komórek Voronoi (woda). Strata jak w FlaRe / CLIPGaussian (`style_transfer.py`):
+kierunkowa CLIP (zmiana renderu względem renderu przed stylizacją ma iść w kierunku styl − „a Photo”), CLIP na 64
+wycinkach 128 px z losową perspektywą, treść VGG19 (conv4_2, conv5_2). 5000 kroków, w każdym jedna losowa kamera
+zbioru danych.
+
+Dodatkowe pakiety (tylko do stylizacji; wagi CLIP ViT-B/32 i VGG19 pobierają się przy pierwszym uruchomieniu):
+
+```bash
+pip install torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+pip install ftfy regex git+https://github.com/openai/CLIP.git
+```
+
+Styl to dowolny obraz (`--style-image`, JPG/PNG) albo tekst (`--style-prompt "a painting by Van Gogh"`):
+
+```bash
+# powierzchnia (Gaussy), np. ogień
+python stylize.py --run outputs/iui3 --target gaussians --style-image style/fire.jpg --out outputs/iui3_fire
+# woda (komórki Voronoi), np. Gwiaździsta noc
+python stylize.py --run outputs/iui3 --target voronoi --style-image style/starry_night.jpg --out outputs/iui3_starry
+# obie naraz: Gaussy z pierwszego runu, woda z drugiego (oba stylizowane z tego samego runu)
+python compose_style.py --gaussians outputs/iui3_fire --medium outputs/iui3_starry --out outputs/iui3_fire_starry
+python render.py --run outputs/iui3_fire_starry --views all --modes full,gaussians,voronoi
+```
+
+Wynik każdego kroku to zwykły katalog runu (`joint/config.yaml`, `joint/checkpoints/last.pt`), który wczytują
+`render.py` i sam `stylize.py` (np. drugi styl na już stylizowanym runie). W `OUT/style/` są
+`losses.csv`, `style_config.json` i podglądy (`previews/<widok>_{full,<cel>}_<krok>.png`). Jak przy `render.py`,
+`--scene` podaje zbiór danych, jeśli nie leży w ścieżce zapisanej w runie.
+
+| `--target` | strata liczona na | trenowane | stałe |
+|---|---|---|---|
+| `gaussians` | same Gaussy na czarnym tle (tryb `gaussians`) | kolor (DC SH), geometria z małym lr | woda; kontur rafy (strata tła), kolor ≤ 1 |
+| `voronoi` | sam ośrodek (tryb `voronoi`) | kolor komórek, rozpraszanie wsteczne, położenie komórek | tłumienie światła bezpośredniego, Gaussy |
+
+Ustawienia domyślne to nasz baseline (IUI3: `fire` na Gaussach, `starry_night` na wodzie), ok. 18–19 min na cel na
+RTX 3090, ok. 13 GB pamięci GPU:
+
+- **Gaussy**: krok koloru `--color-lr 0.015·C0` (1.5× krok CLIPGaussian; większy daje mocniejszy styl i więcej
+  szumu barw), kolor każdego kanału ≤ 1 (`--color-cap`), gradient koloru uśredniany z 8 najbliższymi Gaussami
+  (`--color-grad-smooth`). Bez tych dwóch w jasnych miejscach zostaje mozaika różowych i turkusowych Gaussów;
+  `--no-geometry` trzyma geometrię, `--sh-rest train` uczy też wyższe pasma SH.
+- **Woda**: każda komórka dzielona na 27 (`--medium-split`, 5000 → 135 tys.), bo 5000 komórek uśrednia wzór wzdłuż
+  promieni; kolor (`--medium-color-lr 0.04·C0`), rozpraszanie wsteczne (`--medium-backscatter-lr 1e-2`, jasne
+  plamy) i położenie komórek (`--medium-sites-lr 1e-3`, triangulacja co `--topology-interval 25` kroków).
+- Wspólne: `--steps`, `--views all|train`, wagi strat `--lambda-dir 5 --lambda-patch 90 --lambda-content 0.8`
+  (`--lambda-bg`: 1000 dla Gaussów, 0 dla wody), `--save-every` (podglądy), `--seed`.
+
 ## Konfiguracje
 
 - `configs/seathru.yaml` — metoda na SeaThru-NeRF. Każde ustawienie z komentarzem; liczby to wartości, które
@@ -131,4 +181,6 @@ Plik póz: lista kamer w układzie świata zbioru danych (COLMAP), format jak w 
 | `training/water_*.py`, `camera_isp.py`, `oceansplat.py` | światło wody, model kamery, straty OceanSplat |
 | `evaluation/evaluator.py` | metryki i rendery testowe |
 | `train.py`, `render.py` | punkty wejścia |
+| `stylize.py`, `compose_style.py` | transfer stylu Gaussów albo wody; złożenie dwóch stylizacji w jeden run |
+| `style_transfer.py` | strata stylu FlaRe / CLIPGaussian (CLIP kierunkowa i na wycinkach, treść VGG19) |
 | `scripts/fps_bench.py` | pomiar szybkości renderu wytrenowanego runu |
