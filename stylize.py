@@ -89,6 +89,9 @@ def subdivide_medium(trainer, factor: int, jitter: float, seed: int) -> None:
     trainer.model.medium = VoronoiMediumModel.from_checkpoint(state, metadata, medium.bbox_min, medium.bbox_max,
                                                               trainer.device)
     trainer.config.model.medium_points = int(new_sites.shape[0])
+    adaptation = trainer.config.voronoi_adaptation  # config validation: medium_points <= the adaptation budget
+    if adaptation.max_points is not None:
+        adaptation.max_points = max(adaptation.max_points, int(new_sites.shape[0]))
     trainer.topology = VoronoiTopologyController(trainer.model.medium)
     trainer.topology.synchronize_renderer(trainer.renderer, trainer.model.medium)
     print(f"medium split x{factor}: {sites.shape[0]} -> {new_sites.shape[0]} cells", flush=True)

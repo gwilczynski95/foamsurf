@@ -154,6 +154,59 @@ RTX 3090, ok. 13 GB pamięci GPU:
 - Wspólne: `--steps`, `--views all|train`, wagi strat `--lambda-dir 5 --lambda-patch 90 --lambda-content 0.8`
   (`--lambda-bg`: 1000 dla Gaussów, 0 dla wody), `--save-every` (podglądy), `--seed`.
 
+Wskazówki:
+
+- **Jasny styl na wodzie** (np. ogień): strata widzi samą wodę, bez rafy. Z trenowanym rozpraszaniem woda przed
+  rafą robi się nieprzezroczysta i zasłania dno. `--medium-backscatter-lr 0` trzyma jej nieprzezroczystość z
+  rekonstrukcji, a styl zmienia tylko kolor i rozkład komórek.
+- **Obraz a prompt:** obraz z czarnym tłem (`fire.jpg`) zwykle ściemnia wodę. Prompt tekstowy (`"bright orange fire
+  flames"`) daje kolor bez tej czerni.
+- **Pamięć:** zdjęcia 1794×1188 (Curaçao, Panama) przy `--target gaussians` zajmują prawie całą kartę 24 GB. Na
+  współdzielonym GPU OptiX może nie dostać pamięci („Caught an unknown exception”).
+
+## Edycje
+
+`edit_scene.py` edytuje wytrenowany (albo stylizowany) run **bez ponownego trenowania**, osobno powierzchnię albo
+wodę:
+
+- każda edycja zaczyna od wczytanego modelu;
+- wynik renderuje się z jednej kamery;
+- z `--save` edycja jest zapisywana jako zwykły run dla `render.py`, z parametrami edycji w `edit.json`.
+
+```bash
+python edit_scene.py --run outputs/iui3 --view MTN_5911 --edits bulge,relief,bend,clear,murky,haze,plume \
+    --out outputs/iui3_edits --save outputs/iui3_edited
+python edit_scene.py --run outputs/iui3 --view MTN_5911 --edits transplant --transplant-from outputs/curasao \
+    --out outputs/iui3_edits --save outputs/iui3_edited
+python render.py --run outputs/iui3_edited/bulge --views test --modes full,gaussians,voronoi
+```
+
+Edycje są zdefiniowane w układzie dopasowanym do rafy widocznej z `--view`:
+
+- normalna płaszczyzny najmniejszych kwadratów przez widoczne punkty powierzchni;
+- dwie osie poziome;
+- skala `L`: zasięg widocznej rafy.
+
+| edycja | co robi |
+|---|---|
+| `waves`, `ripple`, `twist` | wydmy, koncentryczna fala, wir wokół normalnej |
+| `bulge`, `relief`, `bend` | wzgórze pod rafą, rzeźba terenu ×2.5, dno zwinięte w rynnę |
+| `clone` | kopia fragmentu rafy spod jednego piksela w miejsce pod drugim (`--clone`) |
+| `clear`, `murky` | tłumienie i rozpraszanie wody ×0.25 / ×2.5 |
+| `turquoise`, `green`, `redtide` | inny typ wody: odcień koloru (z zachowaną jasnością komórek) i widmo tłumienia |
+| `transplant` | statystyki wody innego runu (`--transplant-from`), przestrzenny rozkład zostaje |
+| `haze` | gęsta mgła przy dnie (komórki dzielone ×8) |
+| `plume` | pióropusz osadu nad punktem `--plume-at` (150 tys. komórek dodanych lokalnie) |
+
+Deformacje:
+
+- środki Gaussów przechodzą przez odwzorowanie;
+- osie styczne i skale idą przez jego jakobian (różnice centralne + SVD), więc kowariancja surfela to `J Σ Jᵀ`;
+- kolor, krycie i woda zostają bez zmian.
+
+Edycje wody zmieniają tylko współczynniki i kolor komórek. Wzory i stałe są w docstringu `edit_scene.py`.
+Deformacja odsłania miejsca, których kamery nie widziały (zbocza, tył skał); tam nie ma Gaussów i prześwituje woda.
+
 ## Konfiguracje
 
 - `configs/seathru.yaml` — metoda na SeaThru-NeRF. Każde ustawienie z komentarzem; liczby to wartości, które
@@ -183,4 +236,5 @@ RTX 3090, ok. 13 GB pamięci GPU:
 | `train.py`, `render.py` | punkty wejścia |
 | `stylize.py`, `compose_style.py` | transfer stylu Gaussów albo wody; złożenie dwóch stylizacji w jeden run |
 | `style_transfer.py` | strata stylu FlaRe / CLIPGaussian (CLIP kierunkowa i na wycinkach, treść VGG19) |
+| `edit_scene.py` | edycje bez treningu: deformacje Gaussów (z jakobianem), zmiany wody (współczynniki, kolor, lokalne komórki) |
 | `scripts/fps_bench.py` | pomiar szybkości renderu wytrenowanego runu |
