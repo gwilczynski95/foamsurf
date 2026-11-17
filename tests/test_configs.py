@@ -7,14 +7,14 @@ import sys
 import pytest
 import yaml
 
-from helpers import IUI3, ROOT, comparable
+from helpers import IUI3, LEGO, ROOT, comparable, requires_lego
 from train import load_iui3_source, resolve_iui3
 from training.config import ExperimentConfig
 from training.losses import MediumFixConfig
 
 
 @pytest.mark.parametrize("config, snapshot", [
-    ("configs/seathru.yaml", "seathru_resolved.json"),      # SeaThru default, sweeps 561669 / 562266 / 562267
+    ("configs/seathru.yaml", "seathru_resolved.json"),      # SeaThru default, sweeps 561669 / 562266 (not _cov09 562267)
     ("configs/garden_fog.yaml", "garden_fog_resolved.json"),  # foggy Garden, sweep 555613
 ])
 def test_configs_are_the_reported_runs(config, snapshot, tmp_path):
@@ -25,12 +25,31 @@ def test_configs_are_the_reported_runs(config, snapshot, tmp_path):
     assert not differences, differences
 
 
+def test_synthetic_config_is_seathru_without_the_colmap_water_fit(tmp_path):
+    seathru = comparable(resolve_iui3(ROOT / "configs/seathru.yaml", tmp_path / "a"))
+    synthetic = comparable(resolve_iui3(ROOT / "configs/synthetic.yaml", tmp_path / "b"))
+    differences = {k: (seathru.get(k), synthetic.get(k)) for k in set(seathru) | set(synthetic)
+                   if seathru.get(k) != synthetic.get(k)}
+    assert differences == {"joint.model.medium_initial_water_fit": ("coefficients", "off"),
+                           "medium_fix.surface_coverage_weight": (0.003, 0.03)}  # as the synthetic runs were trained
+
+
+@requires_lego
+def test_command_line_accepts_a_blender_scene(tmp_path):
+    scene = LEGO / "lego_both"
+    result = subprocess.run([sys.executable, "train.py", "--scene", str(scene), "--out", str(tmp_path / "a"),
+                             "--config", "configs/synthetic.yaml", "--dry-run"],
+                            cwd=ROOT, capture_output=True, text=True, check=True)
+    m = json.loads(result.stdout)
+    assert m["joint"]["dataset"]["source_path"] == str(scene) and m["joint"]["model"]["medium_initial_water_fit"] == "off"
+
+
 def test_values_in_the_config_are_the_values_that_run(tmp_path):
     m = resolve_iui3(ROOT / "configs/seathru.yaml", tmp_path / "run")
     adaptation, optimization = m["joint"]["gaussian_adaptation"], m["joint"]["optimization"]
     assert optimization["iterations"] == 20000 and adaptation["opacity_reset_interval"] == 500  # no rescaling
     assert m["joint"]["model"]["gaussian_rgb_scale"] == 1.5 and optimization["water_phase"] is True
-    assert m["medium_fix"]["surface_coverage_weight"] == 0.03 and m["medium_fix"]["surface_coverage_threshold"] == 0.9
+    assert m["medium_fix"]["surface_coverage_weight"] == 0.003 and m["medium_fix"]["surface_coverage_threshold"] == 0.9
 
 
 def test_variant_chain_applies_overrides_base_first(tmp_path):

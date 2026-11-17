@@ -5,7 +5,8 @@
     python train.py --scene /data/foggy_garden/garden_easy --out outputs/garden_easy --config configs/garden_fog.yaml
     python train.py ... --seed 43 --wandb my_project --set joint.optimization.iterations=10000
 
-The scene is a COLMAP dataset (images/ and sparse/0/). Every 500 iterations and at the end the test views
+The scene is a COLMAP dataset (images/ and sparse/0/) or a Blender dataset (transforms_train.json; use
+configs/synthetic.yaml, which has no COLMAP water fit). Every 500 iterations and at the end the test views
 are rendered and scored; the run directory then holds:
     joint/checkpoints/last.pt (+ best.pt)   the model, its optimizers, camera model and water light terms
     joint/metrics/train.csv, eval.csv       losses and statistics per step, test metrics per evaluation
@@ -199,9 +200,26 @@ def run_iui3_stage(output_dir, stage):
     return run_stage(output_dir, stage)
 
 
+def run_voronoi_first(args, scene):
+    """The Voronoi-first pipeline (configs/synthetic_voronoi.yaml, training/end_to_end.py): a medium-only warmup
+    whose cells densify on the content, a partition of the cells into surface and the rest, Gaussians from the
+    surface cells, then hybrid training. --set takes warmup., joint., both., profile., partition., handoff. keys."""
+    from training.end_to_end import EndToEndConfig, EndToEndTrainer
+    overrides = [f"both.seed={args.seed}", f"both.wandb.mode={'online' if args.wandb else 'disabled'}"]
+    if args.wandb:
+        overrides.append(f"both.wandb.project={args.wandb}")
+    if scene:
+        overrides.append(f"both.dataset.source_path={scene}")
+    config = EndToEndConfig.load(args.config, output_dir=args.output_dir, overrides=overrides + args.overrides)
+    if args.dry_run:
+        print(json.dumps(config.manifest(), indent=2))
+    else:
+        EndToEndTrainer(config).fit(resume=args.resume)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scene", type=Path, help="COLMAP scene directory (images/, sparse/0/)")
+    parser.add_argument("--scene", type=Path, help="COLMAP (images/, sparse/0/) or Blender (transforms_*.json) scene")
     parser.add_argument("--out", "--output-dir", dest="output_dir", type=Path, help="run directory")
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "seathru.yaml")
     parser.add_argument("--seed", type=int, default=42)
@@ -210,21 +228,33 @@ def main():
                         help="override a configuration value, e.g. joint.optimization.iterations=10000 (repeatable)")
     parser.add_argument("--resume", action="store_true", help="continue an unfinished run")
     parser.add_argument("--dry-run", action="store_true", help="print the resolved configuration and stop")
-    parser.add_argument("--stage", choices=("warmup", "joint"), help=argparse.SUPPRESS)  # internal: one stage
+    parser.add_argument("--stage", choices=("warmup", "partition", "joint"), help=argparse.SUPPRESS)  # internal
     parser.add_argument("--run-suffix", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.stage:
         if not args.output_dir:
             parser.error("--stage requires --out")
-        run_iui3_stage(args.output_dir.resolve(), args.stage)
+        root = args.output_dir.resolve()
+        if "capacity_loss" in json.loads((root / "pipeline_config.json").read_text()):
+            if args.stage == "partition":
+                parser.error("this configuration has no partition stage")
+            run_iui3_stage(root, args.stage)
+        else:
+            from training.end_to_end import run_stage
+            run_stage(root, args.stage)
         return
     if not args.output_dir:
         parser.error("--out is required")
-    overrides = [f"variant.seed={args.seed}", f"warmup.seed={args.seed}", f"joint.seed={args.seed}"]
+    scene = None
     if args.scene:
         scene = args.scene.resolve()
-        if not (scene / "sparse").is_dir():
-            parser.error(f"{scene} is not a COLMAP scene (no sparse/)")
+        if not ((scene / "sparse").is_dir() or (scene / "transforms_train.json").is_file()):
+            parser.error(f"{scene} is not a COLMAP scene (no sparse/) nor a Blender scene (no transforms_train.json)")
+    if "partition" in yaml.safe_load(args.config.read_text()):
+        run_voronoi_first(args, scene)
+        return
+    overrides = [f"variant.seed={args.seed}", f"warmup.seed={args.seed}", f"joint.seed={args.seed}"]
+    if scene:
         overrides += [f"warmup.dataset.source_path={scene}", f"joint.dataset.source_path={scene}"]
     overrides += [f"joint.wandb.mode={'online' if args.wandb else 'disabled'}", "warmup.wandb.mode=disabled"]
     manifest = resolve_iui3(args.config, args.output_dir, wandb_project=args.wandb,

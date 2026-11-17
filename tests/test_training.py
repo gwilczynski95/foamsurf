@@ -9,7 +9,7 @@ import pytest
 import torch
 from PIL import Image
 
-from helpers import FOGGY_GARDEN, IUI3, ROOT, requires_gpu, requires_iui3, short_manifest
+from helpers import FOGGY_GARDEN, IUI3, LEGO, ROOT, requires_gpu, requires_iui3, requires_lego, short_manifest
 from train import fit_iui3
 
 pytestmark = requires_gpu
@@ -106,6 +106,27 @@ def test_resume_continues_the_same_run(tmp_path):
     assert trainer.start_iteration == 5 and trainer.water_phase is not None and trainer.camera_isp is not None
     summary, _, _ = trainer.evaluator.evaluate(4)
     assert math.isfinite(summary["eval/primary_psnr"])
+
+
+@requires_lego
+def test_synthetic_short_training_with_layer_metrics(tmp_path):
+    m = short_manifest(tmp_path, "lego", config="configs/synthetic.yaml", scene=LEGO / "lego_both", overrides=[
+        f"joint.dataset.gaussian_ground_truth_path={LEGO / 'lego_lego'}",
+        f"joint.dataset.medium_ground_truth_path={LEGO / 'lego_clouds'}",
+        "profile.spatial_colmap_fraction=0.5"])
+    fit_iui3(m)
+    run = tmp_path / "lego"
+    assert json.loads((run / "joint/summary.json").read_text())["status"] == "completed"
+    assert not (run / "water_fit.json").exists()  # no COLMAP tracks to fit the water on
+    initial = torch.load(run / "joint/checkpoints/initialization.pt", map_location="cpu", weights_only=False)["model"]
+    # without the fit every cell starts nearly clear, at medium_initial_density
+    torch.testing.assert_close(torch.nn.functional.softplus(initial["medium.raw_density"]),
+                               torch.full_like(initial["medium.raw_density"], 0.005))
+    sites = initial["medium.sites"]
+    assert (sites.abs() <= 1.3).all(1).float().mean() >= 0.45  # spatial_colmap_fraction: half in the object box
+    evaluation = rows(run, "eval.csv")
+    for name in ("lego_lego/psnr", "lego_clouds/psnr", "eval/hybrid_psnr"):
+        assert finite(r.get(name) for r in evaluation), name
 
 
 @pytest.mark.skipif(not (FOGGY_GARDEN / "sparse").is_dir(), reason="needs the foggy Garden scene (FS_FOGGY)")

@@ -1,6 +1,6 @@
 # FoamSurf on SeaThru-NeRF: configs/base.yaml plus the settings below (the values that run; nothing is rescaled).
-# Test PSNR (seeds 42, 43, 44): IUI3 31.87, Curacao 34.29, Japanese Gardens 24.31, Panama 32.51, mean 30.74;
-# seabed Gaussian alpha 0.875, Gaussians in the open water 0.015 (SAM masks, evaluation only).
+# Test PSNR (seeds 42, 43, 44): IUI3 31.78, Curacao 34.33, Japanese Gardens 24.33, Panama 32.57, mean 30.75;
+# seabed Gaussian alpha 0.807, Gaussians in the open water 0.004 (SAM masks, evaluation only).
 #   python train.py --scene /path/to/SeathruNeRF_dataset/Curasao-Undistorted --out outputs/curacao
 base_config: base.yaml
 output_dir: outputs/seathru/run
@@ -81,7 +81,7 @@ overrides:
   - medium_fix.chroma_alpha_threshold=0.02
   - medium_fix.chroma_start=667
   - medium_fix.chroma_ramp=667
-  - medium_fix.surface_coverage_weight=0.03              # rays already > 90% covered pushed to full coverage
+  - medium_fix.surface_coverage_weight=0.003             # rays already > 90% covered pushed to full coverage
   - medium_fix.surface_coverage_threshold=0.9
   - medium_fix.surface_coverage_start=667
   - medium_fix.surface_coverage_ramp=667

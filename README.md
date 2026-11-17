@@ -6,8 +6,8 @@ Scena podwodna jako hybryda dwóch reprezentacji renderowanych jednym ray tracer
 - **komórki Voronoi** — ośrodek (woda albo mgła): tłumienie i rozpraszanie wsteczne w każdej komórce.
 
 Do tego model kamery PPISP (ekspozycja i kolor każdego zdjęcia), straty OceanSplat i priory, które trzymają
-Gaussy poza otwartą wodą. Wynik na SeaThru-NeRF (widoki testowe, 3 seedy): **30.74 dB** średnio
-(IUI3 31.87, Curaçao 34.29, Japanese Gardens 24.31, Panama 32.51).
+Gaussy poza otwartą wodą. Wynik na SeaThru-NeRF (widoki testowe, 3 seedy): **30.75 dB** średnio
+(IUI3 31.78, Curaçao 34.33, Japanese Gardens 24.33, Panama 32.57).
 
 ## Instalacja
 

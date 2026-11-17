@@ -8,6 +8,25 @@ import foamsurf_topology
 from .medium import VoronoiMediumModel
 
 
+
+def jittered_sites(sites, movable, attempt, base_step, bbox_min, bbox_max, reflect=False):
+    """Microscopic deterministic jitter of the movable sites (attempt 1, 2, ...: step base_step * 2**(attempt-1)),
+    kept in the medium box: breaks the co-spherical / duplicate configurations that make a Delaunay
+    triangulation ambiguous. Clamped by default (as during training); with ``reflect`` an offset that leaves the box
+    is mirrored back inside, so sites lying exactly on a box face (clamped there in training: large coplanar sets)
+    leave the face instead of being clamped back onto it."""
+    ids = torch.arange(sites.shape[0], device=sites.device, dtype=sites.dtype)
+    phase = ids + float(attempt * sites.shape[0] + 1)
+    directions = torch.stack((torch.sin(phase * 12.9898), torch.sin(phase * 78.233 + 0.5),
+                              torch.sin(phase * 37.719 + 1.0)), dim=-1)
+    directions = directions / directions.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
+    candidate = sites.clone()
+    candidate[movable] += (directions * base_step * float(2 ** (attempt - 1)))[movable]
+    if reflect:
+        candidate = torch.where(candidate > bbox_max, 2 * bbox_max - candidate, candidate)
+        candidate = torch.where(candidate < bbox_min, 2 * bbox_min - candidate, candidate)
+    return torch.maximum(torch.minimum(candidate, bbox_max), bbox_min).contiguous()
+
 class VoronoiTopologyController:
     """Own Delaunay topology and safe optimizer-state permutations.
 
@@ -27,10 +46,7 @@ class VoronoiTopologyController:
         optimizer: torch.optim.Optimizer | None = None,
     ) -> None:
         with torch.no_grad():
-            self.triangulation = foamsurf_topology.Triangulation(
-                medium.sites.detach()
-            )
-            permutation = self.triangulation.permutation().to(torch.long)
+            self.triangulation, permutation = self._initial_triangulation(medium)
             self.last_permutation = permutation
             if optimizer is None:
                 medium.reorder_without_optimizer(permutation)
@@ -42,6 +58,67 @@ class VoronoiTopologyController:
         self.last_replacement_retries = 0
         self.last_replacement_failed = False
         self._read_topology()
+
+    @staticmethod
+    def _initial_triangulation(medium, max_attempts: int = 12):
+        """(triangulation, permutation) of the current sites; the permutation maps the triangulation's order to the
+        medium's current order.
+
+        A from-scratch triangulation of trained sites (loading a checkpoint) can be ambiguous although the incremental
+        rebuilds of training were not (e.g. tens of thousands of sites clamped onto the faces of the medium box). Then,
+        as training does, it is reached incrementally: a triangulation of the sites under a seeded random offset
+        (1e-4, 1e-3, 1e-2 of the box diagonal) is rebuilt incrementally to the EXACT sites, which are not changed.
+        If the exact sites cannot be triangulated at all, the adjacency comes from the sites under a small random
+        perturbation while the sites stay exact, as training does after a failed rebuild (update_topology). Only if
+        that fails too are the non-guard sites moved by a microscopic deterministic jitter mirrored into the box (as in
+        replace_sites), and the medium keeps the jittered sites."""
+        sites = medium.sites.detach()
+        try:
+            t = foamsurf_topology.Triangulation(sites)
+            return t, t.permutation().to(torch.long)
+        except foamsurf_topology.TriangulationFailedError:
+            if max_attempts <= 0:
+                raise
+        diagonal = float((medium.bbox_max - medium.bbox_min).norm().item())
+        generator = torch.Generator(device=sites.device).manual_seed(0)
+        for scale in (1.0e-4, 1.0e-3, 1.0e-2):
+            start = (sites + scale * diagonal * torch.randn(sites.shape, generator=generator, device=sites.device,
+                                                            dtype=sites.dtype)).contiguous()
+            try:
+                t = foamsurf_topology.Triangulation(start)
+            except foamsurf_topology.TriangulationFailedError:
+                continue
+            first = t.permutation().to(torch.long)
+            try:
+                moved = bool(t.rebuild(sites[first].contiguous(), incremental=True))
+            except foamsurf_topology.TriangulationFailedError:
+                continue
+            return t, (first[t.permutation().to(torch.long)] if moved else first)
+        # What training does when a rebuild fails (update_topology: up to 5 retries keep the sites): adjacency from the
+        # sites under a small random perturbation (1e-6 doubling), rendering with the exact sites.
+        perturbation = 1.0e-6
+        for _ in range(10):
+            perturbation *= 2.0
+            start = (sites + perturbation * torch.randn(sites.shape, generator=generator, device=sites.device,
+                                                        dtype=sites.dtype)).contiguous()
+            try:
+                t = foamsurf_topology.Triangulation(start)
+            except foamsurf_topology.TriangulationFailedError:
+                continue
+            return t, t.permutation().to(torch.long)
+        base_step = max(diagonal * 1.0e-7, 1.0e-8)
+        movable = ~medium.guard_mask
+        for attempt in range(1, max_attempts + 1):
+            candidate = jittered_sites(sites, movable, attempt, base_step, medium.bbox_min, medium.bbox_max,
+                                       reflect=True)
+            try:
+                t = foamsurf_topology.Triangulation(candidate)
+            except foamsurf_topology.TriangulationFailedError:
+                continue
+            medium.sites.data.copy_(candidate)
+            return t, t.permutation().to(torch.long)
+        raise foamsurf_topology.TriangulationFailedError(
+            f"ambiguous triangulation after {max_attempts} jittered attempts")
 
     def _read_topology(self) -> None:
         self.adjacency = (
@@ -153,33 +230,10 @@ class VoronoiTopologyController:
                     movable[-child_count:] = True
                 if failure_count >= 4 or child_count == 0:
                     movable |= ~candidate_guard_mask
-                ids = torch.arange(
-                    original_sites.shape[0], device=original_sites.device,
-                    dtype=original_sites.dtype,
+                candidate_sites = jittered_sites(
+                    original_sites, movable, failure_count, base_step,
+                    medium.bbox_min, medium.bbox_max,
                 )
-                phase = ids + float(
-                    failure_count * original_sites.shape[0] + 1
-                )
-                directions = torch.stack(
-                    (
-                        torch.sin(phase * 12.9898),
-                        torch.sin(phase * 78.233 + 0.5),
-                        torch.sin(phase * 37.719 + 1.0),
-                    ),
-                    dim=-1,
-                )
-                directions = directions / directions.norm(
-                    dim=-1, keepdim=True
-                ).clamp_min(1.0e-8)
-                offsets = (
-                    directions * base_step * float(2 ** (failure_count - 1))
-                )
-                candidate_sites = original_sites.clone()
-                candidate_sites[movable] += offsets[movable]
-                candidate_sites = torch.maximum(
-                    torch.minimum(candidate_sites, medium.bbox_max),
-                    medium.bbox_min,
-                ).contiguous()
 
         groups = {
             group.get("name"): group for group in optimizer.param_groups

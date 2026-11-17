@@ -239,7 +239,7 @@
  "medium_fix.surface_coverage_ramp": 667,
  "medium_fix.surface_coverage_start": 667,
  "medium_fix.surface_coverage_threshold": 0.9,
- "medium_fix.surface_coverage_weight": 0.03,
+ "medium_fix.surface_coverage_weight": 0.003,
  "medium_fix.under_surface_offset": 0.01,
  "medium_fix.under_surface_ramp": 667,
  "medium_fix.under_surface_start": 667,

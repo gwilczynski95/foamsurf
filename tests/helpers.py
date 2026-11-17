@@ -12,7 +12,10 @@ SEATHRU = Path(os.environ.get("FS_DATASETS", "/shared/sets/datasets/SeathruNeRF_
 IUI3 = SEATHRU / "IUI3-RedSea-Undistorted"
 FOGGY_GARDEN = Path(os.environ.get("FS_FOGGY", "/shared/sets/datasets/foamsurf/foggy_garden")) / "garden_easy"
 
+LEGO = Path(os.environ.get("FS_SYNTHETIC", "/shared/sets/datasets/foamsurf")) / "lego"  # lego_both / lego_lego / lego_clouds
+
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires GPU")
+requires_lego = pytest.mark.skipif(not (LEGO / "lego_both").is_dir(), reason="needs the synthetic lego scenes (FS_SYNTHETIC)")
 requires_iui3 = pytest.mark.skipif(not IUI3.is_dir(), reason="needs the SeaThru-NeRF IUI3 scene (FS_DATASETS)")
 
 

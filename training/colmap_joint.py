@@ -98,6 +98,11 @@ def run_stage(output,stage):
                 if config.model.medium_initial_water_fit=='all':
                     medium.set_uniform_color_(torch.tensor(fit['b_inf']))
                 atomic_json(output/'water_fit.json',fit)
+            else:
+                # No fit (Blender scenes have no COLMAP tracks): a nearly clear medium, every cell at
+                # medium_initial_density, instead of the warmup's random placeholder density.
+                density=torch.full((3,),float(config.model.medium_initial_density))
+                medium.set_uniform_coefficients_(density,density)
             points,colors=dataset.initial_point_cloud()
             gaussians=SurfaceGaussianModel(points,colors,config.model,config.device)
             config.model.gaussian_initial_points=len(points)

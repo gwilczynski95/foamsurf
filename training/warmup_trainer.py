@@ -618,8 +618,9 @@ def sample_view_volume(points, cameras, count, depth_factor):
 
 @torch.no_grad()
 def initialize_spatial_medium(medium,dataset,config,profile):
-    if dataset.__class__.__name__ != 'ColmapDataset':
-        raise ValueError('Spatial initialization requires COLMAP')
+    # COLMAP: the sparse points; Blender: its initial point cloud, uniform in the object box [-1.3, 1.3]^3
+    if dataset.__class__.__name__ not in ('ColmapDataset', 'BlenderDataset'):
+        raise ValueError('Spatial initialization requires a COLMAP or Blender dataset')
     if config.model.medium_bbox_min is not None or config.model.medium_bbox_max is not None:
         raise ValueError('Spatial initialization must not have manual bounds')
     points,_ = dataset.initial_point_cloud()
