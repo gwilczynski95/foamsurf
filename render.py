@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 from pathlib import Path
 import tempfile
 
@@ -57,24 +58,41 @@ def camera_from_record(record: dict, device):
                   intrinsics=(fx, fy, float(record["cx"]), float(record["cy"])))
 
 
-def load_run(run: Path, checkpoint: str, scene: Path | None = None):
+def load_run(run: Path, checkpoint: str = "last", scene: Path | None = None, *, hit_buffer: int | None = None, layer_paths=None):
     """A trainer restored from the run's checkpoint (nothing in the run directory is written). ``scene`` replaces
     the dataset path stored in the run (a run trained on another machine)."""
     from training.config import ExperimentConfig
     from training.trainer import Trainer
     joint = run / "joint" if (run / "joint").is_dir() else run
     config = ExperimentConfig.load(joint / "config.yaml")
+    if checkpoint != "last":
+        raise ValueError("release evaluation uses only the final checkpoint (last)")
+    if hit_buffer is not None:
+        config.renderer.gaussian_hit_buffer_size = hit_buffer
     if scene is not None:
         config.dataset.source_path = str(Path(scene).resolve())
     if not Path(config.dataset.source_path).is_dir():
         raise FileNotFoundError(f"scene {config.dataset.source_path} not found: pass --scene with the dataset directory")
+    if layer_paths is not None:
+        config.dataset.gaussian_ground_truth_path, config.dataset.medium_ground_truth_path = map(str, layer_paths)
+    elif any(path is not None and not Path(path).is_dir() for path in
+             (config.dataset.gaussian_ground_truth_path, config.dataset.medium_ground_truth_path)):
+        # References are evaluation-only; rendering a relocated checkpoint does not require them.
+        config.dataset.gaussian_ground_truth_path = config.dataset.medium_ground_truth_path = None
     config.output_dir = tempfile.mkdtemp(prefix="foamsurf_render_")
     config.wandb.mode = "disabled"
     trainer = Trainer(config, resume=joint / "checkpoints" / f"{checkpoint}.pt")
     trainer.renderer.transmittance_threshold = config.renderer.validation_transmittance_threshold
     trainer.topology.synchronize_renderer(trainer.renderer, trainer.model.medium)
     if config.optimization.water_extrapolation:
-        trainer.fit_water_extrapolation()
+        saved = joint / "water_extrapolation.json"
+        if saved.is_file():
+            from training.water_extrapolation import WaterExtrapolation
+            fit = json.loads(saved.read_text())
+            trainer.water_extrapolation = WaterExtrapolation(
+                torch.tensor(fit["up"], device=trainer.device), torch.tensor(fit["anisotropy"]), fit["cos_max"])
+        else:
+            trainer.fit_water_extrapolation()
     return trainer
 
 
@@ -82,7 +100,6 @@ def load_run(run: Path, checkpoint: str, scene: Path | None = None):
 def render_view(trainer, camera, modes) -> dict[str, torch.Tensor]:
     """Images [H, W, C] of the requested modes for one camera."""
     from evaluation.evaluator import _rays
-    from training.camera_isp import pixel_grid
     model, renderer = trainer.model, trainer.renderer
     background = tuple(trainer.config.background)
     height, width = camera.height, camera.width
@@ -92,16 +109,12 @@ def render_view(trainer, camera, modes) -> dict[str, torch.Tensor]:
     medium = model.medium.render_scene()
     out = {}
     if {"full", "raw", "water"} & set(modes):
-        hybrid_medium = None if trainer.config.representation_mode == "gaussian_only" else medium
-        hybrid = renderer.render(rays, gaussians=gaussians, voronoi=hybrid_medium, background=background)
+        hybrid, raw, full = trainer.evaluator.render_frame(camera, rays, gaussians, medium)
         light = trainer.evaluator.water_light or (lambda image, backscatter, rays: image)
-        raw = light(hybrid.image, hybrid.backscatter, rays)
         if "raw" in modes:
             out["raw"] = raw
         if "full" in modes:
-            isp = trainer.camera_isp
-            out["full"] = (raw if isp is None else isp.apply(raw, pixel_grid(height, width, raw.device).reshape(-1, 2),
-                                                             (height, width), None, camera.origin)).clamp(0, 1)
+            out["full"] = full
         if "water" in modes and hybrid.backscatter is not None:
             out["water"] = light(hybrid.backscatter, hybrid.backscatter, rays)
     if {"gaussians", "alpha", "depth"} & set(modes):
@@ -129,10 +142,39 @@ def to_png(name: str, image: torch.Tensor) -> np.ndarray:
     return (value * 255.0 + 0.5).astype(np.uint8)
 
 
+@torch.no_grad()
+def benchmark(trainer, cameras, repeats=20):
+    """Median CUDA-event frame time per view, then FPS from mean view time, as in the paper."""
+    from evaluation.evaluator import _rays
+    if repeats < 1 or not cameras:
+        raise ValueError("benchmark needs views and a positive repeat count")
+    medium = trainer.model.medium.render_scene()
+    per_view = {}
+    for camera in cameras:
+        rays = _rays(camera)
+        trainer.renderer.set_gaussian_geometry(trainer.model.gaussians.render_scene(camera.origin))
+        times = []
+        for iteration in range(repeats + 3):
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            torch.cuda.synchronize()
+            start.record()
+            gaussians = trainer.model.gaussians.render_scene(camera.origin)
+            trainer.evaluator.render_frame(camera, rays, gaussians, medium, fast=True)
+            end.record()
+            torch.cuda.synchronize()
+            if iteration >= 3:
+                times.append(start.elapsed_time(end))
+        per_view[camera.name] = statistics.median(times)
+    ms = statistics.fmean(per_view.values())
+    return {"fps": 1000.0 / ms, "ms": ms, "views_ms": per_view, "repeats": repeats,
+            "hit_buffer": trainer.renderer.gaussian_hit_buffer_size,
+            "threshold": trainer.renderer.transmittance_threshold}
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run", type=Path, required=True, help="run directory written by train.py")
-    parser.add_argument("--checkpoint", default="last", choices=("last", "best"))
+    parser.add_argument("--checkpoint", default="last", choices=("last",))
     parser.add_argument("--scene", type=Path, help="dataset directory of the run, when not at the path it was trained with")
     parser.add_argument("--views", default="test", choices=("test", "train", "all"))
     parser.add_argument("--poses", type=Path, help="JSON list of cameras to render instead of the dataset views")
@@ -141,6 +183,10 @@ def main(argv=None) -> None:
     parser.add_argument("--npy", action="store_true", help="also save float32 arrays (.npy)")
     parser.add_argument("--metrics", action="store_true",
                         help="dataset views: PSNR / SSIM of the full image against the photos, in OUT/metrics.json")
+    parser.add_argument("--fps", type=int, choices=(16, 32, 64, 128, 256), metavar="K",
+                        help="benchmark end-to-end frames with hit buffer K (paper: 32)")
+    parser.add_argument("--repeats", type=int, default=20, help="timing repeats per view, after three warmups")
+    parser.add_argument("--metric-device", default="cpu", help="device for VGG LPIPS (cpu or cuda)")
     parser.add_argument("--export-cameras", type=Path, metavar="JSON", help="write the dataset cameras and stop")
     args = parser.parse_args(argv)
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
@@ -148,7 +194,9 @@ def main(argv=None) -> None:
     if unknown:
         parser.error(f"unknown modes: {', '.join(unknown)}")
 
-    trainer = load_run(args.run.resolve(), args.checkpoint, args.scene)
+    if args.repeats < 1:
+        parser.error("--repeats must be positive")
+    trainer = load_run(args.run.resolve(), args.checkpoint, args.scene, hit_buffer=args.fps)
     dataset = trainer.dataset
     if args.export_cameras:
         records = [dict(camera_record(c), split=split) for split, cams in (("train", dataset.train), ("test", dataset.test))
@@ -163,13 +211,14 @@ def main(argv=None) -> None:
     out = (args.out or args.run / "renders").resolve()
     if args.metrics and (args.poses or "full" not in modes):
         parser.error("--metrics needs dataset views (no --poses) and the full mode")
+    from evaluation.metrics import ImageMetrics
+    metric = ImageMetrics(args.metric_device) if args.metrics else None
     scores = {}
     for camera in cameras:
         images = render_view(trainer, camera, modes)
         if args.metrics:
-            from evaluation.metrics import psnr, ssim
             target = camera.ground_truth(tuple(trainer.config.background)).reshape(camera.height, camera.width, 3)
-            scores[camera.name] = {"psnr": float(psnr(images["full"], target)), "ssim": float(ssim(images["full"], target))}
+            scores[camera.name] = metric(images["full"], target)
         for name, image in images.items():
             folder = out / name
             folder.mkdir(parents=True, exist_ok=True)
@@ -177,8 +226,13 @@ def main(argv=None) -> None:
             if args.npy:
                 np.save(folder / f"{camera.name}.npy", image.float().cpu().numpy())
         print(camera.name, ", ".join(images), *(f"{k} {v:.3f}" for k, v in scores.get(camera.name, {}).items()), flush=True)
+    if args.fps:
+        timing = benchmark(trainer, cameras, args.repeats)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "fps.json").write_text(json.dumps(timing, indent=2))
+        print(f"FPS {timing['fps']:.2f} (K={args.fps})")
     if args.metrics:
-        mean = {k: float(np.mean([v[k] for v in scores.values()])) for k in ("psnr", "ssim")}
+        mean = {k: float(np.mean([v[k] for v in scores.values()])) for k in ("psnr", "ssim", "lpips_vgg")}
         out.mkdir(parents=True, exist_ok=True)
         (out / "metrics.json").write_text(json.dumps({"mean": mean, "views": scores}, indent=1))
         print(f"mean PSNR {mean['psnr']:.3f}  SSIM {mean['ssim']:.4f}")

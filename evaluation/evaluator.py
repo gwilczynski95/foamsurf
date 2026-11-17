@@ -117,6 +117,22 @@ class Evaluator:
         self.camera_isp = None
         self.water_light = None  # callable(image, backscatter, rays) -> image: the trained water light terms
 
+    def finish_image(self, result, camera, rays):
+        """The same water-light and camera response for training evaluation and public rendering."""
+        raw = (result.image if self.water_light is None or result.backscatter is None
+               else self.water_light(result.image, result.backscatter, rays))
+        image = raw if self.camera_isp is None else self.camera_isp(raw, camera)
+        return raw, image.clamp(0.0, 1.0)
+
+    def render_frame(self, camera, rays, gaussians, medium, *, fast=False):
+        """Render a frame with geometry already set; fast omits surface diagnostics and input checks."""
+        medium = None if self.config.representation_mode == "gaussian_only" else medium
+        result = self.renderer.render(rays, gaussians=gaussians, voronoi=medium,
+                                      background=tuple(self.config.background),
+                                      surface=not fast, check_inputs=not fast)
+        raw, image = self.finish_image(result, camera, rays)
+        return result, raw, image
+
     @torch.no_grad()
     def _timed(self, operation):
         torch.cuda.synchronize()
@@ -216,10 +232,7 @@ class Evaluator:
                     )
                 )
 
-                hybrid_raw = (hybrid.image if self.water_light is None or hybrid.backscatter is None
-                              else self.water_light(hybrid.image, hybrid.backscatter, rays))
-                hybrid_image = (hybrid_raw if self.camera_isp is None
-                                else self.camera_isp(hybrid_raw, camera)).clamp(0.0, 1.0)
+                hybrid_raw, hybrid_image = self.finish_image(hybrid, camera, rays)
                 gaussian_image = gaussian.image.clamp(0.0, 1.0)
                 medium_image = medium.image.clamp(0.0, 1.0)
                 error = (hybrid_image - target).abs()
