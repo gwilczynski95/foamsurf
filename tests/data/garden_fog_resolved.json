@@ -90,6 +90,7 @@
  "joint.model.medium_bbox_min": null,
  "joint.model.medium_guard_points": 0,
  "joint.model.medium_guard_scale": 1.25,
+ "joint.model.medium_homogeneous": false,
  "joint.model.medium_initial_color": [
   0.5,
   0.5,
@@ -426,6 +427,7 @@
  "warmup.model.medium_bbox_min": null,
  "warmup.model.medium_guard_points": 0,
  "warmup.model.medium_guard_scale": 1.25,
+ "warmup.model.medium_homogeneous": false,
  "warmup.model.medium_initial_color": [
   0.5,
   0.5,

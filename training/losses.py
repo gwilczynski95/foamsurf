@@ -272,6 +272,7 @@ def masked_direct_consistency(gaussian_image, direct_image, gaussian_alpha, thre
 # manifests and resume sidecars written before the cleanup.
 _LEGACY_MEDIUM_FIX = {
     "color_mode": "per_cell", "coverage_weight": 0.0, "proximity_multiplier": 1.0,
+    "surface_coverage_context": None, "water_clear_context": None, "hole_fill_at": None,
 }
 _LEGACY_MEDIUM_FIX_PREFIXES = ("coverage_", "proximity_")
 
@@ -280,7 +281,14 @@ def drop_legacy_medium_fix(values):
     """Return medium_fix settings without inactive removed options."""
 
     values = dict(values)
+    # Ancillary settings have no effect while their removed mechanism is disabled.
+    for key in ("surface_coverage_context", "water_clear_context", "hole_fill_at"):
+        if values.get(key) is not None:
+            raise ValueError(f"medium_fix.{key}={values[key]!r} is no longer supported")
     for key in list(values):
+        if key.startswith("hole_fill_") or key in {"context_from", "context_window"}:
+            del values[key]
+            continue
         if key in _LEGACY_MEDIUM_FIX or key.startswith(_LEGACY_MEDIUM_FIX_PREFIXES):
             if key in _LEGACY_MEDIUM_FIX and values[key] != _LEGACY_MEDIUM_FIX[key]:
                 raise ValueError(f"medium_fix.{key}={values[key]!r} is no longer supported")

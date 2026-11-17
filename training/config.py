@@ -127,6 +127,9 @@ class ModelConfig:
     # (training/water_fit.py): "coefficients" = attenuation beta_D and backscatter beta_B,
     # "all" = also colour B_inf (overrides medium_initial_color_from_data). "off": as before.
     medium_initial_water_fit: str = "off"
+    # Ablation: one homogeneous water instead of the Voronoi cells (every cell renders the mean coefficients and colour
+    # of all cells; the cells and their parameters stay, so checkpoints and optimizers are unchanged).
+    medium_homogeneous: bool = False
     # Mip-Splatting 3D smoothing filter (Yu et al. 2024): every Gaussian is rendered with scales
     # sqrt(s^2 + s_f^2) and opacity x (s_u s_v) / (s_u' s_v'), s_f = sqrt(variance) x the world size of
     # one pixel at the nearest training camera that sees it. Variance in pixels^2; 0 = off, paper 0.2.

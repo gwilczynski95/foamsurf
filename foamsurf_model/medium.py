@@ -168,13 +168,19 @@ class VoronoiMediumModel(nn.Module):
 
     @property
     def optical_coefficients(self) -> torch.Tensor:
-        return F.softplus(self.raw_density)
+        return self._homogenized(F.softplus(self.raw_density))
 
     @property
     def colors(self) -> torch.Tensor:
         if getattr(self, "color_activation", "sigmoid") == "dc":
-            return (0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0)
-        return torch.sigmoid(self.raw_color)
+            return self._homogenized((0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0))
+        return self._homogenized(torch.sigmoid(self.raw_color))
+
+    def _homogenized(self, values: torch.Tensor) -> torch.Tensor:
+        """With ``homogeneous`` (model.medium_homogeneous, an ablation): every cell gets the mean over all cells."""
+        if not getattr(self, "homogeneous", False):
+            return values
+        return values.mean(0, keepdim=True).expand_as(values)
 
     @torch.no_grad()
     def set_uniform_color_(self, color: torch.Tensor) -> None:

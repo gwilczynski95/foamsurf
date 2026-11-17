@@ -92,7 +92,8 @@ def render_view(trainer, camera, modes) -> dict[str, torch.Tensor]:
     medium = model.medium.render_scene()
     out = {}
     if {"full", "raw", "water"} & set(modes):
-        hybrid = renderer.render(rays, gaussians=gaussians, voronoi=medium, background=background)
+        hybrid_medium = None if trainer.config.representation_mode == "gaussian_only" else medium
+        hybrid = renderer.render(rays, gaussians=gaussians, voronoi=hybrid_medium, background=background)
         light = trainer.evaluator.water_light or (lambda image, backscatter, rays: image)
         raw = light(hybrid.image, hybrid.backscatter, rays)
         if "raw" in modes:

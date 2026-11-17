@@ -104,3 +104,27 @@ def test_prior_validation():
         MediumFixConfig(chroma_water_alpha=0.5, chroma_alpha_threshold=0.2)
     with pytest.raises(ValueError, match="surface_coverage_weight"):
         MediumFixConfig(surface_coverage_weight=-1.0)
+
+
+@pytest.mark.parametrize("variant", ["full", "nomedium", "homog", "nopriors", "nowlight", "noocean", "nbr0", "noisp"])
+def test_release_configs_match_paper_checkpoints(variant, tmp_path):
+    # Snapshots come from 561669/IUI3..._wext, 564801/Panama..._<variant>,
+    # and 571523/Panama..._noisp. Only inactive legacy fields and metadata are removed.
+    config = "configs/seathru.yaml" if variant == "full" else f"configs/ablations/{variant}.yaml"
+    expected = json.loads((ROOT / "tests/data" / f"paper_{variant}_resolved.json").read_text())
+    assert comparable(resolve_iui3(ROOT / config, tmp_path / "run")) == expected
+
+
+@pytest.mark.parametrize("field", ["surface_coverage_context", "water_clear_context", "hole_fill_at"])
+def test_removed_research_mechanisms_cannot_be_silently_loaded(field):
+    from training.losses import drop_legacy_medium_fix
+    with pytest.raises(ValueError, match=field):
+        drop_legacy_medium_fix({field: 1})
+
+
+def test_disabled_research_mechanisms_accept_their_old_auxiliary_settings():
+    from training.losses import drop_legacy_medium_fix
+    old = {"surface_coverage_context": None, "water_clear_context": None, "hole_fill_at": None,
+           "context_from": 100, "context_window": 0.03, "hole_fill_stride": 2, "hole_fill_opacity": 0.9,
+           "surface_coverage_weight": 0.003}
+    assert drop_legacy_medium_fix(old) == {"surface_coverage_weight": 0.003}

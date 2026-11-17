@@ -12,15 +12,17 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 export CUDA_HOME="${CUDA_HOME:-$CONDA_ENV_PATH}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
 export PATH="$CONDA_ENV_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-"$PYTHON" -m pip install -r "$REPOSITORY/requirements.txt"
+cd "$REPOSITORY"
+if [[ ! -f external/submodules/eigen/Eigen/Core ]]; then
+    git submodule update --init --recursive
+fi
+"$PYTHON" setup.py build_ext --inplace
+export PYTHONPATH="$REPOSITORY/renderer:$REPOSITORY/src:$REPOSITORY:${PYTHONPATH:-}"
 
-"$PYTHON" -m pip install -e "$REPOSITORY"     --no-build-isolation     --no-deps
-
-CONDA_ENV_PATH="$CONDA_ENV_PATH" CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" "$REPOSITORY/renderer/build.sh"
+CONDA_ENV_PATH="$CONDA_ENV_PATH" "$REPOSITORY/renderer/build.sh"
 
 (
     cd "$REPOSITORY"

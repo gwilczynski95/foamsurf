@@ -17,7 +17,6 @@ fi
 
 export PATH="$CONDA_ENV_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export CUDA_HOME="${CUDA_HOME:-$CONDA_ENV_PATH}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
 # OptiX/CUDA sources use the same single architecture (8.6 -> 86 on an RTX 3090).
 export CUDA_ARCH="${CUDA_ARCH:-${TORCH_CUDA_ARCH_LIST//./}}"
@@ -26,9 +25,8 @@ export CUDA_ARCH="${CUDA_ARCH:-${TORCH_CUDA_ARCH_LIST//./}}"
 HIT_BUFFER_SIZE=64 OPTIX_OUTPUT_DIRECTORY="$RENDERER_DIRECTORY/foamsurf/_optix_k64" \
     "$RENDERER_DIRECTORY/build_optix.sh"
 
-"$PYTHON" -m pip install -e "$RENDERER_DIRECTORY" \
-    --no-build-isolation \
-    --no-deps
+cd "$RENDERER_DIRECTORY"
+"$PYTHON" setup.py build_ext --inplace
 
 (
     cd "$RENDERER_DIRECTORY"

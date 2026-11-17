@@ -49,3 +49,8 @@ venv/
 
 # Local editor and manual patch backups
 *.orig
+
+/slurm-*.out
+/.torch_extensions/
+/assets/
+/renders/
