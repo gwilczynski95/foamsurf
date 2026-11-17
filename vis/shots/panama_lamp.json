@@ -1,0 +1,167 @@
+{
+ "anchor_view": "MTN_1529",
+ "objects": [
+  {
+   "type": "mesh",
+   "name": "fiat126p",
+   "manifest": "$FALCON/source/fiat_bicycle/manifest.json",
+   "u": 0.5,
+   "v": 0.62,
+   "span_fraction": 0.22,
+   "yaw_deg": 30,
+   "materials": {
+    "caroseria": {
+     "mode": "metal",
+     "rgb": [
+      0.95,
+      0.95,
+      0.97
+     ],
+     "kd": 0.92
+    }
+   }
+  },
+  {
+   "u": 0.3,
+   "v": 0.7,
+   "radius_fraction": 0.06,
+   "material": "glass",
+   "tint": [
+    0.98,
+    0.99,
+    1.0
+   ],
+   "ior": 1.128,
+   "height": 0.8
+  },
+  {
+   "material": "mirror",
+   "tint": [
+    0.95,
+    0.95,
+    0.95
+   ],
+   "u": 0.78,
+   "v": 0.45,
+   "radius_fraction": 0.05,
+   "height": 1.5
+  },
+  {
+   "u": 0.1,
+   "v": 0.3,
+   "distance": 12,
+   "radius_fraction": 0.03808,
+   "material": "diffuse",
+   "tint": [
+    0.85,
+    0.85,
+    0.85
+   ]
+  },
+  {
+   "u": 0.17,
+   "v": 0.23,
+   "distance": 20,
+   "radius_fraction": 0.02285,
+   "material": "diffuse",
+   "tint": [
+    0.85,
+    0.85,
+    0.85
+   ]
+  },
+  {
+   "u": 0.24,
+   "v": 0.17,
+   "distance": 30,
+   "radius_fraction": 0.01523,
+   "material": "diffuse",
+   "tint": [
+    0.85,
+    0.85,
+    0.85
+   ]
+  },
+  {
+   "u": 0.31,
+   "v": 0.12,
+   "distance": 45,
+   "radius_fraction": 0.01016,
+   "material": "diffuse",
+   "tint": [
+    0.85,
+    0.85,
+    0.85
+   ]
+  },
+  {
+   "u": 0.38,
+   "v": 0.08,
+   "distance": 65,
+   "radius_fraction": 0.00703,
+   "material": "diffuse",
+   "tint": [
+    0.85,
+    0.85,
+    0.85
+   ]
+  },
+  {
+   "type": "bubbles",
+   "source": "fiat126p",
+   "local": [
+    -0.12,
+    0.07,
+    0.5
+   ],
+   "direction": [
+    0,
+    -0.2,
+    1
+   ],
+   "rate": 16,
+   "life": 6,
+   "rise": 0.4,
+   "speed": 0.5,
+   "radius": [
+    0.01,
+    0.032
+   ],
+   "wobble": 0.03,
+   "drift": 0.06,
+   "seed": 1
+  },
+  {
+   "material": "emissive",
+   "tint": [
+    1,
+    0.95,
+    0.85
+   ],
+   "u": 0.6,
+   "v": 0.62,
+   "height": 1.5,
+   "radius_fraction": 0.012,
+   "power": 20
+  }
+ ],
+ "frames": 150,
+ "fps": 30,
+ "path": {
+  "look_at_objects": 0.5,
+  "scale": 1.0,
+  "nearest": 7,
+  "zoom": 1.1,
+  "trim": [
+   0.3,
+   1.0
+  ]
+ },
+ "trace": {
+  "max_depth": 4,
+  "antialias": 8
+ },
+ "_note": "panama_showcase plus a lamp (emissive sphere, power 20 = 20x the scene's light from above at 1 world unit) floating 1.5 radii over the reef next to the Fiat: it relights the reef and the car and glows in the water (single scattering).",
+ "still_time": 6.0,
+ "start_time": 6.0
+}

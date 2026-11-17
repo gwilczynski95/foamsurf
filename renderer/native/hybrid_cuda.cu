@@ -1288,10 +1288,15 @@ __global__ void rgb_forward_kernel(
     float *direct_output,
     float *backscatter_output,
     float *transmission_output,
-    uint32_t *num_intersections) {
+    uint32_t *num_intersections,
+    const float *ray_far) {
     uint32_t ray_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (ray_index >= settings.num_rays) {
         return;
+    }
+    if (ray_far != nullptr) {  // settings is a per-thread copy
+        settings.far_plane =
+            fmaxf(settings.near_plane, fminf(settings.far_plane, ray_far[ray_index]));
     }
     Vec3 origin = make_vec3(rays + 6 * ray_index);
     Vec3 direction = normalized(make_vec3(rays + 6 * ray_index + 3));
@@ -2227,7 +2232,8 @@ void rgb_forward_cuda(
         direct_output,
         backscatter_output,
         transmission_output,
-        output_num_intersections);
+        output_num_intersections,
+        scene.ray_far);
 }
 
 void rgb_backward_cuda(

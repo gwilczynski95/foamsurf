@@ -1,0 +1,49 @@
+{
+ "anchor_view": "MTN_1296",
+ "objects": [
+  {
+   "u": 0.22,
+   "v": 0.8,
+   "radius_fraction": 0.05,
+   "height": 0.4,
+   "material": "mirror",
+   "tint": [
+    0.95,
+    0.95,
+    0.95
+   ]
+  },
+  {
+   "u": 0.64,
+   "v": 0.68,
+   "radius_fraction": 0.07,
+   "height": 0.3,
+   "material": "glass",
+   "tint": [
+    0.98,
+    0.99,
+    1.0
+   ],
+   "ior": 1.128
+  }
+ ],
+ "frames": 150,
+ "fps": 30,
+ "path": {
+  "look_at_objects": 0.7,
+  "views": [
+   "MTN_1296",
+   "MTN_1297",
+   "MTN_1298",
+   "MTN_1299",
+   "MTN_1300",
+   "MTN_1301"
+  ],
+  "zoom": 1.1,
+  "scale": 1.0
+ },
+ "trace": {
+  "max_depth": 4,
+  "antialias": 8
+ }
+}

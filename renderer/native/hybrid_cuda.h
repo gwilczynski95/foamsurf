@@ -117,6 +117,10 @@ struct RgbSceneTensors {
     const float *gaussian_colors;
     const float *opacity_logits;
     const float *raw_kappa;
+    // Optional (nullptr = off), forward only: per-ray far plane [R], clamped
+    // to settings.far_plane. Used by the visualization tracer to stop a ray
+    // at an inserted object.
+    const float *ray_far = nullptr;
 };
 
 struct RgbGradientTensors {
