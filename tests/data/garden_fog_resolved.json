@@ -558,5 +558,7 @@
   "identity",
   "warmup"
  ],
- "warmup_steps": 0
+ "warmup_steps": 0,
+ "warmup.model.medium_homogeneous": false,
+ "joint.model.medium_homogeneous": false
 }

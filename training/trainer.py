@@ -235,6 +235,7 @@ class Trainer:
             torch.set_rng_state(payload["rng"]["torch"])
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
 
+        self.model.medium.homogeneous = bool(config.model.medium_homogeneous)
         self.gaussian_point_extent = self._gaussian_point_extent()
         self._update_mip_filter()
         if self.resume_path is None and config.optimization.gaussian_max_scale_scene_fraction is not None:
