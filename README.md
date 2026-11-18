@@ -48,21 +48,72 @@ compile on first use; `TORCH_EXTENSIONS_DIR` controls their cache. OpenCV is pin
 
 ## Data
 
-- **SeaThru-NeRF:** use the undistorted scenes, each containing `images/` and `sparse/0/`.
-  Every eighth image is held out for testing. Scene directory names are
-  `IUI3-RedSea-Undistorted`, `Curasao-Undistorted`, `JapaneseGradens-RedSea-Undistorted`,
-  and `Panama-Undisorted` (preserve these dataset spellings).
-- **Foggy Garden:** `garden_easy/` and `garden_hard/`, generated from clear Garden images
-  and camera-z depths by `scripts/make_foggy_garden.py`.
-- **Synthetic scenes:** `lego/` and `ficus/`. Each contains `<scene>_both/` and
-  `<scene>_clouds/`; the object-only directory is `lego_lego/` for Lego and
-  `ficus_object/` for Ficus. These directories contain Blender camera JSON files and RGBA images.
-- **Separation masks:** one `<scene>.npz` file per SeaThru scene. These masks are used for
-  evaluation, not training. `scripts/sam_water_mask.py` can regenerate them with Segment Anything.
+### SeaThru-NeRF
 
-> **TODO (link):** download the prepared datasets and evaluation masks from <LINK>.
+Download the [original SeaThru-NeRF dataset](https://drive.google.com/uc?export=download&id=1RzojBFvBWjUUhuJb95xJPSNP3nJwZWaT)
+from the [authors' project page](https://sea-thru-nerf.github.io/) and unpack it locally.
+Use the white-balanced images and undistort them with **COLMAP** before training, following
+[WaterSplatting's data preparation](https://github.com/water-splatting/water-splatting#data-preprocessing).
+For example, for IUI3:
+
+```bash
+export RAW_SEATHRU=/path/to/SeathruNeRF_dataset
+export FS_DATASETS="$PWD/data/SeathruNeRF_dataset"
+mkdir -p "$FS_DATASETS/IUI3-RedSea-Undistorted"
+colmap image_undistorter \
+  --image_path "$RAW_SEATHRU/IUI3-RedSea/images_wb" \
+  --input_path "$RAW_SEATHRU/IUI3-RedSea/colmap/sparse/0" \
+  --output_path "$FS_DATASETS/IUI3-RedSea-Undistorted" \
+  --output_type COLMAP
+```
+
+Use the actual white-balanced image directory in the downloaded archive (`images_wb`
+or `Images_wb`, depending on its layout). Repeat for all four scenes, using the matching
+COLMAP reconstruction and the following **output** directory names:
+`IUI3-RedSea-Undistorted`, `Curasao-Undistorted`,
+`JapaneseGradens-RedSea-Undistorted`, and `Panama-Undisorted`.
+Preserve these spellings: the reproduction runner and mask filenames use them.
+COLMAP writes undistorted images to `images/` and a camera model under `sparse/`;
+the loader accepts both `sparse/` and `sparse/0/`, with binary or text model files.
+See the [COLMAP command-line documentation](https://colmap.github.io/cli.html).
+Every eighth image is held out for testing. Exact paper comparisons require the same
+camera reconstruction and image set as the paper runs; rerunning SfM can change them.
+
+### Synthetic scenes
+
+> **TODO (link):** download the synthetic dataset from <LINK> and unpack it into data/synthetic/.
+
+Set `FS_SYNTHETIC` if it is stored elsewhere. The required layout is:
+
+```text
+data/synthetic/
+  lego/{lego_both,lego_lego,lego_clouds}/
+  ficus/{ficus_both,ficus_object,ficus_clouds}/
+```
+
+Each layer contains Blender camera JSON files and RGBA images. The combined layers
+need `transforms_train.json` and `transforms_test.json`; isolated object/cloud layers
+need test cameras and images for evaluation. Keep the camera poses and names aligned
+across layers. Do not rename `ficus_object` to `ficus_ficus`.
+
+### Foggy Garden, masks and models
+
+Foggy Garden contains `garden_easy/` and `garden_hard/`. Generate it from clear Garden
+images, camera-z depths and a COLMAP model with `scripts/make_foggy_garden.py --help`,
+or use the prepared package. Setting `FS_FOG_DEPTHS`, `FS_GARDEN_CLEAR` and
+`FS_GARDEN_COLMAP` makes the `garden` target generate it before training.
+
+Separation evaluation needs one `<scene>.npz` mask file per SeaThru scene under
+`assets/masks/` (or `FS_MASKS`). Masks are not used in training;
+`scripts/sam_water_mask.py` can regenerate them with Segment Anything, but the provided
+paper masks are required for an exact comparison.
+
+> **TODO (link):** download the prepared Foggy Garden dataset and evaluation masks from <LINK>.
 
 > **TODO (link):** download the trained paper models from <LINK> and unpack them into models/.
+
+See [the package layout and validation instructions](docs/RELEASE_DATA.md) for models,
+assets, environment variables and output paths.
 
 ## Training
 
@@ -168,7 +219,7 @@ scripts/reproduce.sh seathru --scenes IUI3 --seeds 42
 scripts/reproduce.sh synthetic --scenes lego --background black --seeds 42
 ```
 
-The commands use the complete paper schedules. `--dry-run` prints the commands, `--slurm` submits the same sequential workflow through `scripts/slurm/reproduce.sbatch`, `--out DIR` selects the output root, and `--pipeline voronoi|hybrid|all` selects the synthetic pipeline (default: hybrid). The other training targets are `ablation`, `garden`, and `all`. `scripts/summarize.py TARGET --root DIR` aggregates the evaluation JSON files using the sample standard deviation across seeds; scene averages are computed per seed first.
+The commands use the complete paper schedules. `--dry-run` prints the commands, `--slurm` submits the same sequential workflow through `scripts/slurm/reproduce.sbatch`, `--out DIR` selects the output root, and `--pipeline voronoi|hybrid|all` selects the synthetic pipeline (default: hybrid). `--check` validates selected input files without GPU work or job submission; actual runs check their inputs before computation. The other training targets are `ablation`, `garden`, and `all`. `scripts/summarize.py TARGET --root DIR` aggregates the evaluation JSON files using the sample standard deviation across seeds; scene averages are computed per seed first.
 
 The training targets cover the following paper results. Commands report FoamSurf results;
 baseline implementations and results are not recomputed by this repository.
@@ -181,11 +232,25 @@ baseline implementations and results are not recomputed by this repository.
 | `tab:ablation` | `scripts/reproduce.sh ablation` | Full model and seven ablations, four scenes, seeds 42 and 43 |
 | `tab:garden`, `fig:garden`, `fig:suppl_garden` | `scripts/reproduce.sh garden` | Foggy-image metrics and clear-image restoration metrics for easy/hard fog |
 | `tab:synthetic`, `tab:suppl_synthetic`, `fig:synthetic`, `fig:suppl_synthetic` | `scripts/reproduce.sh synthetic --pipeline all` | Hybrid and Voronoi-first results, isolated layers and medium transmittance |
-| `tab:insertion`, `tab:suppl_insertion`, `fig:suppl_insertion_lego`, `fig:suppl_insertion_ficus` | `insert.py --benchmark --run RUN --gt ASSETS/insertion/SCENE --out OUT` | FoamSurf insertion renders and Blender-reference metrics |
-| `fig:suppl_edit_surface`, `fig:suppl_edit_surface_layers`, `fig:suppl_edit_water`, `fig:suppl_edit_water_layers` | `edit.py --run RUN --view VIEW --edits EDITS --out OUT` | Edited full images and separate layers |
-| `fig:suppl_style` | `stylize.py --run RUN --target gaussians --style-image IMAGE --out OUT` (or `--target voronoi`) | Stylized final model and preview images |
+| `tab:insertion`, `tab:suppl_insertion`, `fig:suppl_insertion_lego`, `fig:suppl_insertion_ficus` | `scripts/reproduce.sh applications --applications insertion` | FoamSurf insertion renders and Blender-reference metrics |
+| `fig:suppl_edit_surface`, `fig:suppl_edit_surface_layers`, `fig:suppl_edit_water`, `fig:suppl_edit_water_layers` | `scripts/reproduce.sh applications --applications edits` | Edited full images and separate layers |
+| `fig:suppl_style` | `scripts/reproduce.sh applications --applications style` | Stylized final model and preview images |
 | `tab:supp_weights`, `tab:supp_learning_rates` | `train.py --config configs/seathru.yaml --dry-run` | Resolved loss weights, learning rates and schedules |
+| `fig:teaser`, `fig:applications`, `fig:draining` | `scripts/reproduce.sh applications --applications teaser` renders the available insertion shot only | Complete composite figure presets and draining are pending |
 | `fig:overview` | Method schematic | Explanatory diagram, not an evaluation output |
+
+Release training controls on RTX 4090 (seed 42, final checkpoint):
+
+| Control | Release PSNR | Original run PSNR |
+|---|---:|---:|
+| IUI3 | 31.7766 dB | 31.8010 dB |
+| Lego, hybrid, black background | 34.2084 dB | 34.2231 dB |
+| Garden, easy fog | 34.0741 dB | 34.0829 dB |
+
+These are individual control runs, not a replacement for the multi-seed paper tables.
+Full Ficus retraining remains deferred; its dataset loading and resolved training command
+have been checked on CPU. Style presets are implemented but have not been rerun as a
+complete GPU workflow on this release.
 
 The control runs use IUI3 seed 42 (31.80 ± 0.15 dB) and hybrid Lego black seed 42
 (34.22 ± 0.30 dB). These are tolerances for fresh training; loading an existing paper
@@ -195,10 +260,29 @@ uses a 5,000-step warmup and 20,000 joint steps; the Voronoi-first pipeline uses
 5,000 warmup steps followed by 30,000 joint steps. Runtime depends on scene size and
 evaluation frequency; final release timing measurements are still being collected.
 
-Release integration is still in progress: the `applications` reproduction target,
-exact shot/style presets for all figures, and the draining/bounded-medium-removal code
-for `fig:draining`, `fig:applications` and the complete `fig:teaser` are pending.
-The current teaser shot can be rendered through `insert.py`, as shown below.
+The application workflow uses pretrained models and separate assets:
+
+```bash
+export FS_MODELS=/path/to/models
+export FS_ASSETS=/path/to/assets
+scripts/reproduce.sh applications --dry-run
+scripts/reproduce.sh applications --applications insertion --scenes lego --check
+scripts/reproduce.sh applications --applications insertion --scenes lego
+scripts/reproduce.sh applications --applications edits,style --scenes IUI3
+```
+
+Available application groups are `insertion` (Lego/Ficus), `edits` (nine IUI3 edits,
+including Curaçao water transplant), `style` (IUI3/Curaçao/Japanese Gardens), and `teaser`
+(the existing IUI3 insertion shot). Without `--applications`, all four are selected.
+Style runs use the paper's 5,000 steps and seed 0, then compose the surface/water models
+and render them. Original style runs took approximately 18–32 minutes each on RTX 3090;
+this is not a new release benchmark. Application inputs and outputs are specified in
+[RELEASE_DATA.md](docs/RELEASE_DATA.md). Use a fresh output directory for each application
+invocation. `all` runs training targets only; it does not implicitly run applications.
+
+The draining/bounded-medium-removal code for `fig:draining` and the complete
+`fig:applications`/`fig:teaser` presets are still pending. The `teaser` group renders
+only the available insertion shot, not every panel of the paper teaser.
 
 ## Application entry points
 
@@ -210,3 +294,12 @@ The current teaser shot can be rendered through `insert.py`, as shown below.
 > **TODO (link):** download the asset package from <LINK> and unpack it into assets/
 
 The teaser requires the `treasure_chest`, `antique_ceramic_vase_01`, `dutch_ship_large_01`, `submarine_01`, `portable_searchlight`, and `barramundi` model directories. Insertion benchmarks require the corresponding `insert.json`, `transforms_test.json`, `gt_rgba/`, and `masks/`. The benchmark computes FoamSurf results; the baseline numbers are those reported in the paper.
+
+## Method, citation and licenses
+
+See [the implementation guide](docs/METHOD.md), [research references](docs/references.bib),
+and [third-party attribution and distribution status](docs/THIRD_PARTY.md).
+The public FoamSurf BibTeX entry will be added when the author list and paper URL are
+public. The root Apache-2.0 license does not replace third-party terms. The FlaRe-base
+license/notice and per-asset redistribution information remain prerequisites for public
+packaging; they are not silently covered by the root license.

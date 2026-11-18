@@ -7,10 +7,10 @@ export PYTHONPATH="$ROOT/renderer:$ROOT/src:$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON=${FOAMSURF_PYTHON:-python}
 original_args=("$@")
 target=${1:-}
-[[ -n "$target" ]] || { echo 'Usage: scripts/reproduce.sh seathru|ablation|garden|synthetic|all [--seeds 42,43,44] [--scenes IUI3,lego] [--slurm] [--dry-run]' >&2; exit 2; }
+[[ -n "$target" ]] || { echo 'Usage: scripts/reproduce.sh seathru|ablation|garden|synthetic|applications|all [--seeds 42,43,44] [--scenes IUI3,lego] [--slurm] [--dry-run] [--check] [--applications insertion,edits,style,teaser]' >&2; exit 2; }
 shift
 case "$target" in
-    seathru|ablation|garden|synthetic|all) ;;
+    seathru|ablation|garden|synthetic|applications|all) ;;
     *) echo "Unknown target: $target" >&2; exit 2 ;;
 esac
 seed_spec=''
@@ -20,6 +20,8 @@ background=all
 pipeline=hybrid
 dry_run=0
 slurm=0
+check=0
+applications=insertion,edits,style,teaser
 while (($#)); do
     case "$1" in
         --seeds) seed_spec=$2; shift 2 ;;
@@ -27,6 +29,8 @@ while (($#)); do
         --out) out=$2; shift 2 ;;
         --background) background=$2; shift 2 ;;
         --pipeline) pipeline=$2; shift 2 ;;
+        --applications) applications=$2; shift 2 ;;
+        --check) check=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         --slurm) slurm=1; shift ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
@@ -46,6 +50,30 @@ run() {
     printf '\n'
     if (( ! dry_run )); then "$@"; fi
 }
+
+# Validate a complete training plan before the first expensive command.
+# Dry runs stay usable before datasets have been downloaded.
+if [[ "$target" != applications ]] && (( check || (! dry_run && ! slurm) )); then
+    plan_args=()
+    for arg in "${original_args[@]}"; do
+        [[ "$arg" == --check || "$arg" == --dry-run || "$arg" == --slurm ]] || plan_args+=("$arg")
+    done
+    plan=$(bash "$ROOT/scripts/reproduce.sh" "${plan_args[@]}" --dry-run)
+    printf '%s\n' "$plan" | "$PYTHON" scripts/preflight.py
+    (( ! check )) || exit 0
+fi
+if [[ "$target" == applications ]] && (( ! slurm || check )); then
+    app_args=(--applications "$applications" --scenes "$scene_spec" --out "$out")
+    (( ! dry_run )) || app_args+=(--dry-run)
+    (( ! check )) || app_args+=(--check)
+    [[ -z "$seed_spec" ]] || { echo 'Applications use fixed pretrained models and style seed 0; omit --seeds.' >&2; exit 2; }
+    exec "$PYTHON" scripts/reproduce_applications.py "${app_args[@]}"
+fi
+
+if [[ "$target" == applications ]] && (( slurm )); then
+    [[ -z "$seed_spec" ]] || { echo 'Applications use fixed pretrained models and style seed 0; omit --seeds.' >&2; exit 2; }
+    "$PYTHON" scripts/reproduce_applications.py --applications "$applications" --scenes "$scene_spec" --out "$out" --dry-run >/dev/null
+fi
 
 # Submit the same sequential workflow; arguments remain separate shell words.
 if (( slurm )); then
