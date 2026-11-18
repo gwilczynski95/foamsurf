@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e4eee2">
+  <meta name="description" content="FoamSurf represents surfaces with Gaussian surfels and scattering media with Voronoi cells, rendered together by one differentiable ray tracer.">
+  <title>FoamSurf — A Voronoi-Surfel Representation for Differentiable Rendering</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="animation.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#overview">Skip to content</a>
+<header class="navigation">
+  <a class="brand" href="#top" aria-label="FoamSurf home"><span class="brand-symbol" aria-hidden="true">✳</span> FoamSurf</a>
+  <nav aria-label="Main navigation"><a href="#overview">Overview</a><a href="#method">Method</a><a href="#applications">Applications</a></nav>
+  <a class="nav-release" href="#resources">Resources <span aria-hidden="true">↗</span></a>
+</header>
+<main>
+<section class="hero" id="top" aria-labelledby="project-title">
+  <canvas id="medium" aria-hidden="true"></canvas>
+  <div class="hero-content">
+    <p class="eyebrow"><span class="status-dot"></span> Surfaces + scattering media</p>
+    <h1 id="project-title"><span class="wordmark-fallback" aria-hidden="true">FoamSurf</span><canvas id="wordmark" aria-hidden="true"></canvas><span class="sr-only">FoamSurf</span></h1>
+    <p class="full-title">A Voronoi-Surfel Representation<br>for Differentiable Rendering</p>
+    <p class="hero-description">One scene. Two representations.<br>Surfaces and the medium, reconstructed together.<br class="mobile-break"> Reimagined independently.</p>
+    <p class="authors-placeholder">Author list & affiliations coming soon</p>
+    <div class="resource-pills" aria-label="Publication availability">
+      <span class="pill unavailable" aria-disabled="true">Paper <span>Coming soon ↗</span></span>
+      <span class="pill unavailable" aria-disabled="true">Code <span>Release in preparation ↗</span></span>
+      <a class="pill active" href="#method">Explore the method <span aria-hidden="true">↓</span></a>
+    </div>
+  </div>
+  <div class="hero-bottom"><span><i class="legend-cell"></i> Voronoi medium <i class="legend-surfel"></i> Gaussian surfaces</span><button id="motion-toggle" hidden type="button" aria-pressed="false">Pause motion <span aria-hidden="true">Ⅱ</span></button></div>
+</section>
+<section class="intro section" id="overview" aria-labelledby="overview-title">
+  <div class="section-label"><span>01 / Overview</span><span>Beyond the surface</span></div>
+  <div class="intro-grid"><h2 id="overview-title">A scene is more<br>than its surfaces.</h2><div class="intro-copy"><p>Underwater, light travels through the scene before it reaches the camera. Water attenuates the surface and scatters light back toward us. Reconstructing only what is solid tells just part of the story.</p><p><strong>FoamSurf gives the surface and the medium their own representations.</strong> Planar Gaussian surfels capture the geometry and appearance of surfaces. Space-filling Voronoi cells describe the water or fog between them. A single differentiable ray tracer brings both together.</p></div></div>
+  <div class="film-placeholder" role="img" aria-label="Placeholder for the forthcoming method video">
+    <div class="film-art" aria-hidden="true"><div class="wire-cell cell-one"></div><div class="wire-cell cell-two"></div><div class="film-surfel"></div><div class="film-ray"></div></div>
+    <div class="film-copy"><span class="eyebrow">The method in motion</span><h3>See the whole scene.</h3><p>Method video coming soon.</p></div><span class="film-badge">Film in preparation</span>
+  </div>
+</section>
+<section class="section method" id="method" aria-labelledby="method-title">
+  <div class="section-label"><span>02 / The representation</span><span>Separate components. Shared rendering.</span></div>
+  <div class="section-heading"><h2 id="method-title">Surface meets medium.</h2><p>Explicit geometry. Spatially varying water.<br>One ordered path for light.</p></div>
+  <figure class="method-figure"><a href="assets/method.webp" target="_blank" rel="noopener" aria-label="Open the method diagram at full resolution"><img src="assets/method.webp" alt="FoamSurf method: Voronoi medium and Gaussian surfels feed a unified differentiable renderer, producing a full view, surface-only and medium-only images, and surfel opacity." width="2400" height="753" loading="lazy"></a><figcaption>From photographs to a hybrid scene: surfels and Voronoi cells share a differentiable ray tracer.</figcaption></figure>
+  <div class="method-columns"><article><span class="component-number">01</span><h3><i class="legend-surfel"></i> Gaussian surfels</h3><p>Oriented, planar Gaussians model the seabed, rocks, and other surfaces, with view-dependent appearance.</p></article><article><span class="component-number">02</span><h3><i class="legend-cell"></i> Voronoi medium</h3><p>Space-filling cells carry local attenuation, backscatter, and medium color, allowing water and fog to vary throughout the scene.</p></article><article><span class="component-number">03</span><h3><span class="ray-icon" aria-hidden="true">↗</span> Unified ray tracing</h3><p>Surface hits and medium segments are composited in order along each ray. Training priors separate the components without segmentation masks.</p></article></div>
+</section>
+<section class="section separation" aria-labelledby="separation-title">
+  <div class="section-label"><span>03 / Scene decomposition</span><span>What lies beneath</span></div>
+  <div class="section-heading"><h2 id="separation-title">Keep the reef.<br>Take away the water.</h2><p>Inspect the reconstruction as a whole, or reveal its surface and medium independently.</p></div>
+  <figure class="result-figure"><img src="assets/decomposition.webp" alt="Paper results comparing surface-only reconstructions and surface opacity for underwater scenes." loading="lazy"><figcaption>Surface recovery and opacity from the paper. The reconstructed medium can be removed at rendering time.</figcaption></figure>
+</section>
+<section class="section applications" id="applications" aria-labelledby="applications-title">
+  <div class="section-label"><span>04 / Applications</span><span>Reconstruct, then reimagine</span></div>
+  <div class="section-heading"><h2 id="applications-title">Two parts.<br>More possibilities.</h2><p>Edit the geometry. Change the water.<br>Introduce something new.</p></div>
+  <div class="application-grid">
+    <article class="application"><div class="application-image"><img src="assets/surface.webp" alt="Examples from the paper showing a reconstructed seabed with different surface deformations." loading="lazy"></div><div class="application-title"><h3>Reshape the surface</h3><span>01</span></div><p>Deform the seabed while keeping the reconstructed medium in place.</p><span class="video-status">Demo video coming soon</span></article>
+    <article class="application"><div class="application-image"><img src="assets/water.webp" alt="Examples from the paper showing changes to the appearance and density of water." loading="lazy"></div><div class="application-title"><h3>Change the medium</h3><span>02</span></div><p>Adjust the water’s appearance, attenuation, and scattering independently of the surface.</p><span class="video-status">Demo video coming soon</span></article>
+    <article class="application"><div class="application-image"><img src="assets/insertion.webp" alt="Synthetic Lego scene showing an inserted sphere and comparisons against reference rendering." loading="lazy"></div><div class="application-title"><h3>Compose the scene</h3><span>03</span></div><p>Insert objects into the reconstruction, with attenuation and scattering along direct, reflected, and refracted rays.</p><span class="video-status">Demo video coming soon</span></article>
+    <article class="application"><div class="application-image"><img src="assets/style.webp" alt="Surface and water style-transfer results from the paper, shown as separate components." loading="lazy"></div><div class="application-title"><h3>Give each part a style</h3><span>04</span></div><p>Stylize the surface and the water separately, then bring them together in a single scene.</p><span class="video-status">Demo video coming soon</span></article>
+  </div>
+</section>
+<section class="section abstract" aria-labelledby="abstract-title"><div class="section-label"><span>05 / Abstract</span><span>The research</span></div><div class="intro-grid"><h2 id="abstract-title">Recovering a<br>world in between.</h2><div class="intro-copy"><p>Scenes inside a scattering medium contain solid surfaces, such as the seabed or rocks, and a semi-transparent medium, such as water, fog, or smoke. Recent Gaussian-based methods produce realistic images of scenes in scattering media, but traces of the medium can remain visible in surface-only renders. Neural fields separate surfaces and medium more accurately, but they are slow to train and difficult to edit.</p><p>FoamSurf models surfaces with planar Gaussian surfels and the medium with space-filling Voronoi cells. A single differentiable ray tracer composites both along arbitrary rays, while training priors keep them separate without segmentation masks. Across real underwater scenes, synthetic scenes, and dense fog, FoamSurf achieves image quality on par with the state of the art and the most accurate surface–medium separation among the compared methods in our experiments.</p><p>The recovered components can be removed, edited, or stylized independently. The same reconstruction supports inserted mesh objects with attenuation and scattering along both direct and reflected or refracted rays.</p></div></div></section>
+<section class="section resources" id="resources" aria-labelledby="resources-title"><div class="section-label"><span>06 / Resources</span><span>Coming into view</span></div><div class="section-heading"><h2 id="resources-title">More to come.</h2><p>The preprint, code release, and videos are in preparation. Links will appear here as they become available.</p></div><div class="resource-list"><div><span>Paper & citation</span><span>Preprint forthcoming</span><span aria-hidden="true">↗</span></div><div><span>Code & datasets</span><span>Release in preparation</span><span aria-hidden="true">↗</span></div><div><span>Method & application films</span><span>Coming soon</span><span aria-hidden="true">↗</span></div></div></section>
+</main>
+<footer><a class="brand" href="#top"><span class="brand-symbol" aria-hidden="true">✳</span> FoamSurf</a><span>Surfaces and the space between them.</span><a href="#top">Back to the surface ↑</a></footer>
+</body>
+</html>
