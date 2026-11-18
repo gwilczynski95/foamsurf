@@ -125,10 +125,12 @@ garden() {
 }
 
 synthetic() {
-    local scene kind bg seed run_dir rgb
+    local scene kind bg seed run_dir rgb object_layer
     seeds 42,43,44
     for scene in lego ficus; do
         selected "$scene" "$scene" || continue
+        object_layer=lego_lego
+        [[ "$scene" != ficus ]] || object_layer=ficus_object
         for kind in hybrid voronoi; do
             [[ "$pipeline" == all || "$pipeline" == "$kind" ]] || continue
             for bg in black white; do
@@ -139,7 +141,7 @@ synthetic() {
                     [[ "$bg" == black || "$seed" == 42 ]] || continue
                     run_dir="$out/synthetic/${kind}_${bg}/$scene/seed_$seed"
                     run "$PYTHON" train.py --config "configs/synthetic_$kind.yaml" --scene "$SYNTHETIC/$scene/${scene}_both" --seed "$seed" --out "$run_dir" --resume \
-                        --set "both.background=$rgb" --set "both.dataset.gaussian_ground_truth_path=$SYNTHETIC/$scene/${scene}_$scene" \
+                        --set "both.background=$rgb" --set "both.dataset.gaussian_ground_truth_path=$SYNTHETIC/$scene/$object_layer" \
                         --set "both.dataset.medium_ground_truth_path=$SYNTHETIC/$scene/${scene}_clouds"
                     render_metrics "$run_dir"
                     run "$PYTHON" evaluate.py layers --run "$run_dir" --out "$run_dir/evaluation/layers"

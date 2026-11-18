@@ -20,6 +20,10 @@ def test_all_training_commands_resolve(tmp_path):
         p = data / 'synthetic' / scene / f'{scene}_both'
         p.mkdir(parents=True)
         (p / 'transforms_train.json').write_text('{}')
+        for layer in [('lego_lego' if scene == 'lego' else 'ficus_object'), f'{scene}_clouds']:
+            folder = data / 'synthetic' / scene / layer
+            folder.mkdir()
+            (folder / 'transforms_test.json').write_text('{}')
     env = dict(os.environ, FOAMSURF_PYTHON=sys.executable, FS_DATASETS=str(data / 'seathru'),
                FS_FOGGY=str(data / 'garden'), FS_SYNTHETIC=str(data / 'synthetic'))
     env.pop('FS_FOG_DEPTHS', None)
@@ -36,7 +40,13 @@ def test_all_training_commands_resolve(tmp_path):
     def resolve(cmd):
         result = subprocess.run(cmd + ['--dry-run'], cwd=ROOT, env=env, text=True, capture_output=True)
         assert result.returncode == 0, (cmd, result.stderr[-4000:])
-        assert json.loads(result.stdout)
+        manifest = json.loads(result.stdout)
+        assert manifest
+        if 'synthetic' in cmd[cmd.index('--config') + 1]:
+            for stage in ('warmup', 'joint'):
+                dataset = manifest[stage]['dataset']
+                for key in ('gaussian_ground_truth_path', 'medium_ground_truth_path'):
+                    assert (Path(dataset[key]) / 'transforms_test.json').is_file(), dataset[key]
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(resolve, training))
     assert not (tmp_path / 'runs').exists()

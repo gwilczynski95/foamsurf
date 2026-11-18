@@ -47,7 +47,8 @@ def fake(monkeypatch):
         Fake.builds, Fake.rebuilds = [], []
         Fake.fail_build, Fake.fail_rebuild = fail_build, fail_rebuild
         Fake.perm_build, Fake.perm_rebuild = perm_build, perm_rebuild
-        monkeypatch.setattr(topo.foamsurf_topology, "Triangulation", Fake)
+        monkeypatch.setattr(topo, "foamsurf_topology", SimpleNamespace(
+            Triangulation=Fake, TriangulationFailedError=RuntimeError))
     return install
 
 
@@ -113,3 +114,19 @@ def test_reflected_jitter_moves_sites_off_the_box_faces():
     assert bool((reflected[0, 0] < 2.0) and (reflected[0, 2] > -1.0))
     assert (reflected - sites).abs().max() <= 4e-3 + 1e-9
     assert torch.equal(reflected[1], clamped[1])
+
+
+def test_training_imports_do_not_initialize_cuda():
+    import os
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", """
+import sys
+import torch
+import training.end_to_end
+import training.native_handoff
+import training.trainer
+assert 'foamsurf_topology' not in sys.modules
+assert not torch.cuda.is_initialized()
+"""], env=dict(os.environ, CUDA_VISIBLE_DEVICES=""), check=True)

@@ -3,7 +3,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-import foamsurf_topology
+# The native module initializes CUDA on import. Load it only when triangulating.
+foamsurf_topology = None
 
 from .medium import VoronoiMediumModel
 
@@ -72,6 +73,10 @@ class VoronoiTopologyController:
         perturbation while the sites stay exact, as training does after a failed rebuild (update_topology). Only if
         that fails too are the non-guard sites moved by a microscopic deterministic jitter mirrored into the box (as in
         replace_sites), and the medium keeps the jittered sites."""
+        global foamsurf_topology
+        if foamsurf_topology is None:
+            import foamsurf_topology
+
         sites = medium.sites.detach()
         try:
             t = foamsurf_topology.Triangulation(sites)

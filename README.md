@@ -54,8 +54,9 @@ compile on first use; `TORCH_EXTENSIONS_DIR` controls their cache. OpenCV is pin
   and `Panama-Undisorted` (preserve these dataset spellings).
 - **Foggy Garden:** `garden_easy/` and `garden_hard/`, generated from clear Garden images
   and camera-z depths by `scripts/make_foggy_garden.py`.
-- **Synthetic scenes:** `lego/` and `ficus/`. Each contains `<scene>_both/`,
-  `<scene>_<scene>/`, and `<scene>_clouds/`, with Blender camera JSON files and RGBA images.
+- **Synthetic scenes:** `lego/` and `ficus/`. Each contains `<scene>_both/` and
+  `<scene>_clouds/`; the object-only directory is `lego_lego/` for Lego and
+  `ficus_object/` for Ficus. These directories contain Blender camera JSON files and RGBA images.
 - **Separation masks:** one `<scene>.npz` file per SeaThru scene. These masks are used for
   evaluation, not training. `scripts/sam_water_mask.py` can regenerate them with Segment Anything.
 
