@@ -66,7 +66,7 @@
     m.textAlign = 'center'; m.textBaseline = 'middle';
     m.fillText('FoamSurf', textWidth / 2, textHeight * .54);
     const pixels = m.getImageData(0, 0, mask.width, mask.height).data;
-    const step = Math.max(3.5, fontSize / 22);
+    const step = Math.max(2.6, fontSize / 30);
     splats = [];
     for (let y = step; y < mask.height - step; y += step) {
       for (let x = step; x < mask.width - step; x += step) {
@@ -109,12 +109,12 @@
       for (const p of polygon.slice(1)) ctx.lineTo(...p);
       ctx.closePath();
       ctx.fillStyle = near
-        ? `rgba(137,183,143,${.025 + Math.pow(a.shade, 3) * .32})`
-        : `rgba(94,158,108,${(.035 + a.shade * .11) * layer.depth})`;
+        ? `rgba(137,181,207,${.025 + Math.pow(a.shade, 3) * .32})`
+        : `rgba(94,157,193,${(.035 + a.shade * .11) * layer.depth})`;
       ctx.fill(); ctx.lineWidth = near ? 1 : .65;
-      ctx.strokeStyle = `rgba(66,128,83,${near ? .22 : .19 * layer.depth})`; ctx.stroke();
+      ctx.strokeStyle = `rgba(66,129,166,${near ? .22 : .19 * layer.depth})`; ctx.stroke();
       // Mark the moving polygon corners, rather than the Voronoi sites.
-      ctx.fillStyle = `rgba(57,120,74,${near ? .42 : .28 * layer.depth})`;
+      ctx.fillStyle = `rgba(57,120,159,${near ? .42 : .28 * layer.depth})`;
       for (const p of polygon) {
         ctx.beginPath(); ctx.arc(p[0], p[1], near ? 1.8 : 1.1, 0, Math.PI * 2); ctx.fill();
       }

@@ -18,7 +18,7 @@ a server's loopback address is not a public preview URL.
 An original Canvas 2D animation renders three independently moving Voronoi layers
 and a wordmark built from red elliptical Gaussian sprites. Polygon vertices move as
 the tessellations evolve. The nearest translucent layer overlaps the title; all layers
-fade into a sage-green page. The Gaussians drift, rotate and vary in size and opacity. The paper method figure supplies the visual language. FlaRe's project page
+fade into a pale ocean-blue page. The smaller, densely sampled coral Gaussians drift, rotate and vary in size and opacity. The paper method figure supplies the visual language. FlaRe's project page
 (https://kbyrski.github.io/FlaRe/) is a layout/animation reference; its JavaScript and
 styles have not been copied. The hero is an artistic illustration, not a physical simulator.
 

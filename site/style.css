@@ -1,10 +1,10 @@
 :root{
-  --paper:#e4eee2;
-  --ink:#183f31;
-  --muted:#486451;
-  --line:#b8cbb9;
+  --paper:#e4edf3;
+  --ink:#18394d;
+  --muted:#496578;
+  --line:#b8cbd8;
   --red:#d54546;
-  --deep:#123d30;
+  --deep:#12384d;
   --max:1160px;
   font-family:Arial,Helvetica,sans-serif;
   color:var(--ink);
@@ -63,7 +63,7 @@ a:focus-visible,button:focus-visible{
   justify-content:space-between;
   position:relative;
   z-index:4;
-  border-bottom:1px solid #44694d22
+  border-bottom:1px solid #44697f22
 }
 .brand{
   display:flex;
@@ -113,7 +113,7 @@ a:focus-visible,button:focus-visible{
   position:absolute;
   inset:0;
   z-index:-1;
-  background:linear-gradient(180deg,transparent 28%,#e4eee230 53%,var(--paper) 95%);
+  background:linear-gradient(180deg,transparent 28%,#e4edf330 53%,var(--paper) 95%);
   pointer-events:none
 }
 .hero-content{
@@ -138,7 +138,7 @@ a:focus-visible,button:focus-visible{
   width:6px;
   height:6px;
   border-radius:50%;
-  background:#497c53
+  background:#497f9d
 }
 h1{
   height:234px;
@@ -189,7 +189,7 @@ h1{
   flex-wrap:wrap
 }
 .pill{
-  border:1px solid #93b198;
+  border:1px solid #93b1c5;
   border-radius:100px;
   padding:13px 18px;
   font-size:12px;
@@ -201,7 +201,7 @@ h1{
   font-size:10px
 }
 .pill.unavailable{
-  background:#e8f0e680
+  background:#e8f0f680
 }
 .pill.unavailable span{
   color:var(--muted)
@@ -209,11 +209,11 @@ h1{
 .pill.active{
   background:var(--deep);
   border-color:var(--deep);
-  color:#f0f4e9;
+  color:#f0f5f8;
   transition:background .2s
 }
 .pill.active:hover{
-  background:#256044
+  background:#256487
 }
 .hero-bottom{
   max-width:var(--max);
@@ -234,8 +234,8 @@ h1{
   display:inline-block;
   width:13px;
   height:13px;
-  background:#87b99088;
-  border:1px solid #578b63;
+  background:#87b4cf88;
+  border:1px solid #578eae;
   clip-path:polygon(25% 0,80% 10%,100% 65%,60% 100%,0 70%);
   vertical-align:middle
 }
@@ -309,7 +309,7 @@ h3{
 .film-placeholder{
   min-height:360px;
   background:var(--deep);
-  color:#e4eee2;
+  color:#e4edf3;
   margin-top:50px;
   position:relative;
   overflow:hidden;
@@ -328,17 +328,17 @@ h3{
   margin:20px 0 12px
 }
 .film-copy p{
-  color:#b3c9b6;
+  color:#b3cbdc;
   font-size:14px
 }
 .film-badge{
   position:absolute;
   bottom:25px;
   right:28px;
-  border:1px solid #b3c9b655;
+  border:1px solid #b3cbdc55;
   padding:8px 12px;
   border-radius:20px;
-  color:#b3c9b6;
+  color:#b3cbdc;
   font-size:10px
 }
 .film-art{
@@ -353,9 +353,9 @@ h3{
   position:absolute;
   width:190px;
   height:210px;
-  border:1px solid #7eb88b55;
+  border:1px solid #7eb5d455;
   transform:rotate(-25deg) skew(10deg);
-  background:linear-gradient(30deg,#78af7c12,#78af7c33)
+  background:linear-gradient(30deg,#78afd012,#78afd033)
 }
 .cell-one{
   left:0;
@@ -366,7 +366,7 @@ h3{
   right:0;
   top:75px;
   transform:rotate(28deg);
-  border-color:#a4c99e;
+  border-color:#a4c7df;
   clip-path:polygon(0 0,80% 15%,100% 80%,20% 100%)
 }
 .film-surfel{
@@ -385,7 +385,7 @@ h3{
   left:0;
   width:100%;
   height:1px;
-  background:linear-gradient(90deg,transparent,#bacb92);
+  background:linear-gradient(90deg,transparent,#92bccc);
   transform:rotate(13deg)
 }
 .section-heading{
@@ -416,7 +416,7 @@ h3{
   height:auto
 }
 .method-figure figcaption{
-  color:#506355;
+  color:#506979;
   font-size:11px;
   text-align:center;
   line-height:1.6;
@@ -445,7 +445,7 @@ h3{
   margin-right:6px
 }
 .ray-icon{
-  color:#6e985b;
+  color:#5b91b4;
   margin-right:6px
 }
 .method-columns p,.application p{
@@ -455,7 +455,7 @@ h3{
   margin:0
 }
 .result-figure{
-  background:#dae6d7;
+  background:#d7e5ef;
   padding:16px
 }
 .result-figure img{
@@ -475,7 +475,7 @@ h3{
   gap:45px 32px
 }
 .application-image{
-  background:#d7e3d3;
+  background:#d3e2ed;
   aspect-ratio:1.85;
   padding:14px;
   display:flex;
