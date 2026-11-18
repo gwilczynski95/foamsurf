@@ -21,8 +21,8 @@
   sprite.width = sprite.height = 64;
   const brush = sprite.getContext('2d');
   const gradient = brush.createRadialGradient(32, 32, 0, 32, 32, 31);
-  gradient.addColorStop(0, 'rgba(196,48,62,.98)');
-  gradient.addColorStop(.32, 'rgba(218,66,76,.90)');
+  gradient.addColorStop(0, 'rgba(180,35,49,.98)');
+  gradient.addColorStop(.32, 'rgba(205,48,62,.94)');
   gradient.addColorStop(.65, 'rgba(232,96,101,.60)');
   gradient.addColorStop(1, 'rgba(234,106,112,0)');
   brush.fillStyle = gradient; brush.fillRect(0, 0, 64, 64);
@@ -66,7 +66,7 @@
     m.textAlign = 'center'; m.textBaseline = 'middle';
     m.fillText('FoamSurf', textWidth / 2, textHeight * .54);
     const pixels = m.getImageData(0, 0, mask.width, mask.height).data;
-    const step = Math.max(4.2, fontSize / 18);
+    const step = Math.max(3.5, fontSize / 22);
     splats = [];
     for (let y = step; y < mask.height - step; y += step) {
       for (let x = step; x < mask.width - step; x += step) {
@@ -74,7 +74,7 @@
         const py = Math.round(y + (random() - .5) * step * .65);
         if (pixels[(py * mask.width + px) * 4 + 3] < 140) continue;
         splats.push({x: px, y: py, rx: step * (1.05 + random() * .85), ry: step * (.48 + random() * .4),
-          angle: -1.1 + random() * 2.2, phase: random() * 6.28, alpha: .35 + random() * .65,
+          angle: -1.1 + random() * 2.2, phase: random() * 6.28, alpha: .55 + random() * .45,
           speed: .45 + random() * .55});
       }
     }
