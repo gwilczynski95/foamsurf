@@ -70,7 +70,7 @@ Katalog runu:
 
 | ścieżka | zawartość |
 |---|---|
-| `joint/checkpoints/last.pt`, `best.pt` | model (Gaussy, komórki), optymalizatory, model kamery, światło wody |
+| `joint/checkpoints/last.pt` | model (Gaussy, komórki), optymalizatory, model kamery, światło wody |
 | `joint/metrics/train.csv`, `eval.csv` | straty i statystyki co krok, metryki testowe co ewaluację |
 | `joint/evaluation/iteration_*/` | rendery testowe: pełny obraz, same Gaussy, sam ośrodek, krycie, błąd |
 | `joint/summary.json` | status, czas, liczba Gaussów |
@@ -131,4 +131,19 @@ Plik póz: lista kamer w układzie świata zbioru danych (COLMAP), format jak w 
 | `training/water_*.py`, `camera_isp.py`, `oceansplat.py` | światło wody, model kamery, straty OceanSplat |
 | `evaluation/evaluator.py` | metryki i rendery testowe |
 | `train.py`, `render.py` | punkty wejścia |
-| `scripts/fps_bench.py` | pomiar szybkości renderu wytrenowanego runu |
+| `render.py --fps 32` | pomiar szybkości renderu wytrenowanego runu |
+
+## Paper training checks
+
+`scripts/reproduce.sh` runs training and final-checkpoint evaluation sequentially on one GPU, and resumes interrupted runs. Set the dataset and mask directories before running it:
+
+```bash
+export FS_DATASETS=/path/to/SeathruNeRF_dataset
+export FS_SYNTHETIC=/path/to/synthetic
+export FS_FOGGY=/path/to/foggy_garden
+export FS_MASKS=/path/to/masks
+scripts/reproduce.sh seathru --scenes IUI3 --seeds 42
+scripts/reproduce.sh synthetic --scenes lego --background black --seeds 42
+```
+
+The commands use the complete paper schedules. `--dry-run` prints the commands, `--out DIR` selects the output root, and `--pipeline voronoi|hybrid|all` selects the synthetic pipeline (default: hybrid). The other training targets are `ablation`, `garden`, and `all`. `scripts/summarize.py TARGET --root DIR` aggregates the evaluation JSON files using the sample standard deviation across seeds; scene averages are computed per seed first.
