@@ -1,4 +1,0 @@
-base_config: ../seathru.yaml
-overrides:
-  - joint.optimization.water_phase=false
-  - joint.optimization.water_extrapolation=false

@@ -1,7 +1,0 @@
-base_config: ../seathru.yaml
-overrides:
-  - joint.optimization.ocean_tri_weight=0.0
-  - joint.optimization.ocean_epi_weight_start=0.0
-  - joint.optimization.ocean_epi_weight_end=0.0
-  - joint.optimization.ocean_res_weight=0.0
-  - joint.optimization.ocean_alpha_until=0

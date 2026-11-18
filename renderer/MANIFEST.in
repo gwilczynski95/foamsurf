@@ -1,2 +1,0 @@
-recursive-include foamsurf/_optix *.so *.ptx
-recursive-include third_party/flare_renderer *.cpp *.h *.cu *.cuh
