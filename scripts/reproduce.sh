@@ -21,7 +21,7 @@ pipeline=hybrid
 dry_run=0
 slurm=0
 check=0
-applications=insertion,edits,style,teaser
+applications=insertion,edits,style
 while (($#)); do
     case "$1" in
         --seeds) seed_spec=$2; shift 2 ;;

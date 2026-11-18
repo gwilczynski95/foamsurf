@@ -44,6 +44,11 @@ def test_applications_dry_run_presets_and_check_without_cuda(tmp_path):
     assert result.stdout.count('--benchmark') == 2
     assert '--medium-backscatter-lr 0' in result.stdout
     assert '--transplant-from' in result.stdout
+    assert '--shot' not in result.stdout
+    demo = subprocess.run(args + ['--applications', 'teaser', '--dry-run'], cwd=ROOT, env=env,
+                          capture_output=True, text=True)
+    assert demo.returncode == 0, demo.stderr
+    assert '--shot' in demo.stdout
     assert 'ficus_both' in result.stdout
     check = subprocess.run(args + ['--check'], cwd=ROOT, env=env, capture_output=True, text=True)
     assert check.returncode != 0

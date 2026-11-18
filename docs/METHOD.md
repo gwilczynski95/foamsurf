@@ -85,5 +85,5 @@ paper's K=32 renderer; training uses K=64.
 [Style transfer](../stylize.py) optimizes a selected component with CLIP losses, then
 [composition](../apps/style/compose_style.py) combines surface and water styles from the
 same base model. The application runner contains the available paper presets. Bounded
-medium removal/draining and the complete composite teaser still require integration;
-the existing object-insertion teaser is only one available shot.
+medium removal/draining still requires integration. Reproduction of the paper teaser is
+outside the release scope; the existing insertion shot remains an optional demo.

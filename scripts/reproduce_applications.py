@@ -81,7 +81,7 @@ def plan(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--applications', default='insertion,edits,style,teaser')
+    parser.add_argument('--applications', default='insertion,edits,style')
     parser.add_argument('--scenes', default='')
     parser.add_argument('--out', type=Path, default=Path('outputs/paper'))
     parser.add_argument('--dry-run', action='store_true')

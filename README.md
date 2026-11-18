@@ -236,7 +236,8 @@ baseline implementations and results are not recomputed by this repository.
 | `fig:suppl_edit_surface`, `fig:suppl_edit_surface_layers`, `fig:suppl_edit_water`, `fig:suppl_edit_water_layers` | `scripts/reproduce.sh applications --applications edits` | Edited full images and separate layers |
 | `fig:suppl_style` | `scripts/reproduce.sh applications --applications style` | Stylized final model and preview images |
 | `tab:supp_weights`, `tab:supp_learning_rates` | `train.py --config configs/seathru.yaml --dry-run` | Resolved loss weights, learning rates and schedules |
-| `fig:teaser`, `fig:applications`, `fig:draining` | `scripts/reproduce.sh applications --applications teaser` renders the available insertion shot only | Complete composite figure presets and draining are pending |
+| `fig:applications`, `fig:draining` | Available components use the application commands above; draining integration is pending | Complete non-teaser application presets remain to be checked |
+| `fig:teaser` | Outside the release reproduction scope | The existing insertion shot is an optional demo, not a release requirement |
 | `fig:overview` | Method schematic | Explanatory diagram, not an evaluation output |
 
 Release training controls on RTX 4090 (seed 42, final checkpoint):
@@ -273,16 +274,18 @@ scripts/reproduce.sh applications --applications edits,style --scenes IUI3
 
 Available application groups are `insertion` (Lego/Ficus), `edits` (nine IUI3 edits,
 including Curaçao water transplant), `style` (IUI3/Curaçao/Japanese Gardens), and `teaser`
-(the existing IUI3 insertion shot). Without `--applications`, all four are selected.
+(an optional IUI3 insertion demo). Without `--applications`, only `insertion,edits,style`
+are selected; teaser assets are not required for this default workflow.
 Style runs use the paper's 5,000 steps and seed 0, then compose the surface/water models
 and render them. Original style runs took approximately 18–32 minutes each on RTX 3090;
 this is not a new release benchmark. Application inputs and outputs are specified in
 [RELEASE_DATA.md](docs/RELEASE_DATA.md). Use a fresh output directory for each application
 invocation. `all` runs training targets only; it does not implicitly run applications.
 
-The draining/bounded-medium-removal code for `fig:draining` and the complete
-`fig:applications`/`fig:teaser` presets are still pending. The `teaser` group renders
-only the available insertion shot, not every panel of the paper teaser.
+The draining/bounded-medium-removal code for `fig:draining` and complete non-teaser
+`fig:applications` presets remain pending. Reproducing the paper teaser is explicitly
+outside the release scope. The optional `teaser` group keeps the existing insertion demo
+available; completing its paper panels is not a release requirement.
 
 ## Application entry points
 
@@ -293,7 +296,7 @@ only the available insertion shot, not every panel of the paper teaser.
 
 > **TODO (link):** download the asset package from <LINK> and unpack it into assets/
 
-The teaser requires the `treasure_chest`, `antique_ceramic_vase_01`, `dutch_ship_large_01`, `submarine_01`, `portable_searchlight`, and `barramundi` model directories. Insertion benchmarks require the corresponding `insert.json`, `transforms_test.json`, `gt_rgba/`, and `masks/`. The benchmark computes FoamSurf results; the baseline numbers are those reported in the paper.
+The optional teaser demo requires the `treasure_chest`, `antique_ceramic_vase_01`, `dutch_ship_large_01`, `submarine_01`, `portable_searchlight`, and `barramundi` model directories. Insertion benchmarks require the corresponding `insert.json`, `transforms_test.json`, `gt_rgba/`, and `masks/`. The benchmark computes FoamSurf results; the baseline numbers are those reported in the paper.
 
 ## Method, citation and licenses
 

@@ -28,6 +28,11 @@ models/
     ficus/joint/{config.yaml,checkpoints/last.pt}
 ```
 
+Application experiments use the final trained FoamSurf base models, not a separate set
+of newly trained application baselines. These final runs and a base-model archive have
+already been located in the project workspace; obtaining them from coauthors again is
+not a release dependency. Public packaging and download links remain to be prepared.
+
 Package complete run directories, including resolved configurations and available pipeline
 manifests. Preserve the camera order and scene normalization of the source dataset.
 The synthetic insertion benchmarks require the paper's **hybrid black-background** checkpoints,
@@ -59,7 +64,7 @@ assets/
     red_canna.jpg
 ```
 
-The teaser object directories are `treasure_chest`, `antique_ceramic_vase_01`,
+Only the optional teaser demo needs the object directories `treasure_chest`, `antique_ceramic_vase_01`,
 `dutch_ship_large_01`, `submarine_01`, `portable_searchlight`, and `barramundi`.
 Keep manifest-relative mesh and texture paths intact. Benchmark masks must retain their
 alpha channel. Do not rename the benchmark views or regenerate their cameras independently.
@@ -96,3 +101,7 @@ numerical equivalence. These still require the corresponding runtime tests.
 require separate pretrained models and assets. Missing inputs fail the complete selected
 plan before its first computation. Slurm jobs perform this check on the compute node; use
 `--check` before `--slurm` to check the inputs locally as well.
+
+Reproducing the paper teaser is outside the release scope. The default application
+selection is `insertion,edits,style`; `--applications teaser` is an optional demo and
+its assets are not required by the default selection.
