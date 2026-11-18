@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("warp", reason="insertion requires the optional --with-apps dependencies")
+
 from insert import resolve_assets
 
 ROOT = Path(__file__).resolve().parents[1]

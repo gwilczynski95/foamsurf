@@ -40,3 +40,26 @@ def test_all_training_commands_resolve(tmp_path):
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(resolve, training))
     assert not (tmp_path / 'runs').exists()
+
+
+def test_slurm_submission_preserves_arguments_and_dry_run_does_not_submit(tmp_path):
+    import os
+    import shlex
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    marker = tmp_path / 'called'
+    fake = fake_bin / 'sbatch'
+    fake.write_text('#!/bin/sh\ntouch "$SUBMIT_MARKER"\n')
+    fake.chmod(0o755)
+    env = dict(os.environ, PATH=str(fake_bin) + ':' + os.environ['PATH'], SUBMIT_MARKER=str(marker))
+    args = ['bash', 'scripts/reproduce.sh', 'seathru', '--scenes', 'IUI3', '--seeds', '42', '--out', str(tmp_path / 'with spaces'), '--slurm']
+    result = subprocess.run(args + ['--dry-run'], cwd=root, env=env, text=True, capture_output=True, check=True)
+    command = shlex.split(result.stdout)
+    assert command[0] == 'sbatch'
+    assert command[-len(args[2:-1]):] == args[2:-1]
+    assert not marker.exists()
+    subprocess.run(args, cwd=root, env=env, check=True, capture_output=True)
+    assert marker.exists()

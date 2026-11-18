@@ -54,3 +54,5 @@ venv/
 /.torch_extensions/
 /assets/
 /renders/
+
+/.conda-env/

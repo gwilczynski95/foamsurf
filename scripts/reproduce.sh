@@ -5,15 +5,21 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PYTHONPATH="$ROOT/renderer:$ROOT/src:$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON=${FOAMSURF_PYTHON:-python}
+original_args=("$@")
 target=${1:-}
-[[ -n "$target" ]] || { echo 'Usage: scripts/reproduce.sh seathru|ablation|garden|synthetic|all [--seeds 42,43,44] [--scenes IUI3,lego] [--dry-run]' >&2; exit 2; }
+[[ -n "$target" ]] || { echo 'Usage: scripts/reproduce.sh seathru|ablation|garden|synthetic|all [--seeds 42,43,44] [--scenes IUI3,lego] [--slurm] [--dry-run]' >&2; exit 2; }
 shift
+case "$target" in
+    seathru|ablation|garden|synthetic|all) ;;
+    *) echo "Unknown target: $target" >&2; exit 2 ;;
+esac
 seed_spec=''
 scene_spec=''
 out=${FS_OUTPUTS:-outputs/paper}
 background=all
 pipeline=hybrid
 dry_run=0
+slurm=0
 while (($#)); do
     case "$1" in
         --seeds) seed_spec=$2; shift 2 ;;
@@ -22,6 +28,7 @@ while (($#)); do
         --background) background=$2; shift 2 ;;
         --pipeline) pipeline=$2; shift 2 ;;
         --dry-run) dry_run=1; shift ;;
+        --slurm) slurm=1; shift ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -39,6 +46,16 @@ run() {
     printf '\n'
     if (( ! dry_run )); then "$@"; fi
 }
+
+# Submit the same sequential workflow; arguments remain separate shell words.
+if (( slurm )); then
+    local_args=()
+    for arg in "${original_args[@]}"; do
+        [[ "$arg" == --slurm || "$arg" == --dry-run ]] || local_args+=("$arg")
+    done
+    run sbatch --chdir="$ROOT" --job-name="foamsurf-$target" "$ROOT/scripts/slurm/reproduce.sbatch" "${local_args[@]}"
+    exit 0
+fi
 
 selected() {
     [[ -z "$scene_spec" || ",${scene_spec}," == *",$1,"* || ",${scene_spec}," == *",$2,"* ]]
