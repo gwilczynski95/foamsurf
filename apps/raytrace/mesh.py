@@ -1,4 +1,4 @@
-"""Triangle meshes for vis/raytrace.py: loading (PLY parts + FALCON-style manifest), placement on the seabed and
+"""Triangle meshes for the object tracer: loading (PLY parts + FALCON-style manifest), placement on the seabed and
 ray queries on a GPU BVH (NVIDIA Warp, `pip install warp-lang`).
 
 A manifest (as FALCON's source/fiat_bicycle/manifest.json) lists the parts of one object, each a PLY with a material
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import warp as wp
 
-from vis.raytrace import Material
+from .shading import Material
 
 wp.config.quiet = True
 NO_HIT = 1e30
@@ -57,9 +56,9 @@ def load_manifest(path: str | Path, overrides: dict | None = None, with_uv: bool
     """Parts of a manifest as one normalized mesh: vertices [V,3] (y-up, foot at 0, max extent 1), faces [F,3],
     (the part PLYs are taken as y-down, as FALCON's, unless the manifest says "flip_yz": false)
     per-face part index [F], materials (one per part), part ids. overrides: {part id: FALCON material dict}.
-    A manifest with "format": "npz" (vis/export_blend.py) holds one y-up mesh with per-corner UVs and textured
+    A manifest with "format": "npz" holds one y-up mesh with per-corner UVs and textured
     "pbr" materials (map paths relative to the manifest). with_uv: also return the corner UVs [F,3,2] (or None)."""
-    path = Path(os.path.expandvars(str(path)))
+    path = Path(path)
     manifest = json.loads(path.read_text())
     overrides = overrides or {}
     if manifest.get("format") == "npz":
@@ -204,81 +203,9 @@ class Mesh:
         return u * corners[:, 0] + v * corners[:, 1] + (1 - u - v) * corners[:, 2]
 
 
-def frame(up: torch.Tensor, reference: torch.Tensor, yaw_deg: float):
-    """Right-handed world axes (x, y=up, z) for local mesh axes, x = reference made horizontal and turned by yaw."""
-    up = F.normalize(up, dim=0)
-    x = F.normalize(reference - (reference @ up) * up, dim=0)
-    z = torch.linalg.cross(x, up)
-    a = math.radians(yaw_deg)
-    x, z = math.cos(a) * x + math.sin(a) * z, -math.sin(a) * x + math.cos(a) * z
-    return x, up, z
 
 
-@torch.no_grad()
-def surface_heights(tracer, points: torch.Tensor, up: torch.Tensor, above: float) -> torch.Tensor:
-    """Distance from points [N,3] (lifted by `above` along up) down to the Gaussian surface, minus `above`:
-    the surface height relative to each point (nan: nothing below)."""
-    starts = points + up * above
-    rays = torch.cat((starts, (-up).expand_as(starts)), -1).contiguous()
-    hits = tracer.renderer.render_gaussians(rays, tracer.gaussians, background=(0.0, 0.0, 0.0))
-    depth = hits.surface_depth.reshape(-1)
-    found = torch.isfinite(depth) & (depth > 0) & (depth < 4 * above)
-    return torch.where(found, above - depth, torch.full_like(depth, float("nan")))
 
 
-@torch.no_grad()
-def tilt_local(vertices: np.ndarray, pitch_deg: float = 0.0, roll_deg: float = 0.0) -> np.ndarray:
-    """Tilt a normalized mesh (y-up, foot at 0) before placement: pitch about x (positive lowers the +z end), roll
-    about z (positive lowers the +x side); the foot is put back at y = 0."""
-    if not pitch_deg and not roll_deg:
-        return vertices
-    p, r = math.radians(pitch_deg), math.radians(roll_deg)
-    rx = np.array([[1, 0, 0], [0, math.cos(p), -math.sin(p)], [0, math.sin(p), math.cos(p)]], dtype=np.float32)
-    rz = np.array([[math.cos(r), -math.sin(r), 0], [math.sin(r), math.cos(r), 0], [0, 0, 1]], dtype=np.float32)
-    out = vertices @ (rz @ rx).T
-    out[:, 1] -= out[:, 1].min()
-    return out.astype(np.float32)
 
 
-def place_mesh_on_seabed(tracer, camera, u: float, v: float, span_fraction: float, local_vertices: np.ndarray,
-                         yaw_deg: float = 0.0, sink: float = 0.0, max_tilt_deg: float = 10.0):
-    """World vertices of a normalized mesh (y-up, foot at 0, extent 1) resting on the seabed seen at image fraction
-    (u, v) of a camera: size = span_fraction x the hit distance, x axis = the camera's right turned by yaw_deg, tilted
-    to the plane fitted to the surface under its footprint (at most max_tilt_deg), lowered by `sink` x size."""
-    from evaluation.evaluator import _rays
-    rays = _rays(camera)
-    y, x = int(v * camera.height), int(u * camera.width)
-    ray = rays[y, x][None].contiguous()
-    only = tracer.renderer.render_gaussians(ray, tracer.gaussians, background=(0.0, 0.0, 0.0))
-    depth = float(only.surface_depth.reshape(-1)[0])
-    anchor = ray[0, :3] + depth * ray[0, 3:]
-    size = span_fraction * depth
-    up = tracer.up.to(anchor)
-    ax, ay, az = frame(up, camera.right.to(anchor), yaw_deg)
-    local = torch.as_tensor(local_vertices, device=anchor.device)
-    # Footprint samples: a 7x7 grid over the horizontal bounding box.
-    lo, hi = local.min(0).values, local.max(0).values
-    gx, gz = torch.meshgrid(torch.linspace(float(lo[0]), float(hi[0]), 7, device=anchor.device),
-                            torch.linspace(float(lo[2]), float(hi[2]), 7, device=anchor.device), indexing="ij")
-    foot = torch.stack((gx.reshape(-1), gz.reshape(-1)), -1)
-    points = anchor + size * (foot[:, :1] * ax + foot[:, 1:] * az)
-    height = surface_heights(tracer, points, up, above=size)
-    ok = torch.isfinite(height)
-    normal = up
-    if int(ok.sum()) >= 6:  # least-squares plane h = a x + b z + c
-        A = torch.cat((foot[ok] * size, torch.ones(int(ok.sum()), 1, device=anchor.device)), -1)
-        coef = torch.linalg.lstsq(A, height[ok][:, None]).solution.reshape(-1)
-        normal = F.normalize(up - coef[0] * ax - coef[1] * az, dim=0)
-        tilt = math.degrees(math.acos(float((normal @ up).clamp(-1, 1))))
-        if tilt > max_tilt_deg:
-            w = max_tilt_deg / tilt
-            normal = F.normalize(up * (1 - w) + normal * w, dim=0)
-        base = anchor + up * float(coef[2])
-    else:
-        base = anchor
-    bx, by, bz = frame(normal, ax, 0.0)
-    world = base + size * (local[:, :1] * bx + local[:, 1:2] * by + local[:, 2:] * bz) - by * (sink * size)
-    origin = base - by * (sink * size)
-    return world, dict(anchor=anchor.tolist(), size=size, depth=depth, up=by.tolist(),
-                       footprint_hits=int(ok.sum()), origin=origin.tolist(),
-                       axes=[bx.tolist(), by.tolist(), bz.tolist()])  # world = origin + size * local @ axes

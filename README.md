@@ -147,3 +147,14 @@ scripts/reproduce.sh synthetic --scenes lego --background black --seeds 42
 ```
 
 The commands use the complete paper schedules. `--dry-run` prints the commands, `--out DIR` selects the output root, and `--pipeline voronoi|hybrid|all` selects the synthetic pipeline (default: hybrid). The other training targets are `ablation`, `garden`, and `all`. `scripts/summarize.py TARGET --root DIR` aggregates the evaluation JSON files using the sample standard deviation across seeds; scene averages are computed per seed first.
+
+## Application entry points
+
+- `insert.py --run RUN --shot apps/raytrace/shots/ruins/teaser.json --assets assets --out renders/teaser` renders inserted objects.
+- `insert.py --benchmark --run RUN --gt ASSETS/insertion/lego --out renders/lego_insertion` evaluates FoamSurf against the packaged Blender references.
+- `edit.py --run RUN --view VIEW --edits bulge,bend,haze,clear --out renders/edits` edits the surface or medium; haze accepts `--haze-strength` and `--haze-rise`.
+- `stylize.py` optimizes surface or medium style; `python -m apps.style.compose_style` combines their saved models.
+
+> **TODO (link):** download the asset package from <LINK> and unpack it into assets/
+
+The teaser requires the `treasure_chest`, `antique_vase`, `dutch_ship`, `submarine01`, `portable_searchlight`, and `barramundi` model directories. Insertion benchmarks require the corresponding `insert.json`, `transforms_test.json`, `gt_rgba/`, and `masks/`. The benchmark computes FoamSurf results; the baseline numbers are those reported in the paper.

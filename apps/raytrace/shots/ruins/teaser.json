@@ -1,5 +1,5 @@
 {
- "camera": "teaser_camera_half.json",
+ "camera": "teaser_camera.json",
  "objects": [
   {
    "name": "glass",
@@ -29,7 +29,7 @@
   {
    "type": "mesh",
    "name": "chest",
-   "manifest": "assets/models/treasure_chest/manifest.json",
+   "manifest": "models/treasure_chest/manifest.json",
    "u": 0.21,
    "v": 0.88,
    "span_fraction": 0.1,
@@ -39,7 +39,7 @@
   {
    "type": "mesh",
    "name": "amphora",
-   "manifest": "assets/models/antique_ceramic_vase_01/manifest.json",
+   "manifest": "models/antique_ceramic_vase_01/manifest.json",
    "u": 0.145,
    "v": 0.83,
    "span_fraction": 0.05,
@@ -48,7 +48,7 @@
   {
    "type": "mesh",
    "name": "wreck",
-   "manifest": "assets/models/dutch_ship_large_01/manifest.json",
+   "manifest": "models/dutch_ship_large_01/manifest.json",
    "u": 0.22,
    "v": 0.48,
    "span_fraction": 0.4,
@@ -62,7 +62,7 @@
   {
    "type": "mesh",
    "name": "submarine",
-   "manifest": "assets/models/submarine_01/manifest.json",
+   "manifest": "models/submarine_01/manifest.json",
    "u": 0.57,
    "v": 0.24,
    "distance": 17,
@@ -229,7 +229,7 @@
   {
    "type": "mesh",
    "name": "searchlight",
-   "manifest": "assets/models/portable_searchlight/manifest.json",
+   "manifest": "models/portable_searchlight/manifest.json",
    "u": 0.53,
    "v": 0.78,
    "span_fraction": 0.04,
@@ -260,7 +260,7 @@
   {
    "type": "school",
    "name": "barramundi",
-   "manifest": "assets/models/barramundi/manifest.json",
+   "manifest": "models/barramundi/manifest.json",
    "forward": "z",
    "u": 0.74,
    "v": 0.42,
@@ -279,7 +279,7 @@
   {
    "type": "school",
    "name": "barramundi_far",
-   "manifest": "assets/models/barramundi/manifest.json",
+   "manifest": "models/barramundi/manifest.json",
    "forward": "z",
    "u": 0.22,
    "v": 0.27,
@@ -297,7 +297,7 @@
   {
    "type": "school",
    "name": "barramundi_near",
-   "manifest": "assets/models/barramundi/manifest.json",
+   "manifest": "models/barramundi/manifest.json",
    "forward": "z",
    "u": 0.86,
    "v": 0.5,
