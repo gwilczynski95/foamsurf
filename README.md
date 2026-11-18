@@ -1,139 +1,160 @@
 # FoamSurf
 
-Scena podwodna jako hybryda dwóch reprezentacji renderowanych jednym ray tracerem (CUDA + OptiX):
+FoamSurf represents underwater scenes with two components rendered by a shared CUDA/OptiX ray tracer:
 
-- **Gaussy 2D (surfele)** — powierzchnia sceny (dno, rafa), kolor z harmonik sferycznych;
-- **komórki Voronoi** — ośrodek (woda albo mgła): tłumienie i rozpraszanie wsteczne w każdej komórce.
+- **2D Gaussian surfels** represent surfaces such as the seabed and coral, with spherical-harmonic appearance.
+- **Voronoi cells** represent water or fog, with per-cell attenuation and backscatter.
 
-Do tego model kamery PPISP (ekspozycja i kolor każdego zdjęcia), straty OceanSplat i priory, które trzymają
-Gaussy poza otwartą wodą. Wynik na SeaThru-NeRF (widoki testowe, 3 seedy): **30.75 dB** średnio
-(IUI3 31.78, Curaçao 34.33, Japanese Gardens 24.33, Panama 32.57).
+The method includes a PPISP camera model, OceanSplat losses, and surface–medium priors.
+The reported SeaThru-NeRF mean over test views and three seeds is **30.75 dB**
+(IUI3 31.78, Curacao 34.33, Japanese Gardens 24.33, Panama 32.57).
 
-## Instalacja
+## Installation
 
-Potrzebne: GPU NVIDIA z compute capability ≥ 8.0 (np. RTX 3090 / 4090 / A100), sterownik ≥ 550, Linux.
+Linux, an NVIDIA GPU, the installed NVIDIA driver, conda, Git and a C++ compiler are required.
+The tested stack is Python 3.11, CUDA 12.4, PyTorch 2.6 and OptiX 8.0; dependency versions
+are pinned in `environment.yml` and `requirements.txt`.
 
-1. Kod i submoduł Eigen:
-   ```bash
-   git clone <adres repo> foamsurf && cd foamsurf
-   git checkout slim
-   git submodule update --init
-   ```
-2. Środowisko conda z Pythonem 3.11, CUDA 12.4 (`nvcc`) i PyTorch 2.6:
-   ```bash
-   conda create -n foamsurf python=3.11 -y && conda activate foamsurf
-   conda install -c nvidia cuda-toolkit=12.4 -y
-   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-   ```
-3. OptiX SDK 8.0.0: pobrać ze strony NVIDIA (wymaga konta), rozpakować i wskazać katalog:
-   ```bash
-   export OPTIX_DIRECTORY=/sciezka/do/NVIDIA-OptiX-SDK-8.0.0-linux64-x86_64
-   ```
-4. Architektura GPU, dla której kompilujemy (8.9 = RTX 4090, 8.6 = RTX 3090, 8.0 = A100):
-   ```bash
-   export TORCH_CUDA_ARCH_LIST=8.9
-   ```
-5. Kompilacja (renderer, OptiX, topologia Delaunay; na końcu sprawdza importy, wypisuje `FoamSurf B0 build: OK`):
-   ```bash
-   CONDA_ENV_PATH=$CONDA_PREFIX ./build.sh
-   ```
-   Jeśli biblioteki sterownika (`libcuda.so`, `libnvoptix.so`) nie są w `/usr/lib/x86_64-linux-gnu`, ustaw
-   `FOAMSURF_DRIVER_LIBRARY_DIRECTORY`. Model kamery (PPISP) i kernel kolorów SH kompilują się same przy pierwszym
-   użyciu (`TORCH_EXTENSIONS_DIR` ustala, gdzie trafiają).
-6. Test, że wszystko działa (bez GPU część testów jest pomijana; z GPU i danymi SeaThru jest też krótki trening):
-   ```bash
-   python -m pytest -q tests
-   ```
+Download and unpack **NVIDIA OptiX SDK 8.0** manually from NVIDIA (account and license
+acceptance required), then run:
 
-## Dane
+```bash
+git submodule update --init --recursive
+export OPTIX_ROOT=/path/to/NVIDIA-OptiX-SDK-8.0.0-linux64-x86_64
+scripts/install.sh --with-apps
+conda activate "$PWD/.conda-env"
+export PYTHONPATH="$PWD/renderer:$PWD/src:$PWD"
+export TORCH_EXTENSIONS_DIR="$PWD/.torch_extensions"
+```
 
-- **SeaThru-NeRF** — każda scena to katalog COLMAP: `images/`, `sparse/0/`. Widoki testowe: co 8. zdjęcie.
-  U nas: `/shared/sets/datasets/SeathruNeRF_dataset/{IUI3-RedSea-Undistorted, Curasao-Undistorted,
-  JapaneseGradens-RedSea-Undistorted, Panama-Undisorted}`.
-- **Garden z mgłą** (syntetyczna mgła WaterSplatting): `/shared/sets/datasets/foamsurf/foggy_garden/{garden_easy, garden_hard}`.
+`--with-apps` adds Warp for insertion and CLIP for style transfer. Omit it for training
+and evaluation only. `--prefix DIR` chooses a different new environment; the installer
+refuses to overwrite an existing directory. It builds the topology, CUDA renderer and
+both OptiX hit buffers (K=64 for training, K=32 for paper FPS), runs the test suite and
+renders a small synthetic scene against an independent reference. Dataset-dependent
+tests are skipped when their datasets are absent.
 
-## Trening
+For an existing compatible environment, activate it and run `./build.sh`. Builds stay
+inside this checkout. `CONDA_ENV_PATH` and `FOAMSURF_PYTHON` can select the build environment
+explicitly. The GPU architecture is detected automatically; override `TORCH_CUDA_ARCH_LIST`
+if needed (8.9 for RTX 4090, 8.6 for RTX 3090). With multiple PyTorch architecture targets,
+also set one OptiX target, e.g. `CUDA_ARCH=89`.
+
+`FOAMSURF_DRIVER_LIBRARY_DIRECTORY` selects the directory containing the installed
+`libcuda.so.1` and `libnvoptix.so.1` (default `/usr/lib/x86_64-linux-gnu`). At runtime, this
+directory must precede CUDA stub libraries in `LD_LIBRARY_PATH`. PPISP and SH color kernels
+compile on first use; `TORCH_EXTENSIONS_DIR` controls their cache. OpenCV is pinned to
+4.11.0.86 to retain the tested NumPy 1.x environment.
+
+## Data
+
+- **SeaThru-NeRF:** use the undistorted scenes, each containing `images/` and `sparse/0/`.
+  Every eighth image is held out for testing. Scene directory names are
+  `IUI3-RedSea-Undistorted`, `Curasao-Undistorted`, `JapaneseGradens-RedSea-Undistorted`,
+  and `Panama-Undisorted` (preserve these dataset spellings).
+- **Foggy Garden:** `garden_easy/` and `garden_hard/`, generated from clear Garden images
+  and camera-z depths by `scripts/make_foggy_garden.py`.
+- **Synthetic scenes:** `lego/` and `ficus/`. Each contains `<scene>_both/`,
+  `<scene>_<scene>/`, and `<scene>_clouds/`, with Blender camera JSON files and RGBA images.
+- **Separation masks:** one `<scene>.npz` file per SeaThru scene. These masks are used for
+  evaluation, not training. `scripts/sam_water_mask.py` can regenerate them with Segment Anything.
+
+> **TODO (link):** download the prepared datasets and evaluation masks from <LINK>.
+
+> **TODO (link):** download the trained paper models from <LINK> and unpack them into models/.
+
+## Training
 
 ```bash
 python train.py --scene /data/SeathruNeRF_dataset/Curasao-Undistorted --out outputs/curacao
 python train.py --scene /data/foggy_garden/garden_easy --out outputs/garden_easy --config configs/garden_fog.yaml
 ```
 
-- `--seed N` (domyślnie 42), `--wandb PROJEKT` (logowanie do Weights & Biases; domyślnie wyłączone),
-  `--set klucz.ścieżka=wartość` (zmiana dowolnego ustawienia), `--resume` (dokończenie przerwanego runu),
-  `--dry-run` (wypisuje pełną konfigurację i kończy).
-- 20 tys. iteracji: 25–35 min treningu na RTX 4090, z ewaluacjami ok. 75 min. Metryki widoków testowych co 500
-  iteracji (`eval.csv`), rendery co 5000 i na końcu; w artykule raportujemy wynik z ostatniej iteracji.
-- Slurm, wszystkie 4 sceny SeaThru: `sbatch --array=0-3 scripts/slurm_train.sbatch` (ustawienia w nagłówku pliku).
+- `--seed N` selects the random seed (default: 42).
+- `--wandb PROJECT` enables Weights & Biases logging (disabled by default).
+- `--set key.path=value` overrides a configuration field.
+- `--resume` resumes an interrupted run; `--dry-run` prints the resolved configuration without training.
 
-Katalog runu:
+SeaThru training uses 20,000 iterations, with test metrics every 500 iterations and
+rendered images every 5,000 iterations and at the end. The reported result always comes
+from the final iteration. On an RTX 4090, the original runs took approximately 25–35 minutes
+of training; evaluation and image export add to the total runtime.
+To submit all four scenes to Slurm, activate the environment, set the dataset variables
+below, and run `scripts/reproduce.sh seathru --slurm`.
 
-| ścieżka | zawartość |
+Run directory:
+
+| Path | Contents |
 |---|---|
-| `joint/checkpoints/last.pt` | model (Gaussy, komórki), optymalizatory, model kamery, światło wody |
-| `joint/metrics/train.csv`, `eval.csv` | straty i statystyki co krok, metryki testowe co ewaluację |
-| `joint/evaluation/iteration_*/` | rendery testowe: pełny obraz, same Gaussy, sam ośrodek, krycie, błąd |
-| `joint/summary.json` | status, czas, liczba Gaussów |
-| `joint/config.yaml`, `pipeline_config.json` | pełna konfiguracja runu |
+| `joint/checkpoints/last.pt` | Model, optimizers, camera response and water light |
+| `joint/metrics/train.csv`, `eval.csv` | Training losses and statistics; test metrics at each evaluation |
+| `joint/evaluation/iteration_*/` | Test renders: full image, Gaussians, medium, opacity and error |
+| `joint/summary.json` | Completion status, runtime and model size |
+| `joint/config.yaml`, `pipeline_config.json` | Resolved stage and pipeline configurations |
 
-## Renderowanie
+## Rendering
 
 ```bash
-python render.py --run outputs/curacao                                   # widoki testowe, wszystkie tryby
+python render.py --run outputs/curacao  # Test views, all rendering modes
 python render.py --run outputs/curacao --views train --modes full,gaussians
-python render.py --run outputs/curacao --export-cameras kamery.json      # kamery zbioru danych jako szablon póz
-python render.py --run outputs/curacao --poses moje_pozy.json --modes gaussians,voronoi --npy
-python render.py --run modele/curacao --scene /dane/Curasao-Undistorted   # run wytrenowany na innym komputerze
+python render.py --run outputs/curacao --export-cameras cameras.json
+python render.py --run outputs/curacao --poses custom_poses.json --modes gaussians,voronoi --npy
+python render.py --run models/curacao --scene /data/Curasao-Undistorted
+python render.py --run outputs/curacao --modes full --metrics --fps 32
 ```
 
-`render.py` potrzebuje zbioru danych runu (kamery i zdjęcia treningowe: model kamery i światło wody dopasowują się do
-nich przy wczytaniu). Ścieżka jest zapisana w runie; jeśli dane leżą gdzie indziej, podaj `--scene`.
+Rendering needs the original dataset's cameras and images for camera-response and
+water-light handling. If the dataset has moved, supply its new location with `--scene`.
+The final checkpoint is loaded. `--metrics` reports PSNR, SSIM and LPIPS-VGG from float
+images; `--fps 32` measures rendering speed with the paper's K=32 hit buffer.
 
-Tryby (`--modes`, PNG w `OUT/<tryb>/<widok>.png`, z `--npy` także tablice float32):
+Modes (`--modes`): PNG files are written to `OUT/<mode>/<view>.png`; `--npy` also exports float32 arrays.
 
-| tryb | co to jest |
+| Mode | Output |
 |---|---|
-| `full` | obraz jak w ewaluacji: Gaussy + woda, światło wody, model kamery |
-| `raw` | to samo przed modelem kamery |
-| `gaussians` | same Gaussy na czarnym tle — scena bez wody |
-| `alpha` | skumulowane krycie Gaussów |
-| `voronoi` | sam ośrodek (komórki Voronoi), bez Gaussów |
-| `water` | światło wody przed powierzchnią w pełnym renderze |
-| `depth` | głębokość powierzchni (w PNG znormalizowana, w `--npy` metryczna) |
+| `full` | Full evaluation image: Gaussians and medium, water light and camera response |
+| `raw` | Full image before camera response |
+| `gaussians` | Gaussians alone on a black background |
+| `alpha` | Accumulated Gaussian opacity |
+| `voronoi` | Medium alone, without Gaussians |
+| `water` | Water contribution before the surface in the full render |
+| `depth` | Surface depth: normalized in PNG, metric in NPY |
 
-Plik póz: lista kamer w układzie świata zbioru danych (COLMAP), format jak w `--export-cameras`:
+Pose files contain a list of cameras in the dataset's world coordinate system, using the
+same fields as `--export-cameras`:
 `{"name", "origin", "right", "down", "forward", "width", "height", "fx", "fy", "cx", "cy"}`.
 
-## Konfiguracje
+## Configurations
 
-- `configs/seathru.yaml` — metoda na SeaThru-NeRF. Każde ustawienie z komentarzem; liczby to wartości, które
-  faktycznie działają.
-- `configs/garden_fog.yaml` — `seathru.yaml` plus jawna lista różnic dla Garden z mgłą.
-- `configs/base.yaml` — pełny szablon wszystkich ustawień (wartości domyślne).
+- `configs/seathru.yaml`: SeaThru-NeRF paper configuration.
+- `configs/garden_fog.yaml`: foggy Garden configuration, extending the SeaThru configuration.
+- `configs/synthetic_hybrid.yaml` and `configs/synthetic_voronoi.yaml`: synthetic pipelines.
+- `configs/ablations/*.yaml`: the seven paper ablations.
+- `configs/base.yaml`: configuration defaults.
 
-`tests/test_configs.py` sprawdza, że obie konfiguracje dają dokładnie ustawienia naszych raportowanych runów
-(`tests/data/*.json`): po celowej zmianie metody trzeba zaktualizować te pliki.
+`tests/test_configs.py` compares resolved configurations with saved paper-run manifests
+in `tests/data/`. Update those reference files only when deliberately changing the method.
 
-## Mapa kodu
+## Code map
 
-| katalog / plik | co tam jest |
+| Path | Responsibility |
 |---|---|
-| `renderer/` | ray tracer CUDA/OptiX: Gaussy (OptiX), komórki Voronoi (CUDA), składanie, gradienty. Opis: [renderer/README.md](renderer/README.md) |
-| `renderer/foamsurf/hybrid.py` | `NativeHybridRenderer`: `render(...)`, `render_gaussians(...)`, `render_voronoi(...)` |
-| `src/`, `torch_bindings/` | triangulacja Delaunay komórek Voronoi (CUDA) |
-| `foamsurf_model/gaussians.py` | surfele: parametry, kolor SH (×1.5 sigmoid), filtr Mip, `render_scene(origin)` |
-| `foamsurf_model/medium.py`, `topology.py` | komórki Voronoi: tłumienie, rozpraszanie, kolor; sąsiedztwo |
-| `foamsurf_model/gaussian_adaptation.py` | zagęszczanie, usuwanie i reset krycia Gaussów |
-| `foamsurf_data/` | wczytywanie COLMAP i Blender, generowanie promieni |
-| `training/trainer.py` | pętla treningu (strata obrazu, OceanSplat, model kamery, zagęszczanie) |
-| `training/colmap_joint_trainer.py` | priory między Gaussami a wodą (chroma, pokrycie dna, czysta woda, woda przy kamerach, nakładanie się) |
-| `training/colmap_joint.py`, `warmup_trainer.py` | inicjalizacja: punkty COLMAP → Gaussy, 5000 komórek, dopasowanie wody |
-| `training/water_*.py`, `camera_isp.py`, `oceansplat.py` | światło wody, model kamery, straty OceanSplat |
-| `evaluation/evaluator.py` | metryki i rendery testowe |
-| `train.py`, `render.py` | punkty wejścia |
-| `render.py --fps 32` | pomiar szybkości renderu wytrenowanego runu |
+| `renderer/` | CUDA/OptiX ray tracing, compositing and gradients; see [renderer/README.md](renderer/README.md) |
+| `renderer/foamsurf/cuda.py` | `NativeHybridRenderer`: hybrid, Gaussian-only and medium-only rendering |
+| `src/`, `torch_bindings/` | CUDA Delaunay triangulation |
+| `foamsurf_model/gaussians.py` | Surfel parameters, SH appearance and Mip filtering |
+| `foamsurf_model/medium.py`, `topology.py` | Medium coefficients, cells and adjacency |
+| `foamsurf_model/gaussian_adaptation.py` | Gaussian densification, pruning and opacity resets |
+| `foamsurf_data/` | COLMAP/Blender loading and ray generation |
+| `training/trainer.py` | Training loop, image loss, camera model and adaptation |
+| `training/colmap_joint_trainer.py` | Surface–medium priors |
+| `training/colmap_joint.py`, `warmup_trainer.py` | Initialization and warmup |
+| `training/water_*.py`, `camera_isp.py`, `oceansplat.py` | Water light, camera response and OceanSplat losses |
+| `evaluation/` | Shared rendering and evaluation metrics |
+| `train.py`, `render.py`, `evaluate.py` | Training, rendering and evaluation entry points |
+| `insert.py`, `edit.py`, `stylize.py`, `apps/` | Insertion, scene editing and style transfer |
 
-## Paper training checks
+## Reproducing the paper
 
 `scripts/reproduce.sh` runs training and final-checkpoint evaluation sequentially on one GPU, and resumes interrupted runs. Set the dataset and mask directories before running it:
 
@@ -146,7 +167,37 @@ scripts/reproduce.sh seathru --scenes IUI3 --seeds 42
 scripts/reproduce.sh synthetic --scenes lego --background black --seeds 42
 ```
 
-The commands use the complete paper schedules. `--dry-run` prints the commands, `--out DIR` selects the output root, and `--pipeline voronoi|hybrid|all` selects the synthetic pipeline (default: hybrid). The other training targets are `ablation`, `garden`, and `all`. `scripts/summarize.py TARGET --root DIR` aggregates the evaluation JSON files using the sample standard deviation across seeds; scene averages are computed per seed first.
+The commands use the complete paper schedules. `--dry-run` prints the commands, `--slurm` submits the same sequential workflow through `scripts/slurm/reproduce.sbatch`, `--out DIR` selects the output root, and `--pipeline voronoi|hybrid|all` selects the synthetic pipeline (default: hybrid). The other training targets are `ablation`, `garden`, and `all`. `scripts/summarize.py TARGET --root DIR` aggregates the evaluation JSON files using the sample standard deviation across seeds; scene averages are computed per seed first.
+
+The training targets cover the following paper results. Commands report FoamSurf results;
+baseline implementations and results are not recomputed by this repository.
+
+| Paper result | Command or output | Reference / expected output |
+|---|---|---|
+| `tab:seathru`, `tab:suppl_per_scene`, `tab:suppl_separation` | `scripts/reproduce.sh seathru` | PSNR/SSIM/LPIPS, FPS and separation; SeaThru mean PSNR approximately 30.75 dB |
+| `fig:nvs`, `fig:suppl_reconstruction` | SeaThru runs, then `render.py --run RUN --modes full` | Test-view RGB images |
+| `fig:decomposition`, `fig:suppl_decomposition` | `render.py --run RUN --modes full,gaussians,water,alpha` | Surface/medium decomposition and surface opacity |
+| `tab:ablation` | `scripts/reproduce.sh ablation` | Full model and seven ablations, four scenes, seeds 42 and 43 |
+| `tab:garden`, `fig:garden`, `fig:suppl_garden` | `scripts/reproduce.sh garden` | Foggy-image metrics and clear-image restoration metrics for easy/hard fog |
+| `tab:synthetic`, `tab:suppl_synthetic`, `fig:synthetic`, `fig:suppl_synthetic` | `scripts/reproduce.sh synthetic --pipeline all` | Hybrid and Voronoi-first results, isolated layers and medium transmittance |
+| `tab:insertion`, `tab:suppl_insertion`, `fig:suppl_insertion_lego`, `fig:suppl_insertion_ficus` | `insert.py --benchmark --run RUN --gt ASSETS/insertion/SCENE --out OUT` | FoamSurf insertion renders and Blender-reference metrics |
+| `fig:suppl_edit_surface`, `fig:suppl_edit_surface_layers`, `fig:suppl_edit_water`, `fig:suppl_edit_water_layers` | `edit.py --run RUN --view VIEW --edits EDITS --out OUT` | Edited full images and separate layers |
+| `fig:suppl_style` | `stylize.py --run RUN --target gaussians --style-image IMAGE --out OUT` (or `--target voronoi`) | Stylized final model and preview images |
+| `tab:supp_weights`, `tab:supp_learning_rates` | `train.py --config configs/seathru.yaml --dry-run` | Resolved loss weights, learning rates and schedules |
+| `fig:overview` | Method schematic | Explanatory diagram, not an evaluation output |
+
+The control runs use IUI3 seed 42 (31.80 ± 0.15 dB) and hybrid Lego black seed 42
+(34.22 ± 0.30 dB). These are tolerances for fresh training; loading an existing paper
+checkpoint is tested separately at a tighter 0.001 dB PSNR tolerance. Synthetic black
+backgrounds use seeds 42/43/44; white backgrounds use seed 42. The hybrid synthetic pipeline
+uses a 5,000-step warmup and 20,000 joint steps; the Voronoi-first pipeline uses
+5,000 warmup steps followed by 30,000 joint steps. Runtime depends on scene size and
+evaluation frequency; final release timing measurements are still being collected.
+
+Release integration is still in progress: the `applications` reproduction target,
+exact shot/style presets for all figures, and the draining/bounded-medium-removal code
+for `fig:draining`, `fig:applications` and the complete `fig:teaser` are pending.
+The current teaser shot can be rendered through `insert.py`, as shown below.
 
 ## Application entry points
 
@@ -157,4 +208,4 @@ The commands use the complete paper schedules. `--dry-run` prints the commands, 
 
 > **TODO (link):** download the asset package from <LINK> and unpack it into assets/
 
-The teaser requires the `treasure_chest`, `antique_vase`, `dutch_ship`, `submarine01`, `portable_searchlight`, and `barramundi` model directories. Insertion benchmarks require the corresponding `insert.json`, `transforms_test.json`, `gt_rgba/`, and `masks/`. The benchmark computes FoamSurf results; the baseline numbers are those reported in the paper.
+The teaser requires the `treasure_chest`, `antique_ceramic_vase_01`, `dutch_ship_large_01`, `submarine_01`, `portable_searchlight`, and `barramundi` model directories. Insertion benchmarks require the corresponding `insert.json`, `transforms_test.json`, `gt_rgba/`, and `masks/`. The benchmark computes FoamSurf results; the baseline numbers are those reported in the paper.

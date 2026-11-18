@@ -12,7 +12,7 @@ Shot file (JSON):
                                               # "distance": 30 at 30 world units (also in the open water)
                 "clear": true},               # lifted out of the reef if it would cut into it
                {"type": "mesh", "manifest": "models/fiat_bicycle/manifest.json", "u": 0.5, "v": 0.7,
-                "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "pitch_deg": 0, "materials": {"caroseria": {"mode": ...}}},
+                "span_fraction": 0.25, "yaw_deg": 30, "sink": 0.0, "pitch_deg": 0, "materials": {"body": {"mode": ...}}},
                {"type": "mesh", ..., "u": .., "v": .., "distance": 12, "size": 3},  # floating in the water:
                                               # bbox centre 12 units along the (u, v) ray, 3 units long
                {"type": "school", "manifest": "models/fish_silver/manifest.json", "u": .., "v": ..,
