@@ -1185,10 +1185,6 @@ class Trainer:
         current_psnr = float(summary["eval/primary_psnr"])
         if current_psnr > self.best_psnr:
             self.best_psnr = current_psnr
-            self._checkpoint(
-                self.output_dir / "checkpoints" / "best.pt",
-                iteration,
-            )
         self._checkpoint(
             self.output_dir / "checkpoints" / "last.pt",
             iteration,

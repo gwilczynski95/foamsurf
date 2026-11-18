@@ -8,7 +8,7 @@
 The scene is a COLMAP dataset (images/ and sparse/0/) or a Blender dataset (transforms_train.json; use
 configs/synthetic.yaml, which has no COLMAP water fit). Every 500 iterations and at the end the test views
 are rendered and scored; the run directory then holds:
-    joint/checkpoints/last.pt (+ best.pt)   the model, its optimizers, camera model and water light terms
+    joint/checkpoints/last.pt   the model, its optimizers, camera model and water light terms
     joint/metrics/train.csv, eval.csv       losses and statistics per step, test metrics per evaluation
     joint/evaluation/iteration_*/           test renders (full image, Gaussians alone, medium alone, ...)
     joint/summary.json                      final status, timing and model size

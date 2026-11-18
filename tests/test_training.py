@@ -28,6 +28,7 @@ def test_seathru_short_training_runs_every_mechanism_and_renders(tmp_path):
     m = short_manifest(tmp_path, "seathru")
     fit_iui3(m)
     run = tmp_path / "seathru"
+    assert not (run / "joint/checkpoints/best.pt").exists()
     summary = json.loads((run / "joint/summary.json").read_text())
     assert summary["status"] == "completed" and summary["final_iteration"] == 4
     train = rows(run, "train.csv")
@@ -140,3 +141,25 @@ def test_garden_fog_short_training(tmp_path):
     assert not finite(r.get("ocean/obj") for r in train)  # no OceanSplat losses
     checkpoint = torch.load(run / "joint/checkpoints/last.pt", map_location="cpu", weights_only=False)
     assert "water_phase" not in checkpoint and checkpoint["model_metadata"]["gaussians"]["rgb_scale"] == 1.0
+
+
+def test_checkpoint_policy_keeps_last_even_when_validation_quality_decreases(tmp_path):
+    from types import SimpleNamespace
+    from training.trainer import Trainer
+    values = iter([40.0, 20.0])
+    writes = []
+
+    def evaluate(iteration):
+        score = next(values)
+        return {'eval/primary_psnr': score, 'eval/gaussian_only_psnr': score,
+                'eval/voronoi_only_psnr': score}, {}, {}
+
+    trainer = SimpleNamespace(
+        config=SimpleNamespace(optimization=SimpleNamespace(water_extrapolation=False)),
+        evaluator=SimpleNamespace(evaluate=evaluate),
+        logger=SimpleNamespace(log_eval=lambda *args: None),
+        output_dir=tmp_path, best_psnr=-float('inf'),
+        _checkpoint=lambda path, iteration: writes.append((path.name, iteration)))
+    Trainer._evaluate_and_checkpoint(trainer, 1)
+    Trainer._evaluate_and_checkpoint(trainer, 2)
+    assert writes == [('last.pt', 1), ('last.pt', 2)]
