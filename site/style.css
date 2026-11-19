@@ -768,3 +768,11 @@ footer>span,footer>a:last-child{
 .film{margin:2.5rem 0 0;}
 .film video{width:100%;display:block;border-radius:18px;background:#02121d;}
 .application-image video{width:100%;height:100%;object-fit:cover;display:block;}
+
+/* results table */
+.table-wrap{overflow-x:auto;margin-top:2rem;}
+.results-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:.95rem;}
+.results-table th,.results-table td{padding:.55rem .8rem;text-align:right;border-bottom:1px solid rgba(127,160,190,.25);white-space:nowrap;}
+.results-table th:first-child,.results-table td:first-child{text-align:left;}
+.results-table thead th{font-weight:600;}
+.results-table tr.ours td{font-weight:600;background:rgba(40,140,220,.12);}
