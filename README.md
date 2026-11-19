@@ -25,17 +25,6 @@
 
 Scenes inside a scattering medium contain solid surfaces, such as the seabed or rocks, and a semi-transparent medium, such as water, fog, or smoke. Recent Gaussian-based methods produce realistic images of scenes in scattering media, but traces of the medium can remain visible in surface-only renders. Neural fields separate surfaces and medium more accurately, but they are slow to train and difficult to edit. Both approaches evaluate the medium only along camera rays, so its effects along reflected and refracted rays are not modeled. These limitations prevent reliable surface recovery, independent editing of surfaces and the medium, and consistent rendering of inserted objects. We present FoamSurf, a hybrid representation that models surfaces with planar Gaussian surfels and the medium with space-filling Voronoi cells. A single differentiable ray tracer composites both along arbitrary rays, while training priors keep them separate without segmentation masks. Across real underwater scenes, synthetic scenes, and dense fog, FoamSurf achieves image quality on par with the state of the art and the most accurate surface–medium separation among the compared methods. The recovered components can be removed, edited, or stylized independently, and the same reconstruction supports inserted mesh objects with attenuation and scattering along both direct and reflected or refracted rays. Together, these capabilities enable scene restoration, editing, and composition within a single reconstructed model.
 
-# Overview
-
-FoamSurf represents underwater scenes with two components rendered by a shared CUDA/OptiX ray tracer:
-
-- **2D Gaussian surfels** represent surfaces such as the seabed and coral, with spherical-harmonic appearance.
-- **Voronoi cells** represent water or fog, with per-cell attenuation and backscatter.
-
-The method includes a PPISP camera model, OceanSplat losses, and surface–medium priors.
-The reported SeaThru-NeRF mean over test views and three seeds is **30.75 dB**
-(IUI3 31.78, Curacao 34.33, Japanese Gardens 24.33, Panama 32.57).
-
 ## Installation
 
 Linux, an NVIDIA GPU, the installed NVIDIA driver, conda, Git and a C++ compiler are required.
