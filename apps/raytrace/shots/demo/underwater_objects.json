@@ -1,5 +1,5 @@
 {
- "camera": "teaser_camera.json",
+ "camera": "underwater_objects_camera.json",
  "objects": [
   {
    "name": "glass",

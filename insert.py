@@ -1,6 +1,6 @@
 """A clip of a trained FoamSurf scene with ray-traced objects, the camera gliding along the diver's path.
 
-    python insert.py --run RUN --scene DATA --shot apps/raytrace/shots/ruins/teaser.json --out renders/clips/NAME
+    python insert.py --run RUN --scene DATA --shot apps/raytrace/shots/demo/underwater_objects.json --out renders/clips/NAME
 
 Shot file (JSON):
   {"anchor_view": "MTN_1296",                 # test view used to place the objects
@@ -362,11 +362,6 @@ def main():
     parser.add_argument("--scene", type=Path)
     parser.add_argument("--assets", type=Path, default=Path("assets"), help="downloaded mesh and texture package")
     parser.add_argument("--shot", type=Path)
-    parser.add_argument("--benchmark", action="store_true", help="evaluate insertion against Blender ground truth")
-    parser.add_argument("--gt", type=Path, help="insertion package with insert.json, gt_rgba/, masks/ and transforms_test.json")
-    parser.add_argument("--benchmark-views", help="optional comma-separated subset of benchmark cameras")
-    parser.add_argument("--scipy-topology", action=argparse.BooleanOptionalAction, default=True,
-                        help="benchmark: float64 Delaunay without moving sites, as in the paper")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--frames", type=int, help="override the shot's frame count (previews)")
     parser.add_argument("--still", action="store_true", help="only the anchor view: OUT/still.png (+ no shadows)")
@@ -382,17 +377,11 @@ def main():
     args = parser.parse_args()
     if args.preview is not None and (not args.still or not 0 < args.preview <= 1):
         parser.error("--preview requires --still and a scale in (0, 1]")
-    if args.benchmark:
-        if args.gt is None:
-            parser.error("--benchmark requires --gt")
-        from apps.raytrace.benchmark import run
-        run(args)
-        return
     if args.shot is None:
-        parser.error("provide --shot or --benchmark")
+        parser.error("provide --shot")
     shot = resolve_assets(json.loads(args.shot.read_text()), args.assets)
     record = None
-    if "camera" in shot:  # a pose file in render.py's format (e.g. a teaser camera): its first camera
+    if "camera" in shot:  # a pose file in render.py's format (e.g. a demo camera): its first camera
         record = json.loads((args.shot.parent / shot["camera"]).read_text())
         record = record[0] if isinstance(record, list) else record
         _raise_ray_buffer(int(record["width"]) * int(record["height"]))

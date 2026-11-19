@@ -1,4 +1,4 @@
-"""The camera after the water: PPISP (Deutsch et al., CVPR 2026; third_party/ppisp, Apache-2.0) applied to the
+"""The camera after the water: PPISP (Deutsch et al.; third_party/ppisp, Apache-2.0) applied to the
 rendered image. Per training photo an exposure offset and a colour correction, per camera (one here) a
 vignetting falloff and a response curve, all learned with the scene and regularised as in the paper (mean
 exposure and colour over the photos at zero, vignetting at the image centre and non-positive).
