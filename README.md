@@ -1,7 +1,7 @@
 <h1 align="center">FoamSurf: A Voronoi-Surfel Representation for Differentiable Rendering</h1>
 
 <p align="center">
-  <a href="https://github.com/gwilczynski95">Grzegorz Wilczyński<sup>1,3</sup></a>,
+  <a href="https://grzegorzwilczynski.com">Grzegorz Wilczyński<sup>1,3</sup></a>,
   <a href="https://scholar.google.com/citations?user=drMAA2UAAAAJ">Julia Farganus<sup>4</sup></a>,
   <a href="https://scholar.google.com/citations?user=ef2YKtsAAAAJ&hl=pl&oi=sra">Krzysztof Byrski<sup>1</sup></a>,
   <a href="https://scholar.google.com/citations?user=DGiaI64AAAAJ">Rafał Tobiasz<sup>1,3</sup></a>,
