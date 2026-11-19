@@ -12,13 +12,6 @@ from .gaussians import SurfaceGaussianModel
 
 
 @dataclass(frozen=True)
-class FlareMovementSnapshot:
-    means: torch.Tensor
-    means_exp_avg: torch.Tensor
-    means_exp_avg_sq: torch.Tensor
-
-
-@dataclass(frozen=True)
 class GaussianTopologyPlan:
     """Explicit GraphDECO clone/split/prune operation."""
 
@@ -64,6 +57,8 @@ def scheduled_opacity_threshold(
     iteration: int,
 ) -> float:
     """Return the opacity-pruning threshold at a given iteration."""
+    if config.min_opacity_late is not None and iteration >= config.min_opacity_late_from:
+        return float(config.min_opacity_late)
     initial = (
         config.min_opacity
         if config.min_opacity_initial is None
@@ -122,10 +117,26 @@ class GaussianAdaptationController:
         config: GaussianAdaptationConfig,
         scene_extent: float,
         support_radius: float = 3.0,
+        camera_centers: torch.Tensor | None = None,
+        image_width: int | None = None,
     ) -> None:
+        reference = config.gradient_threshold_reference_width
+        if reference is not None and image_width is None:
+            raise ValueError("gradient_threshold_reference_width needs the image width")
+        # Densification threshold for this image width (see GaussianAdaptationConfig).
+        self.gradient_threshold = config.gradient_threshold * (
+            1.0 if reference is None else reference / image_width)
+        if config.far_prune_distance is not None and camera_centers is None:
+            raise ValueError("far_prune_distance needs the training camera centers")
+        self.camera_centers = camera_centers
+        # Per-channel attenuation of the water, set by the trainer when
+        # config.gradient_attenuation_compensation is on.
+        self.medium_attenuation: torch.Tensor | None = None
         self.model = model
         self.optimizer = optimizer
         self.config = config
+        # Start of the max_points_ramp_until budget (saved in checkpoints).
+        self.initial_count = model.point_count
         self.scene_extent = float(scene_extent)
         self.support_radius = float(support_radius)
         self.total_cloned = 0
@@ -151,6 +162,7 @@ class GaussianAdaptationController:
             "opacity_pruning_active": 0,
             "screen_prune": 0,
             "world_prune": 0,
+            "far_prune": 0,
             "gradient_opacity_overlap": 0,
             "gradient_screen_overlap": 0,
             "gradient_world_overlap": 0,
@@ -162,6 +174,16 @@ class GaussianAdaptationController:
             "radius_max": 0.0,
         }
         self._reset_statistics()
+
+    def max_points_at(self, iteration: int) -> int | None:
+        """Gaussian cap at this iteration: max_points, or its linear ramp (max_points_ramp_until)."""
+        config = self.config
+        if config.max_points is None or config.max_points_ramp_until is None:
+            return config.max_points
+        progress = (iteration - config.densify_from) / (config.max_points_ramp_until - config.densify_from)
+        progress = min(max(progress, 0.0), 1.0)
+        start = min(self.initial_count, config.max_points)
+        return int(round(start + (config.max_points - start) * progress))
 
     def _reset_statistics(self) -> None:
         count = self.model.point_count
@@ -205,17 +227,6 @@ class GaussianAdaptationController:
         return in_range and iteration % interval == 0
 
     def should_adapt(self, iteration: int) -> bool:
-        if self.config.policy == "flare_movement":
-            in_range = (
-                self.config.densify_from
-                <= iteration
-                <= self.config.densify_until
-            )
-            return (
-                self.config.enabled
-                and in_range
-                and iteration % self.config.densification_interval == 0
-            )
         if self.config.policy == "graphdeco":
             return self.should_densify(iteration) or self.should_prune(
                 iteration
@@ -257,155 +268,39 @@ class GaussianAdaptationController:
         return changed
 
     @torch.no_grad()
-    def snapshot_movement(self) -> FlareMovementSnapshot:
-        """Capture the pre-step state used by the working flare_new policy."""
+    def attenuation_compensation(self, camera_origin: torch.Tensor) -> torch.Tensor:
+        """1 / T for every Gaussian, T = mean_c exp(-a_c * distance to the camera), capped."""
+        if self.medium_attenuation is None:
+            raise RuntimeError("gradient compensation needs medium_attenuation")
+        distance = torch.linalg.vector_norm(self.model.means - camera_origin, dim=-1)
+        attenuation = self.medium_attenuation.to(distance)
+        transmittance = torch.exp(-distance[:, None] * attenuation[None, :]).mean(-1)
+        return (1.0 / transmittance.clamp_min(1e-12)).clamp(max=self.config.gradient_compensation_max)
 
-        state = self.optimizer.state.get(self.model.means, {})
-        zeros = torch.zeros_like(self.model.means)
-        return FlareMovementSnapshot(
-            means=self.model.means.detach().clone(),
-            means_exp_avg=state.get("exp_avg", zeros).detach().clone(),
-            means_exp_avg_sq=state.get("exp_avg_sq", zeros).detach().clone(),
-        )
+    def near_camera_weight(self, camera, iteration: int | None) -> torch.Tensor:
+        """Gaussian-DK (Ye et al. 2024, Eqs. 10-11) step-based gradient scaling for every Gaussian:
+        min((z / R)^2, 1), z = its depth in this camera, R = 1.1 x the largest distance of a training
+        camera from their centroid; with near_camera_steps (t1, t2): x1 before t1, x0.5 until t2, 0 after."""
+        if self.camera_centers is None:
+            raise ValueError("near_camera_gradient_scaling needs the training camera centers")
+        centers = self.camera_centers.to(self.model.means)
+        radius = 1.1 * torch.linalg.vector_norm(centers - centers.mean(0), dim=-1).max()
+        depth = (self.model.means - camera.origin.to(self.model.means)) @ camera.forward.to(self.model.means)
+        weight = (depth / radius).square().clamp(max=1.0)
+        steps = self.config.near_camera_steps
+        if steps is not None and iteration is not None:
+            first, second = steps
+            weight = weight * (1.0 if iteration < first else 0.5 if iteration < second else 0.0)
+        return weight
 
     @torch.no_grad()
-    def apply_movement(
-        self,
-        snapshot: FlareMovementSnapshot,
-    ) -> dict[str, int]:
-        """Apply flare_new's post-step movement duplication and pruning."""
-
-        count = self.model.point_count
-        if snapshot.means.shape != self.model.means.shape:
-            raise ValueError("flare movement snapshot does not match model")
-
-        opacity = self.model.opacities.squeeze(-1)
-        kappa = self.model.kappas.squeeze(-1)
-        effective = torch.clamp(
-            kappa * (11.3449 + 2.0 * torch.log(opacity)), min=0.0
-        )
-        effective = effective.pow(1.0 / (2.0 * kappa)) / math.sqrt(11.3449)
-        scale_norm = torch.linalg.vector_norm(
-            self.model.scales, dim=1
-        ) * effective
-        keep_mask = (
-            (opacity >= self.config.min_opacity)
-            & (scale_norm >= self.config.min_effective_scale)
-        )
-        if not bool(keep_mask.any()):
-            raise RuntimeError("flare movement adaptation would prune every Gaussian")
-
-        indices = torch.arange(count, device=self.model.means.device)
-        kept = indices[keep_mask]
-        movement = torch.linalg.vector_norm(
-            self.model.means[kept] - snapshot.means[kept], dim=1
-        )
-        split_mask = movement >= self.config.movement_threshold
-        split = kept[split_mask]
-
-        if self.config.max_points is not None:
-            capacity = max(self.config.max_points - int(kept.numel()), 0)
-            if split.numel() > capacity:
-                order = torch.argsort(
-                    movement[split_mask], descending=True, stable=True
-                )
-                split = split[order[:capacity]]
-
-        selected = torch.zeros(count, dtype=torch.bool, device=kept.device)
-        selected[split] = True
-        originals = kept[~selected[kept]]
-        old_parameters = self.model.named_primitive_parameters()
-
-        for name, old in old_parameters.items():
-            post = old.detach()
-            middle_value = snapshot.means[split] if name == "means" else post[split]
-            value = torch.cat(
-                (post[originals], middle_value, post[split]), dim=0
-            ).contiguous()
-            new_parameter = nn.Parameter(value)
-
-            group_name = f"gaussian_{name}"
-            group = next(
-                group
-                for group in self.optimizer.param_groups
-                if group.get("name") == group_name
-            )
-            if len(group["params"]) != 1 or group["params"][0] is not old:
-                raise RuntimeError(f"optimizer group mismatch for {name}")
-            old_state = self.optimizer.state.pop(old, None)
-            group["params"] = [new_parameter]
-            if old_state is not None:
-                mapped: dict[str, Any] = {}
-                for state_name, state_value in old_state.items():
-                    if torch.is_tensor(state_value) and state_value.shape == old.shape:
-                        middle_state = state_value[split]
-                        if name == "means" and state_name == "exp_avg":
-                            middle_state = snapshot.means_exp_avg[split]
-                        elif name == "means" and state_name == "exp_avg_sq":
-                            middle_state = snapshot.means_exp_avg_sq[split]
-                        mapped[state_name] = torch.cat(
-                            (
-                                state_value[originals],
-                                middle_state,
-                                state_value[split],
-                            ),
-                            dim=0,
-                        )
-                    elif torch.is_tensor(state_value):
-                        mapped[state_name] = state_value.clone()
-                    else:
-                        mapped[state_name] = state_value
-                self.optimizer.state[new_parameter] = mapped
-            setattr(self.model, name, new_parameter)
-
-        pruned = count - int(kept.numel())
-        duplicated = int(split.numel())
-        self.total_split += duplicated
-        self.total_pruned += pruned
-        if duplicated or pruned:
-            self.revision += 1
-
-        if movement.numel():
-            movement_p50 = float(torch.quantile(movement, 0.50).item())
-            movement_p95 = float(torch.quantile(movement, 0.95).item())
-            movement_max = float(movement.max().item())
-        else:
-            movement_p50 = movement_p95 = movement_max = 0.0
-        self.last_plan_statistics = {
-            "gradient_p50": movement_p50,
-            "gradient_p95": movement_p95,
-            "gradient_max": movement_max,
-            "gradient_candidates": int(split_mask.sum().item()),
-            "clone_candidates": 0,
-            "split_candidates": duplicated,
-            "prune_candidates": pruned,
-            "opacity_prune": int((opacity < self.config.min_opacity).sum().item()),
-            "opacity_prune_raw": int(
-                (opacity < self.config.min_opacity).sum().item()
-            ),
-            "opacity_prune_rejected": 0,
-            "opacity_threshold": float(self.config.min_opacity),
-            "densification_active": 0,
-            "opacity_pruning_active": 1,
-            "screen_prune": 0,
-            "world_prune": int((scale_norm < self.config.min_effective_scale).sum().item()),
-            "gradient_opacity_overlap": 0,
-            "gradient_screen_overlap": 0,
-            "gradient_world_overlap": 0,
-            "budget_rejected": int(split_mask.sum().item()) - duplicated,
-            "screen_replacements": 0,
-            "radius_p50": 0.0,
-            "radius_p95": 0.0,
-            "radius_p99": 0.0,
-            "radius_max": 0.0,
-        }
-        self._reset_statistics()
-        return {
-            "clone": 0,
-            "split": duplicated,
-            "prune": pruned,
-            "budget_skip": 0,
-        }
+    def far_from_cameras(self, points: torch.Tensor) -> torch.Tensor:
+        """Points farther than far_prune_distance from every training camera."""
+        distance = torch.full(points.shape[:1], float("inf"), device=points.device)
+        centers = self.camera_centers.to(points.device, points.dtype)
+        for chunk in torch.split(torch.arange(points.shape[0], device=points.device), 262144):
+            distance[chunk] = torch.cdist(points[chunk], centers).amin(dim=1)
+        return distance > self.config.far_prune_distance
 
     @torch.no_grad()
     def projected_radii(self, camera) -> torch.Tensor:
@@ -521,6 +416,7 @@ class GaussianAdaptationController:
         screen_gradient: torch.Tensor | None,
         gaussian_statistics: torch.Tensor,
         camera,
+        iteration: int | None = None,
     ) -> None:
         expected = (self.model.point_count, 4)
         if gaussian_statistics.shape != expected:
@@ -535,9 +431,12 @@ class GaussianAdaptationController:
         # occluded surfel still contributes to the denominator.
         radii = self.projected_radii(camera)
         visible = radii > 0
-        self.gradient_sum[visible] += screen_gradient.detach()[visible].norm(
-            dim=-1
-        )
+        gradient = screen_gradient.detach().norm(dim=-1)
+        if self.config.gradient_attenuation_compensation:
+            gradient = gradient * self.attenuation_compensation(camera.origin)
+        if self.config.near_camera_gradient_scaling:
+            gradient = gradient * self.near_camera_weight(camera, iteration)
+        self.gradient_sum[visible] += gradient[visible]
         self.gradient_denom[visible] += 1
         self.max_radii2d[visible] = torch.maximum(
             self.max_radii2d[visible], radii[visible]
@@ -581,7 +480,14 @@ class GaussianAdaptationController:
             world_prune = scales > (
                 self.config.max_world_scale_fraction * self.scene_extent
             )
-        mandatory_prune = screen_prune | world_prune
+        far_prune = torch.zeros_like(raw_opacity_prune)
+        if self.config.far_prune_distance is not None and (
+            opacity_pruning_active or size_pruning_active
+        ):
+            far_prune = self.far_from_cameras(self.model.means) & (
+                scales > self.config.far_prune_scale
+            )
+        mandatory_prune = screen_prune | world_prune | far_prune
         opacity_prune = raw_opacity_prune & mandatory_prune
         optional_opacity = indices[
             raw_opacity_prune & ~mandatory_prune
@@ -615,7 +521,7 @@ class GaussianAdaptationController:
         average_gradient = self.gradient_sum / self.gradient_denom
         average_gradient.nan_to_num_(0.0)
         gradient_candidates = (
-            average_gradient >= self.config.gradient_threshold
+            average_gradient >= self.gradient_threshold
         ) & densification_active
         densify = gradient_candidates.clone()
 
@@ -631,8 +537,11 @@ class GaussianAdaptationController:
         # remove do not affect the final model. Avoid allocating them. New
         # children have no accumulated screen-radius history, so screen
         # pruning removes the oversized parent, not its replacement.
-        clone_mask &= ~opacity_prune & ~world_prune
+        clone_mask &= ~opacity_prune & ~world_prune & ~far_prune
         split_mask &= ~opacity_prune
+        if self.config.far_prune_distance is not None:
+            # Split children are scaled by 1/1.6 and stay near the parent.
+            split_mask &= ~(far_prune & (scales / 1.6 > self.config.far_prune_scale))
         if size_pruning_active:
             child_world_prune = scales / 1.6 > (
                 self.config.max_world_scale_fraction * self.scene_extent
@@ -652,12 +561,13 @@ class GaussianAdaptationController:
         candidate_costs = torch.cat((clone_costs, split_costs))
         provisional_count = base_count + int(candidate_costs.sum().item())
         budget_rejected = 0
+        cap = self.max_points_at(iteration)
         densification_skipped = (
-            self.config.max_points is not None
-            and provisional_count > self.config.max_points
+            cap is not None
+            and provisional_count > cap
         )
         if densification_skipped and candidate_indices.numel():
-            excess = provisional_count - self.config.max_points
+            excess = provisional_count - cap
             priorities = average_gradient[candidate_indices]
             rejection_order = torch.argsort(
                 priorities, descending=False, stable=True
@@ -736,6 +646,7 @@ class GaussianAdaptationController:
             "opacity_pruning_active": int(opacity_pruning_active),
             "screen_prune": int(screen_prune.sum().item()),
             "world_prune": int(world_prune.sum().item()),
+            "far_prune": int(far_prune.sum().item()),
             "gradient_opacity_overlap": int(
                 (gradient_candidates & opacity_prune).sum().item()
             ),
@@ -913,6 +824,7 @@ class GaussianAdaptationController:
             "total_opacity_resets": self.total_opacity_resets,
             "last_opacity_reset_changed": self.last_opacity_reset_changed,
             "revision": self.revision,
+            "initial_count": self.initial_count,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -934,3 +846,4 @@ class GaussianAdaptationController:
             state.get("last_opacity_reset_changed", 0)
         )
         self.revision = int(state["revision"])
+        self.initial_count = int(state.get("initial_count", self.initial_count))

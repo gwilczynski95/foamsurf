@@ -195,3 +195,29 @@ def test_native_renderer_requires_explicit_geometry_sync() -> None:
     medium, _, _ = _medium()
     with pytest.raises(RuntimeError, match="set_voronoi_geometry"):
         native.render_voronoi(_rays(), medium)
+
+
+def _surface_reference(depths, indices, near, far):
+    valid = (indices >= 0) & (depths >= near) & (depths <= far)
+    masked = torch.where(valid, depths, torch.full_like(depths, float("inf")))
+    depth, slots = masked.min(dim=0)
+    index = torch.gather(indices, 0, slots[None]).squeeze(0)
+    return torch.where(torch.isfinite(depth), depth, torch.full_like(depth, -1.0)), index
+
+
+@pytest.mark.parametrize("near,far", [(0.0, 100.0), (0.5, 7.25)])
+def test_surface_hits_kernel_matches_masked_min(near, far):
+    _requirements()
+    import foamsurf._C as bindings
+
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    depths = torch.rand(64, 20000, device="cuda", generator=generator) * 120 - 10
+    depths[:, :500] = 3.0
+    depths[5:9, 500:900] = float("nan")
+    indices = torch.randint(-3, 1000, (64, 20000), device="cuda", dtype=torch.int32,
+                            generator=generator)
+    indices[:, 900:1200] = -1
+    actual = bindings.surface_hits(depths, indices, near, far)
+    expected = _surface_reference(depths, indices, near, far)
+    assert torch.equal(actual[0], expected[0])
+    assert torch.equal(actual[1], expected[1])

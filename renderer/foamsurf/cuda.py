@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+import os
 from pathlib import Path
 
 import torch
@@ -64,8 +65,8 @@ class NativeHybridRender:
     image: torch.Tensor
     alpha: torch.Tensor
     transmittance: torch.Tensor
-    surface_depth: torch.Tensor
-    surface_index: torch.Tensor
+    surface_depth: torch.Tensor | None  # None when rendered with surface=False
+    surface_index: torch.Tensor | None
     hit_depths: torch.Tensor
     hit_indices: torch.Tensor
     num_intersections: torch.Tensor
@@ -182,6 +183,98 @@ class _HybridCudaFunction(torch.autograd.Function):
         )
 
 
+class _RgbCudaFunction(torch.autograd.Function):
+    """RGB medium in one traversal: direct, backscatter and direct transmittance [R,3]."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        bindings,
+        points,
+        attenuation,
+        backscatter,
+        medium_colors,
+        adjacency,
+        offsets,
+        rays,
+        start_points,
+        hit_depths,
+        hit_indices,
+        means,
+        log_scales,
+        quaternions,
+        gaussian_colors,
+        opacity_logits,
+        raw_kappa,
+        background,
+        near_plane,
+        far_plane,
+        threshold,
+        max_intersections,
+        screen_axes=None,
+        means_screen_abs=None,
+    ):
+        tensors = (
+            points,
+            attenuation,
+            backscatter,
+            medium_colors,
+            adjacency,
+            offsets,
+            rays,
+            start_points,
+            hit_depths,
+            hit_indices,
+            means,
+            log_scales,
+            quaternions,
+            gaussian_colors,
+            opacity_logits,
+            raw_kappa,
+            background,
+        )
+        direct, scattered, transmission, num_intersections = bindings.rgb_forward(
+            list(tensors), near_plane, far_plane, threshold, max_intersections
+        )
+        ctx.bindings = bindings
+        ctx.settings = (near_plane, far_plane, threshold, max_intersections)
+        # Not saved tensors: backward adds into the caller's buffer in place.
+        ctx.screen = (screen_axes, means_screen_abs)
+        ctx.save_for_backward(*tensors, direct, scattered, transmission)
+        ctx.mark_non_differentiable(num_intersections)
+        return direct, scattered, transmission, num_intersections
+
+    @staticmethod
+    def backward(ctx, direct_gradient, scattered_gradient, transmission_gradient, _):
+        *tensors, direct, scattered, transmission = ctx.saved_tensors
+        gradients = ctx.bindings.rgb_backward(
+            list(tensors),
+            [direct, scattered, transmission],
+            [direct_gradient, scattered_gradient, transmission_gradient],
+            *ctx.settings,
+            *ctx.screen,
+        )
+        # ctx.bindings / ctx.screen stay: backward may run again (retain_graph).
+        return (
+            None,
+            *gradients[:4],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            *gradients[4:],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 class NativeHybridRenderer:
     """OptiX hit generation plus fused Voronoi/Gaussian CUDA compositing.
 
@@ -200,7 +293,7 @@ class NativeHybridRenderer:
         max_intersections: int = 1024,
         number_of_sides: int = 8,
         gaussian_radius_squared: float = 11.3449,
-        gaussian_hit_buffer_size: int = 16,
+        gaussian_hit_buffer_size: int = 64,
         flare_renderer_directory: str | Path | None = None,
     ) -> None:
         if max_batch_size <= 0:
@@ -212,6 +305,15 @@ class NativeHybridRenderer:
         self.far = float(far)
         self.transmittance_threshold = float(transmittance_threshold)
         self.max_intersections = int(max_intersections)
+        # RGB medium: "fused" (one traversal) or "six_pass" (rgb_medium.compose_cuda,
+        # kept for A/B comparison); same results within atomic-order noise.
+        self.rgb_medium_backend = os.environ.get(
+            "FOAMSURF_RGB_MEDIUM_BACKEND", "fused"
+        )
+        if self.rgb_medium_backend not in {"fused", "six_pass"}:
+            raise ValueError(
+                "FOAMSURF_RGB_MEDIUM_BACKEND must be 'fused' or 'six_pass'"
+            )
         self._bindings = self._load_foamsurf_bindings()
         self._flare_renderer_directory = flare_renderer_directory
         self._number_of_sides = int(number_of_sides)
@@ -239,7 +341,7 @@ class NativeHybridRenderer:
     @staticmethod
     def _load_optix(directory: str | Path | None):
         if directory is None:
-            directory = Path(__file__).resolve().parent / "_optix"
+            directory = Path(__file__).resolve().parent / "_optix_k64"
         directory = Path(directory)
         module = directory / "PYOPTIXFLARERENDERER.so"
         if not module.is_file():
@@ -280,13 +382,20 @@ class NativeHybridRenderer:
                 self._gaussian_radius_squared,
                 self.max_batch_size,
             )
-        self._optix.SetGeometry(
+        geometry = (
             scene.means.contiguous(),
             scene.log_scales.exp().contiguous(),
             scene.quaternions.contiguous(),
             scene.opacity_logits.sigmoid().contiguous(),
             (1.0 + torch.nn.functional.softplus(scene.raw_kappa)).contiguous(),
         )
+        try:
+            self._optix.SetGeometry(*geometry)
+        except RuntimeError:
+            # OptiX allocates outside PyTorch: free PyTorch's cached blocks and build once more
+            # (1M+ Gaussians on the 1794x1188 scenes failed here with memory held in the cache).
+            torch.cuda.empty_cache()
+            self._optix.SetGeometry(*geometry)
         self._gaussian_geometry_is_set = True
         self._gaussian_signature = (scene.means.data_ptr(), scene.means.size(0))
 
@@ -373,7 +482,16 @@ class NativeHybridRenderer:
         start_points: torch.Tensor | None = None,
         collect_diagnostics: bool = False,
         diagnostic_target: torch.Tensor | None = None,
+        screen_absolute: tuple[torch.Tensor, torch.Tensor] | None = None,
+        surface: bool = True,
+        check_inputs: bool = True,
     ) -> NativeHybridRender:
+        """screen_absolute=(axes [2,3] camera right/down, buffer [N,2] zeros):
+        backward adds sum over rays of |dL/dmean . axis| into buffer (AbsGS).
+        Needs an RGB medium and the fused backend.
+        surface=False skips the surface-depth pass (surface_depth / surface_index are None) and
+        check_inputs=False the per-call finiteness checks of the scenes: for viewing a trained model,
+        the image and every other output are unchanged."""
         if gaussians is None and voronoi is None:
             raise ValueError("at least one representation must be provided")
         if rays.shape[-1] != 6:
@@ -404,7 +522,8 @@ class NativeHybridRenderer:
                 ray_count, dtype=torch.uint32, device=rays.device
             )
         else:
-            voronoi.validate()
+            if check_inputs:
+                voronoi.validate()
             self._require_cuda_float32(voronoi.sites, "Voronoi scene")
             if self._voronoi_topology is None:
                 raise RuntimeError(
@@ -426,11 +545,18 @@ class NativeHybridRenderer:
             if start_points is None:
                 with torch.no_grad():
                     origins = rays[:, :3]
-                    unique, inverse = torch.unique(
-                        origins, dim=0, return_inverse=True
-                    )
-                    nearest = self._nearest_sites(points, unique)
-                    start_points = nearest[inverse].to(torch.uint32)
+                    if bool((origins == origins[:1]).all()):
+                        # One camera: one lookup, same site torch.unique would give.
+                        nearest = self._nearest_sites(points, origins[:1])
+                        start_points = (
+                            nearest.expand(ray_count).contiguous().to(torch.uint32)
+                        )
+                    else:
+                        unique, inverse = torch.unique(
+                            origins, dim=0, return_inverse=True
+                        )
+                        nearest = self._nearest_sites(points, unique)
+                        start_points = nearest[inverse].to(torch.uint32)
             else:
                 start_points = start_points.reshape(-1).to(
                     device=points.device, dtype=torch.uint32
@@ -445,7 +571,8 @@ class NativeHybridRenderer:
                 (0, ray_count), dtype=torch.int32, device=rays.device
             )
         else:
-            gaussians.validate()
+            if check_inputs:
+                gaussians.validate()
             self._require_cuda_float32(gaussians.means, "Gaussian scene")
             if not self._gaussian_geometry_is_set:
                 raise RuntimeError(
@@ -477,12 +604,34 @@ class NativeHybridRenderer:
 
         compositor = _HybridCudaFunction.apply
         rgb_parts = None
+        if screen_absolute is not None and (
+            not isinstance(voronoi, RGBVoronoiScene) or self.rgb_medium_backend != "fused"
+        ):
+            raise ValueError("screen_absolute needs an RGB medium and the fused backend")
         if isinstance(voronoi, RGBVoronoiScene):
-            from .rgb_medium import compose_cuda
+            from .rgb_medium import compose_cuda, compose_fused
+            if self.rgb_medium_backend == "six_pass":
+                compose, apply = compose_cuda, _HybridCudaFunction.apply
+            elif screen_absolute is None:
+                compose, apply = compose_fused, _RgbCudaFunction.apply
+            else:
+                axes, buffer = screen_absolute
+                if axes.shape != (2, 3) or buffer.shape != (means.size(0), 2):
+                    raise ValueError("screen_absolute must be ([2,3] axes, [N,2] buffer)")
+                axes = axes.contiguous()
+                compose = compose_fused
+                def apply(*args):
+                    return _RgbCudaFunction.apply(*args, axes, buffer)
+            intervals = getattr(self, "water_intervals", None)
+            if intervals is not None:
+                if torch.is_grad_enabled() or self.rgb_medium_backend != "fused" or screen_absolute is not None:
+                    raise ValueError("water clipping is inference-only and requires fused RGB")
+                def apply(bindings, *values):
+                    return bindings.rgb_forward(list(values[:17]), *values[17:21], intervals)
             def compositor(*args):
                 nonlocal rgb_parts
-                rgba_out, counts, rgb_parts = compose_cuda(
-                    _HybridCudaFunction.apply, args, voronoi.attenuation, voronoi.backscatter)
+                rgba_out, counts, rgb_parts = compose(
+                    apply, args, voronoi.attenuation, voronoi.backscatter)
                 return rgba_out, counts
 
         rgba, num_intersections = compositor(
@@ -551,23 +700,11 @@ class NativeHybridRenderer:
                 semantics=("max_rgb_coefficient_proxy" if rgb_parts is not None else "scalar_compositing_weights"),
             )
 
-        if hit_depths.size(0):
-            valid_hits = (
-                (hit_indices >= 0)
-                & (hit_depths >= self.near)
-                & (hit_depths <= self.far)
-            )
-            masked_depths = torch.where(
-                valid_hits,
-                hit_depths,
-                torch.full_like(hit_depths, float("inf")),
-            )
-            surface_depth, slots = masked_depths.min(dim=0)
-            surface_index = torch.gather(hit_indices, 0, slots[None]).squeeze(0)
-            surface_depth = torch.where(
-                torch.isfinite(surface_depth),
-                surface_depth,
-                torch.full_like(surface_depth, -1.0),
+        if not surface:
+            surface_depth = surface_index = None
+        elif hit_depths.size(0):
+            surface_depth, surface_index = self._bindings.surface_hits(
+                hit_depths, hit_indices, self.near, self.far
             )
         else:
             surface_depth = torch.full(
@@ -580,8 +717,8 @@ class NativeHybridRenderer:
             image=rgba[:, :3].reshape(*leading_shape, 3),
             alpha=rgba[:, 3:].reshape(*leading_shape, 1),
             transmittance=(1.0 - rgba[:, 3:]).reshape(*leading_shape, 1),
-            surface_depth=surface_depth.reshape(*leading_shape, 1),
-            surface_index=surface_index.reshape(*leading_shape, 1),
+            surface_depth=None if surface_depth is None else surface_depth.reshape(*leading_shape, 1),
+            surface_index=None if surface_index is None else surface_index.reshape(*leading_shape, 1),
             hit_depths=hit_depths,
             hit_indices=hit_indices,
             num_intersections=num_intersections.reshape(*leading_shape, 1),

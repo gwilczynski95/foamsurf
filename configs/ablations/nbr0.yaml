@@ -1,0 +1,3 @@
+base_config: ../seathru.yaml
+overrides:
+  - joint.optimization.camera_isp_neighbours=0

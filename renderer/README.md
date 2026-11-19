@@ -20,12 +20,16 @@ NativeHybridRenderer.render(...)
   +-- optional: exact nearest Voronoi site for every unique ray origin
   |
   +-- FlaRe-base OptiX Render
-  |     output: sorted Gaussian hit_depths and hit_indices, shape [16, R]
+  |     output: sorted Gaussian hit_depths and hit_indices, shape [64, R]
   |
-  +-- foamsurf._C.hybrid_forward
-        hybrid_forward_kernel, 128 threads/block, one thread/ray
-        Voronoi traversal + Gaussian evaluation + fused depth compositing
-        output: RGBA [R, 4] and traversal count [R]
+  +-- foamsurf._C.hybrid_forward (scalar medium)
+  |     hybrid_forward_kernel, 128 threads/block, one thread/ray
+  |     Voronoi traversal + Gaussian evaluation + fused depth compositing
+  |     output: RGBA [R, 4] and traversal count [R]
+  |   or foamsurf._C.rgb_forward (RGB medium, see "RGB medium" below)
+  |     output: direct, backscatter, direct transmittance [R, 3] each
+  |
+  +-- foamsurf._C.surface_hits: first valid Gaussian hit per ray
 ```
 
 Thus “hybrid/fused renderer” means that Voronoi segments and Gaussian events
@@ -58,7 +62,7 @@ renderer/
   setup.py            independent Python extension build
 ```
 
-The generated files `foamsurf/_C.so`, `foamsurf/_optix/` and `build/` are
+The generated files `foamsurf/_C.so`, `foamsurf/_optix_k64/` and `build/` are
 ignored by Git and must never be committed.
 
 ## Public scene contract
@@ -103,8 +107,26 @@ Topology is a CUDA CSR graph:
 - `start_points: uint32[R]` identifies the cell containing every ray origin.
 
 If `start_points` is omitted, Python finds the exact nearest site for each
-unique camera origin, then broadcasts it to that camera's rays. The current
-implementation is chunked brute force and does not call RadFoam.
+unique camera origin, then broadcasts it to that camera's rays. When all rays
+share one origin (one camera) this is a single lookup without `torch.unique`.
+The lookup is chunked brute force and does not call RadFoam.
+
+### RGB medium
+
+`RGBVoronoiScene` adds per-channel `attenuation` and `backscatter` `[V,3]`.
+Per ray and channel `c` the renderer computes a direct pass (density
+`attenuation[:, c]`, medium colour 0) and a backscatter pass (density
+`backscatter[:, c]`, Gaussian colour and background 0); see
+`rgb_medium.reference_segments`. `foamsurf._C.rgb_forward`/`rgb_backward`
+(`rgb_forward_kernel`, `rgb_backward_kernel`) do all six passes in one
+traversal: each pass keeps its own transmittance, updated with the scalar
+kernel's float operations and checked at the same points, so the forward
+output equals six scalar launches bit for bit. Backward sums gradients that go
+to the same address in registers (a Gaussian event's alpha and endpoint terms,
+a boundary's sites, a cell's medium parameters) before the global atomics.
+`NativeHybridRenderer.rgb_medium_backend = "six_pass"` (or
+`FOAMSURF_RGB_MEDIUM_BACKEND=six_pass`) selects the former six launches of the
+scalar kernel (`rgb_medium.compose_cuda`) for comparisons.
 
 ## Geometry lifecycle
 
@@ -244,11 +266,14 @@ loss.
 
 ## Current hard limits and CUDA work queue
 
-- The vendored OptiX hit buffer has `HIT_BUFFER_SIZE = 16`. More than sixteen
-  Gaussian intersections on one ray are truncated before hybrid compositing.
-- A complete render has two native launches and materializes `[16,R]` depth
-  and index buffers.
-- Nearest starting-cell lookup is Python/PyTorch brute force.
+- The vendored OptiX hit buffer has `HIT_BUFFER_SIZE = 64` (the only size
+  built and used). More than 64 Gaussian intersections on one ray are truncated
+  before hybrid compositing.
+- A complete render has two native stages and materializes `[64,R]` depth
+  and index buffers (`surface_depth`/`surface_index` are read from them by
+  `foamsurf._C.surface_hits`).
+- Nearest starting-cell lookup is Python/PyTorch brute force (once per
+  distinct ray origin).
 - The native backend is CUDA float32 and single-GPU.
 - Topology construction/rebuild is outside this standalone renderer.
 - Rays/background and discrete topology are non-differentiable.
@@ -264,14 +289,15 @@ PyTorch oracle and this implementation before replacing it.
 ## Build and tests
 
 ```bash
-cd /shared/results/gmwilczn/foamsurf/foamsurf/renderer
-CUDA_VISIBLE_DEVICES=1 ./build.sh
+cd renderer
+./build.sh            # TORCH_CUDA_ARCH_LIST selects the GPU architecture (8.9 default, 8.6 for RTX 3090)
 
-# Oracle, native values/gradients and external baseline equivalence.
-CUDA_VISIBLE_DEVICES=1 python -m pytest -q
+# Oracle, native values/gradients and external baseline equivalence
+# (from the repository root: some tests import the training code).
+cd .. && python -m pytest -q renderer/tests
 
-# Full-call benchmark; resolution means an R x R ray grid.
-CUDA_VISIBLE_DEVICES=1 python -m foamsurf.benchmark --resolution 800
+# Synthetic full-call benchmark; resolution means an R x R ray grid.
+python -m foamsurf.benchmark --resolution 800
 ```
 
 The external-equivalence test may import original implementations as test

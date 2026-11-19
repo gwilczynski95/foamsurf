@@ -51,6 +51,20 @@ def _unpack(file, format_string: str):
     return struct.unpack("<" + format_string, data)
 
 
+def colmap_model_dir(root: str | Path) -> Path | None:
+    """COLMAP model directory: ``sparse/0`` (classic layout) or flat ``sparse/``.
+
+    Newer COLMAP exports write the model directly into ``sparse/`` (with extra
+    rigs.bin/frames.bin, which are not needed here). Returns None if neither
+    holds a cameras + images model.
+    """
+    for candidate in (Path(root) / "sparse" / "0", Path(root) / "sparse"):
+        for suffix in (".bin", ".txt"):
+            if (candidate / f"cameras{suffix}").is_file() and (candidate / f"images{suffix}").is_file():
+                return candidate
+    return None
+
+
 def _read_cameras_binary(path: Path) -> dict[int, _Intrinsics]:
     cameras = {}
     with path.open("rb") as file:
@@ -203,8 +217,12 @@ class ColmapDataset:
         resolution: int = 1,
         device: str | torch.device = "cuda",
         llffhold: int = 8,
+        validation_hold: int = 0,
     ) -> None:
         self.root = Path(root)
+        self.validation_hold = int(validation_hold)
+        if self.validation_hold < 0 or self.validation_hold == 1:
+            raise ValueError("validation_hold must be 0 (off) or >= 2")
         self.resolution = int(resolution)
         self.device = torch.device(device)
         self.sampling_mode = "camera"
@@ -214,7 +232,9 @@ class ColmapDataset:
         if self.llffhold < 2:
             raise ValueError("llffhold must be at least 2")
 
-        sparse = self.root / "sparse" / "0"
+        sparse = colmap_model_dir(self.root)
+        if sparse is None:
+            raise ValueError(f"no COLMAP model in {self.root}/sparse/0 or {self.root}/sparse")
         if (sparse / "cameras.bin").exists():
             intrinsics = _read_cameras_binary(sparse / "cameras.bin")
             extrinsics = _read_images_binary(sparse / "images.bin")
@@ -259,11 +279,18 @@ class ColmapDataset:
             fx, fy = _focal_lengths(calibration)
             fov_x = 2.0 * math.atan(calibration.width / (2.0 * fx))
             fov_y = 2.0 * math.atan(calibration.height / (2.0 * fy))
+            # The image is kept once, as the 3-channel foreground: an alpha that is a view of the RGBA
+            # tensor would keep all four channels alive, and an opaque photo's alpha is a constant one
+            # (Garden: 185 photos, 5.6 GB -> 2.4 GB on the GPU; values unchanged).
             alpha = pixels[..., 3:4]
+            foreground = pixels[..., :3] * alpha
+            alpha = (torch.ones((1, 1, 1), dtype=pixels.dtype, device=pixels.device).expand_as(alpha)
+                     if bool((alpha == 1.0).all()) else alpha.clone())
             if calibration.model not in {'PINHOLE', 'SIMPLE_PINHOLE'}:
                 raise ValueError('Undistort COLMAP images before training (PINHOLE required)')
             cx, cy = calibration.params[-2:]
             sx, sy = pixels.shape[1] / calibration.width, pixels.shape[0] / calibration.height
+            del pixels
             cameras.append(
                 Camera(
                     name=Path(record.name).stem,
@@ -276,7 +303,7 @@ class ColmapDataset:
                     intrinsics=(fx * sx, fy * sy, float(cx) * sx, float(cy) * sy),
                     fov_x=fov_x,
                     fov_y=fov_y,
-                    foreground=pixels[..., :3] * alpha,
+                    foreground=foreground,
                     alpha=alpha,
                 )
             )
@@ -289,6 +316,10 @@ class ColmapDataset:
             camera for index, camera in enumerate(cameras)
             if index % self.llffhold != 0
         ]
+        if self.validation_hold:
+            # every validation_hold-th training photo (name order) is evaluated instead of the test views
+            self.test = self.train[::self.validation_hold]
+            self.train = [camera for index, camera in enumerate(self.train) if index % self.validation_hold != 0]
         if not self.train or not self.test:
             raise ValueError("COLMAP LLFF split produced an empty split")
         self.width = self.train[0].width
@@ -297,8 +328,10 @@ class ColmapDataset:
             if (camera.height, camera.width) != (self.height, self.width):
                 raise ValueError("all COLMAP images must have the same resolution")
 
-    def stacked_training_data(self) -> dict[str, torch.Tensor]:
-        return {
+    def stacked_training_data(self, pixels: bool = True) -> dict[str, torch.Tensor]:
+        """Per-camera tensors of the training split; with pixels, also a second (stacked) copy of
+        every image, which the full-image sampler does not need (it reads camera.foreground)."""
+        data = {
             "intrinsics": torch.tensor([c.intrinsics for c in self.train], dtype=torch.float32, device=self.device),
             "origins": torch.stack([camera.origin for camera in self.train]),
             "rights": torch.stack([camera.right for camera in self.train]),
@@ -314,13 +347,11 @@ class ColmapDataset:
                 dtype=torch.float32,
                 device=self.device,
             ),
-            "foreground": torch.stack(
-                [camera.foreground for camera in self.train]
-            ).reshape(-1, 3),
-            "alpha": torch.stack(
-                [camera.alpha for camera in self.train]
-            ).reshape(-1, 1),
         }
+        if pixels:
+            data["foreground"] = torch.stack([camera.foreground for camera in self.train]).reshape(-1, 3)
+            data["alpha"] = torch.stack([camera.alpha for camera in self.train]).reshape(-1, 1)
+        return data
 
     def initial_point_cloud(
         self, _synthetic_count: int = 100_000

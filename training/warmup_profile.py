@@ -10,6 +10,10 @@ class WarmupProfile:
     spatial_count: int = 25000
     spatial_colmap_fraction: float = 0.1
     spatial_extent: float = 1.0
+    # Share of the spatial sites sampled uniformly in the volume the training cameras
+    # see, up to spatial_view_depth x the median COLMAP point distance to a camera.
+    spatial_view_fraction: float = 0.0
+    spatial_view_depth: float = 2.0
     ray_sampling: str = "single_camera"
     population_policy: str = "foamsurf"
     population_factor: float = 1.15
@@ -75,6 +79,10 @@ class WarmupProfile:
                 raise ValueError("invalid spatial COLMAP fraction")
             if not math.isfinite(self.spatial_extent) or self.spatial_extent <= 0:
                 raise ValueError("invalid spatial extent")
+            if not math.isfinite(self.spatial_view_fraction) or not 0 <= self.spatial_view_fraction <= 1:
+                raise ValueError("invalid spatial view fraction")
+            if not math.isfinite(self.spatial_view_depth) or self.spatial_view_depth <= 0:
+                raise ValueError("invalid spatial view depth")
             if self.outer_points != 0 or self.corner_guards:
                 raise ValueError("spatial sites are ordinary medium sites, not guards")
         if self.site_initialization in ("pcd", "spatial") and (self.corner_guards or self.density_beta != 10 or self.activation_scale != 1):

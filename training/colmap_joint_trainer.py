@@ -8,10 +8,13 @@ from training.trainer import Trainer
 from training.checkpoints import checkpoint_payload, save_checkpoint, load_checkpoint
 from dataclasses import replace
 from pathlib import Path
-from training.end_to_end import atomic_json
+from training.config import atomic_json
 from training.disentanglement import undirected_edges
 from training.losses import (SmoothConfig, smooth_loss, SurfaceConfig,
-    CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency)
+    CapacityLossConfig, ramp_weight, repulsion_loss, masked_direct_consistency,
+    MediumFixConfig, drop_legacy_medium_fix, water_direction, backscatter_chroma_loss,
+    surface_coverage_loss, under_surface_loss, water_clear_loss, camera_water_loss, water_anchor_loss)
+from training.surface_depth import nearest_sites, opaque_depth, sorted_hit_alphas
 from training.surface import LocalOverlap
 from training.surface import install_coverage
 
@@ -57,7 +60,7 @@ class ColmapJointTrainer(Trainer):
         payload=checkpoint_payload(self.model,self.gaussian_optimizer,self.medium_optimizer,
             self.config,iteration,self.training_seconds,self.best_psnr,self.topology.revision,
             self.gaussian_adaptation.state_dict(),self.voronoi_adaptation.state_dict(),
-            self.medium_frozen_until,self.disentanglement.state_dict(),self.prefix_training_seconds)
+            self.medium_frozen_until,self.disentanglement.state_dict(),extras=self._checkpoint_extras())
         payload['colmap_joint']=dict(birth_steps=self.birth_steps.detach().cpu(),
             medium_accumulators={n:getattr(self.voronoi_adaptation,n).detach().cpu() for n in ACCUMULATORS},
             camera_stack=list(self.sampler._camera_stack),python_rng=random.getstate(),numpy_rng=np.random.get_state())
@@ -96,8 +99,12 @@ class SmoothJointTrainer(ColmapJointTrainer):
             saved=json.loads(Path(self.resume_path).with_suffix('.smooth.json').read_text())
             if saved!=self.smoothing.as_dict():raise ValueError('Resume smoothing settings mismatch')
         original=self.disentanglement.compute
+        if not self.uses_voronoi and any(self.smoothing.as_dict()[k] for k in ('attenuation','backscatter','color')):
+            raise ValueError('Medium smoothing needs the medium (representation_mode=gaussian_only)')
         def compute(iteration,model,topology,*args,**kwargs):
             result=original(iteration,model,topology,*args,**kwargs)
+            if not self.uses_voronoi:
+                return result
             key=(topology.revision,topology.adjacency.data_ptr(),topology.offsets.data_ptr(),model.medium.point_count)
             if key!=self._smooth_edge_key:
                 self._smooth_edges=undirected_edges(topology.adjacency,topology.offsets,model.medium.point_count)
@@ -133,6 +140,8 @@ class SurfaceTrainer(SmoothJointTrainer):
         if self.resume_path is not None:
             if json.loads(Path(self.resume_path).with_suffix('.surface.json').read_text()) != self.surface.as_dict():
                 raise ValueError('Resume overlap settings mismatch')
+        if not self.uses_voronoi and self.surface.weight:
+            raise ValueError('Medium/surface overlap needs the medium (representation_mode=gaussian_only)')
         native_render = self.renderer.render
 
         def capture(rays, *a, **kw):
@@ -146,6 +155,8 @@ class SurfaceTrainer(SmoothJointTrainer):
 
         def compute(iteration, model, topology, *a, **kw):
             result = compute_base(iteration, model, topology, *a, **kw)
+            if not self.uses_voronoi:
+                return result
             if self._captured_surface is None:
                 raise RuntimeError('No hybrid training render captured')
             extra, logs = self._overlap.compute(native_render, *self._captured_surface,
@@ -267,3 +278,237 @@ class CapacityTrainer(SurfaceTrainer):
     def _checkpoint(self, path, iteration):
         super()._checkpoint(path, iteration)
         atomic_json(Path(path).with_suffix(".capacity.json"), self.capacity.as_dict())
+
+
+# Present only when the matching prior is enabled, so other runs keep their CSV columns.
+SURFACE_METRICS = tuple("medium_fix/" + name for name in (
+    "surface_coverage_weight", "surface_coverage_raw", "surface_coverage_ray_fraction",
+    "under_surface_weight", "under_surface_raw", "under_surface_ray_fraction"))
+WATER_METRICS = tuple("medium_fix/" + name for name in (
+    "water_clear_weight", "water_clear_raw", "water_clear_ray_fraction"))
+WATER_ANCHOR_METRICS = tuple("medium_fix/" + name for name in (
+    "water_anchor_weight", "water_anchor_raw", "water_anchor_attenuation_r", "water_anchor_attenuation_g",
+    "water_anchor_attenuation_b"))
+CAMERA_WATER_METRICS = tuple("medium_fix/" + name for name in (
+    "camera_water_weight", "camera_water_raw", "camera_water_cells"))
+CHROMA_METRICS = tuple("medium_fix/" + name for name in (
+    "chroma_weight", "chroma_raw", "chroma_angle_degrees",
+    "water_direction_r", "water_direction_g", "water_direction_b"))
+
+
+class MediumFixTrainer(CapacityTrainer):
+    """Adds the seabed/backscatter priors of MediumFixConfig."""
+
+    def __init__(self, config, *args, medium_fix=None, **kwargs):
+        if medium_fix is None:
+            manifest = json.loads((Path(config.output_dir).parent / "pipeline_config.json").read_text())
+            medium_fix = manifest.get("medium_fix", {})
+        self.medium_fix = MediumFixConfig(**drop_legacy_medium_fix(medium_fix))
+        self._captured_prior = None
+        self.water_ema = None
+        self.chroma_metrics = ({name: float("nan") for name in CHROMA_METRICS}
+                               if self.medium_fix.chroma_weight > 0 else {})
+        self.surface_metrics_enabled = (self.medium_fix.surface_coverage_weight > 0
+                                        or self.medium_fix.under_surface_weight > 0)
+        self.seabed_metrics = ({name: float("nan") for name in SURFACE_METRICS}
+                               if self.surface_metrics_enabled else {})
+        self.water_metrics = ({name: float("nan") for name in WATER_METRICS}
+                              if self.medium_fix.water_clear_weight > 0 else {})
+        self.camera_water_metrics = ({name: float("nan") for name in CAMERA_WATER_METRICS}
+                                     if self.medium_fix.camera_water_weight > 0 else {})
+        self._camera_water_cells = None  # (iteration, site count, near mask, reference mask)
+        self.water_anchor_metrics = ({name: float("nan") for name in WATER_ANCHOR_METRICS}
+                                     if self.medium_fix.water_anchor_weight > 0 else {})
+        self._water_anchor_target = None
+        if self.medium_fix.water_anchor_weight > 0:
+            fit = Path(config.output_dir).parent / "water_fit.json"
+            if not fit.is_file():
+                raise ValueError("medium_fix.water_anchor_weight needs the water fit "
+                                 "(joint.model.medium_initial_water_fit, writes water_fit.json)")
+            self._water_anchor_target = torch.tensor(json.loads(fit.read_text())["beta_d"], dtype=torch.float32)
+        super().__init__(config, *args, **kwargs)
+        if not self.uses_voronoi and (self.medium_fix.chroma_weight or self.medium_fix.surface_coverage_weight
+                                      or self.medium_fix.water_clear_weight or self.medium_fix.under_surface_weight
+                                      or self.medium_fix.camera_water_weight or self.medium_fix.water_anchor_weight
+                                      or self.capacity.repulsion_weight or self.capacity.direct_weight):
+            raise ValueError("Medium priors and capacity losses need the medium (representation_mode=gaussian_only)")
+        if self.medium_fix.chroma_weight > 0 and not self.model.medium.is_rgb:
+            raise ValueError("Backscatter chroma prior requires the RGB medium")
+        if self.resume_path is not None:
+            sidecar = Path(self.resume_path).with_suffix(".medium_fix.json")
+            saved = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+            saved = {**MediumFixConfig().as_dict(), **drop_legacy_medium_fix(saved)}
+            if saved != self.medium_fix.as_dict():
+                raise ValueError("Resume medium_fix settings mismatch")
+            state = Path(self.resume_path).with_suffix(".medium_fix_state.json")
+            if state.is_file():
+                water = json.loads(state.read_text()).get("water_ema")
+                self.water_ema = None if water is None else torch.tensor(water, device=self.device)
+
+        previous_render = self.renderer.render
+
+        def capture(rays, *args, **kwargs):
+            result = previous_render(rays, *args, **kwargs)
+            if (self._capture_surface and self._captured_prior is None
+                    and kwargs.get("gaussians") is not None
+                    and kwargs.get("voronoi") is not None):
+                self._captured_prior = (rays, kwargs["gaussians"], result)
+            return result
+
+        self.renderer.render = capture
+        previous_compute = self.disentanglement.compute
+
+        def compute(iteration, model, topology, *args, **kwargs):
+            result = previous_compute(iteration, model, topology, *args, **kwargs)
+            chroma = self.medium_fix.chroma_weight_at(iteration)
+            if self.chroma_metrics:
+                self.chroma_metrics = {name: float("nan") for name in CHROMA_METRICS}
+                self.chroma_metrics["medium_fix/chroma_weight"] = chroma
+            cover = self.medium_fix.surface_coverage_weight_at(iteration)
+            under = self.medium_fix.under_surface_weight_at(iteration)
+            if self.surface_metrics_enabled:
+                self.seabed_metrics = {name: float("nan") for name in SURFACE_METRICS}
+                self.seabed_metrics.update({"medium_fix/surface_coverage_weight": cover,
+                                            "medium_fix/under_surface_weight": under})
+            water = self.medium_fix.water_clear_weight_at(iteration)
+            if self.water_metrics:
+                self.water_metrics = {name: float("nan") for name in WATER_METRICS}
+                self.water_metrics["medium_fix/water_clear_weight"] = water
+            camera_water = self.medium_fix.camera_water_weight_at(iteration)
+            if self.camera_water_metrics:
+                self.camera_water_metrics = {name: float("nan") for name in CAMERA_WATER_METRICS}
+                self.camera_water_metrics["medium_fix/camera_water_weight"] = camera_water
+            if camera_water:
+                near, reference = self._camera_water_masks(iteration, model)
+                raw = camera_water_loss(model.medium.optical_coefficients, model.medium.raw_color, near, reference)
+                self.camera_water_metrics["medium_fix/camera_water_cells"] = int(near.sum())
+                if raw is not None:
+                    result = replace(result, total=result.total + camera_water * raw)
+                    self.camera_water_metrics["medium_fix/camera_water_raw"] = float(raw.detach())
+            anchor = self.medium_fix.water_anchor_weight_at(iteration)
+            if self.water_anchor_metrics:
+                self.water_anchor_metrics = {name: float("nan") for name in WATER_ANCHOR_METRICS}
+                self.water_anchor_metrics["medium_fix/water_anchor_weight"] = anchor
+            if anchor:
+                _, reference = self._camera_water_masks(iteration, model)
+                coefficients = model.medium.optical_coefficients
+                raw = water_anchor_loss(coefficients, reference, self._water_anchor_target)
+                if raw is not None:
+                    result = replace(result, total=result.total + anchor * raw)
+                    self.water_anchor_metrics["medium_fix/water_anchor_raw"] = float(raw.detach())
+                    level = coefficients.detach()[reference, :3].log().mean(0).exp()
+                    for channel, value in zip("rgb", level.tolist()):
+                        self.water_anchor_metrics[f"medium_fix/water_anchor_attenuation_{channel}"] = value
+            if not (chroma or cover or under or water):
+                return result
+            if self._captured_prior is None:
+                raise RuntimeError("No hybrid training render captured")
+            rays, scene, hybrid = self._captured_prior
+            rays = rays.reshape(-1, 6)
+            count = min(self.medium_fix.prior_rays, rays.shape[0])
+            generator = torch.Generator(device=rays.device)
+            generator.manual_seed(self.config.seed * 1_000_003 + iteration)
+            selected = torch.randperm(rays.shape[0], device=rays.device, generator=generator)[:count]
+            only = self.renderer.render_gaussians(
+                rays[selected].contiguous(), scene, background=(0.0, 0.0, 0.0))
+            total = result.total
+            if chroma:
+                if hybrid.backscatter is None:
+                    raise RuntimeError("Backscatter component unavailable")
+                backscatter = hybrid.backscatter.reshape(-1, 3)[selected]
+                current = water_direction(backscatter, only.alpha, self.medium_fix.chroma_water_alpha)
+                if current is not None:
+                    decay = self.medium_fix.chroma_ema
+                    blended = current if self.water_ema is None else decay * self.water_ema + (1 - decay) * current
+                    self.water_ema = blended / blended.norm().clamp_min(1e-8)
+                chroma_raw, angle = backscatter_chroma_loss(
+                    backscatter, only.alpha, self.water_ema,
+                    self.medium_fix.chroma_alpha_threshold, self.medium_fix.chroma_margin_degrees)
+                total = total + chroma * chroma_raw
+                self.chroma_metrics.update({"medium_fix/chroma_raw": float(chroma_raw.detach()),
+                                            "medium_fix/chroma_angle_degrees": angle})
+                if self.water_ema is not None:
+                    for channel, value in zip("rgb", self.water_ema.tolist()):
+                        self.chroma_metrics[f"medium_fix/water_direction_{channel}"] = value
+            if cover:
+                cover_raw, fraction = surface_coverage_loss(only.alpha, self.medium_fix.surface_coverage_threshold)
+                total = total + cover * cover_raw
+                self.seabed_metrics.update({"medium_fix/surface_coverage_raw": float(cover_raw.detach()),
+                                            "medium_fix/surface_coverage_ray_fraction": fraction})
+            if water:
+                water_raw, fraction = water_clear_loss(only.alpha, self.medium_fix.water_clear_threshold)
+                total = total + water * water_raw
+                self.water_metrics.update({"medium_fix/water_clear_raw": float(water_raw.detach()),
+                                           "medium_fix/water_clear_ray_fraction": fraction})
+            if under:
+                under_raw, fraction = self._under_surface(rays[selected], only, model)
+                total = total + under * under_raw
+                self.seabed_metrics.update({"medium_fix/under_surface_raw": float(under_raw.detach()),
+                                            "medium_fix/under_surface_ray_fraction": fraction})
+            return replace(result, total=total)
+
+        self.disentanglement.compute = compute
+
+    @torch.no_grad()
+    def _camera_water_masks(self, iteration, model):
+        """(near, reference) cell masks of the camera-water prior, recomputed every camera_water_refresh
+        iterations or when the cells change: near = free-water cells within camera_water_radius camera
+        spacings of a training camera, reference = free-water cells farther than 3 spacings from all."""
+        sites = model.medium.sites.detach()
+        cached = self._camera_water_cells
+        if (cached is not None and cached[1] == sites.shape[0]
+                and iteration - cached[0] < self.medium_fix.camera_water_refresh):
+            return cached[2], cached[3]
+        centres = torch.stack([camera.origin for camera in self.dataset.train]).to(sites)
+        pairwise = torch.cdist(centres, centres).fill_diagonal_(float("inf"))
+        spacing = float(pairwise.min(1).values.median())
+        to_camera = torch.cdist(sites, centres).min(1).values
+        to_gaussian = torch.as_tensor(
+            cKDTree(model.gaussians.means.detach().cpu().numpy()).query(sites.cpu().numpy())[0],
+            device=sites.device, dtype=sites.dtype)
+        free = to_gaussian > self.medium_fix.camera_water_free * spacing
+        near = free & (to_camera < self.medium_fix.camera_water_radius * spacing)
+        reference = free & (to_camera > 3 * spacing)
+        self._camera_water_cells = (iteration, sites.shape[0], near, reference)
+        return near, reference
+
+    def _under_surface(self, rays, only, model):
+        """Backscatter of the medium alone behind the opaque Gaussian surface."""
+        with torch.no_grad():
+            origins = rays[:, :3]
+            directions = torch.nn.functional.normalize(rays[:, 3:], dim=-1)
+            depth, alpha, _ = sorted_hit_alphas(model.gaussians, only.hit_depths, only.hit_indices, origins,
+                                                directions, self.config.renderer.gaussian_radius_squared)
+            surface, found = opaque_depth(depth, alpha, self.medium_fix.under_surface_threshold)
+            start = surface[found] + self.medium_fix.under_surface_offset
+            under_rays = torch.cat((origins[found] + start[:, None] * directions[found], directions[found]),
+                                   dim=-1).contiguous()
+        fraction = float(found.float().mean())
+        if under_rays.shape[0] == 0:
+            return model.medium.raw_density.sum() * 0, fraction
+        medium = model.medium.render_scene()
+        # Every under-surface ray has its own origin; the renderer's own start-cell
+        # search would build a [rays, sites, 3] tensor (several GB), so do it in chunks.
+        start_points = nearest_sites(under_rays[:, :3].detach(), medium.sites.detach()).to(torch.uint32)
+        behind = self.renderer.render(under_rays, voronoi=medium, background=(0.0, 0.0, 0.0),
+                                      start_points=start_points)
+        if behind.backscatter is None:
+            raise RuntimeError("Under-surface prior requires the RGB medium")
+        return under_surface_loss(behind.backscatter), fraction
+
+    def _train_step(self, iteration):
+        self._captured_prior = None
+        try:
+            return super()._train_step(iteration)
+        finally:
+            self._captured_prior = None
+
+    def _training_row(self, *args):
+        return {**super()._training_row(*args), **self.chroma_metrics, **self.seabed_metrics,
+                **self.water_metrics, **self.camera_water_metrics, **self.water_anchor_metrics}
+
+    def _checkpoint(self, path, iteration):
+        super()._checkpoint(path, iteration)
+        atomic_json(Path(path).with_suffix(".medium_fix.json"), self.medium_fix.as_dict())
+        atomic_json(Path(path).with_suffix(".medium_fix_state.json"),
+                    dict(water_ema=None if self.water_ema is None else self.water_ema.tolist()))

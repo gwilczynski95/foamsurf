@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 from foamsurf import VoronoiScene
 
 from evaluation.surface_partition import classify, variants, checkpoint_order
-from training.end_to_end import atomic_json
+from training.config import atomic_json
 
 
 def local_tv(sigma, adjacency, offsets, outer):
@@ -159,6 +159,10 @@ def initialize_native_hybrid(root, config, options):
     config.model.medium_points = int(keep.sum())
     config.model.medium_guard_points = 0
     config.voronoi_adaptation.min_points = int(keep.sum())
+    # every retained cell is kept (no Voronoi adaptation in the joint stage): the budget must hold them all
+    budget = config.voronoi_adaptation.max_points
+    if budget is not None and budget < int(keep.sum()):
+        config.voronoi_adaptation.max_points = int(keep.sum())
     config.validate()
     gaussians = SurfaceGaussianModel(sites[selected].numpy(),
                 torch.sigmoid(state['medium.raw_color'][selected]).numpy(),config.model,config.device)
@@ -168,10 +172,18 @@ def initialize_native_hybrid(root, config, options):
     # Do not apply beta=10 a second time. Reset only cells touching removed sites.
     density = state['medium.raw_density'][keep].clone()
     density[affected_kept] = _inverse_softplus(options['reset_density'])
+    metadata = dict(point_count=int(keep.sum()),guard_count=0)
+    if config.model.medium_type == 'rgb_backscatter':
+        # The warmup's one density per cell becomes RGB attenuation = backscatter = that density (both through
+        # softplus, as the scalar one); the colour keeps its sigmoid activation.
+        if density.shape[1] != 1:
+            raise ValueError('Expected a scalar warmup medium')
+        density = density.expand(-1, 6).clone()
+        metadata.update(medium_type='rgb_backscatter', color_activation='sigmoid')
     medium = VoronoiMediumModel.from_checkpoint(
         dict(sites=sites[keep].clone(),raw_density=density,
              raw_color=state['medium.raw_color'][keep].clone()),
-        dict(point_count=int(keep.sum()),guard_count=0),state['medium.bbox_min'],state['medium.bbox_max'],config.device)
+        metadata,state['medium.bbox_min'],state['medium.bbox_max'],config.device)
     report = dict(source_count=len(sites),removed_surface_count=int(surface.sum()),
                   retained_voronoi_count=int(keep.sum()),reset_neighbor_count=int(affected_kept.sum()),
                   gaussian_count=len(selected),requested_gaussian_count=options['gaussian_count'],

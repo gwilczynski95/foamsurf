@@ -1,10 +1,76 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+import json
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+# Removed features (RadFoam prior, medium handoff prefix, scalar medium
+# regularizers, flare_movement). Configs and manifests written before the
+# removal still carry them; they are dropped when inactive.
+_LEGACY_SECTIONS = {
+    "radfoam_prior": lambda section: not section.get("enabled", False),
+    "medium_handoff": lambda section: (
+        section.get("prefix_mode", "none") == "none"
+        and not section.get("prefix_iterations", 0)
+        and section.get("gaussian_freeze_start") is None
+    ),
+}
+_LEGACY_ADAPTATION = {"min_opacity_densify": None, "opacity_reset_prune_grace": 0}
+# Removed optimization options (direction-dependent water gain, _wdir) with their inactive values.
+_LEGACY_OPTIMIZATION = {"water_direction": False}
+_LEGACY_OPTIMIZATION_FREE = ("water_direction_lr",)
+_LEGACY_DISENTANGLEMENT_PREFIXES = (
+    "opaque_if_used_", "graph_tv_", "density_cap_", "optical_thickness_",
+)
+
+
+def drop_legacy_keys(raw: dict[str, Any]) -> dict[str, Any]:
+    """Return a stage config dict without inactive keys of removed features."""
+
+    raw = dict(raw)
+    for name, inactive in _LEGACY_SECTIONS.items():
+        if name in raw:
+            if not inactive(raw[name] or {}):
+                raise ValueError(f"{name} is no longer supported")
+            del raw[name]
+    disentanglement = raw.get("disentanglement")
+    if disentanglement is not None:
+        disentanglement = dict(disentanglement)
+        for key in list(disentanglement):
+            if key.startswith(_LEGACY_DISENTANGLEMENT_PREFIXES) or key == "epsilon":
+                if key.endswith("_weight") and disentanglement[key] != 0:
+                    raise ValueError(f"disentanglement.{key} is no longer supported")
+                del disentanglement[key]
+        raw["disentanglement"] = disentanglement
+    adaptation = raw.get("gaussian_adaptation")
+    if adaptation is not None:
+        if adaptation.get("policy") == "flare_movement":
+            raise ValueError("gaussian_adaptation.policy flare_movement is no longer supported")
+        adaptation = dict(adaptation)
+        for key, inactive in _LEGACY_ADAPTATION.items():
+            if key in adaptation:
+                if adaptation[key] != inactive:
+                    raise ValueError(f"gaussian_adaptation.{key} is no longer supported")
+                del adaptation[key]
+        adaptation.pop("movement_threshold", None)
+        raw["gaussian_adaptation"] = adaptation
+    optimization = raw.get("optimization")
+    if optimization is not None:
+        optimization = dict(optimization)
+        for key, inactive in _LEGACY_OPTIMIZATION.items():
+            if key in optimization:
+                if optimization[key] != inactive:
+                    raise ValueError(f"optimization.{key} is no longer supported")
+                del optimization[key]
+        for key in _LEGACY_OPTIMIZATION_FREE:
+            optimization.pop(key, None)
+        raw["optimization"] = optimization
+    return raw
 
 
 def _construct(cls, values: dict[str, Any] | None):
@@ -23,6 +89,9 @@ class DatasetConfig:
     source_path: str = ""
     resolution: int = 1
     llffhold: int = 8
+    # Tuning without the test views: > 0 holds out every validation_hold-th training photo and evaluates on
+    # those instead of the test split (which is then not used at all); 0 = the usual train / test split.
+    validation_hold: int = 0
     gaussian_ground_truth_path: str | None = None
     medium_ground_truth_path: str | None = None
     train_target: str = "both"
@@ -33,6 +102,9 @@ class ModelConfig:
     medium_type: str = "scalar"
     appearance: str = "rgb"
     gaussian_rgb_activation: str = "identity"
+    # sigmoid only: colour = scale x sigmoid (_rgbs<NN>). At 1 white objects behind water cannot reach the photo
+    # (Curacao colour chart: its Gaussians sit at 1.0 and render ~45/255 too dark); still bounded, unlike identity.
+    gaussian_rgb_scale: float = 1.0
     sh_degree: int = 3
     gaussian_initial_points: int = 100_000
     gaussian_initial_opacity: float = 0.1
@@ -48,6 +120,24 @@ class ModelConfig:
     medium_initial_color: list[float] = field(
         default_factory=lambda: [0.5, 0.5, 0.5]
     )
+    # Joint stage: every cell starts with the mean colour of the training photos instead of the
+    # warmup's colour, so open water starts close to the water (not a grey wall).
+    medium_initial_color_from_data: bool = False
+    # Joint stage: every cell starts with the water fitted on the training photos
+    # (training/water_fit.py): "coefficients" = attenuation beta_D and backscatter beta_B,
+    # "all" = also colour B_inf (overrides medium_initial_color_from_data). "off": as before.
+    medium_initial_water_fit: str = "off"
+    # Ablation: one homogeneous water instead of the Voronoi cells (every cell renders the mean coefficients and colour
+    # of all cells; the cells and their parameters stay, so checkpoints and optimizers are unchanged).
+    medium_homogeneous: bool = False
+    # Mip-Splatting 3D smoothing filter (Yu et al. 2024): every Gaussian is rendered with scales
+    # sqrt(s^2 + s_f^2) and opacity x (s_u s_v) / (s_u' s_v'), s_f = sqrt(variance) x the world size of
+    # one pixel at the nearest training camera that sees it. Variance in pixels^2; 0 = off, paper 0.2.
+    gaussian_mip_filter: float = 0.0
+    # False: the filter only dilates (as 3DGS / gsplat "classic", WaterSplatting), opacity kept: a sub-pixel
+    # surfel becomes an opaque pixel-size one instead of a faint one (the integral-keeping scale-down of
+    # Mip-Splatting leaves the seabed half transparent: on Panama 1/3 of the Gaussians lose > 50% opacity).
+    gaussian_mip_compensate: bool = True
 
 
 @dataclass
@@ -59,7 +149,7 @@ class RendererConfig:
     max_intersections: int = 1_024
     number_of_sides: int = 8
     gaussian_radius_squared: float = 11.3449
-    gaussian_hit_buffer_size: int = 16
+    gaussian_hit_buffer_size: int = 64
 
 
 @dataclass
@@ -67,6 +157,10 @@ class OptimizationConfig:
     iterations: int = 35_000
     rays_per_batch: int = 65_536
     full_image_batch: bool = False
+    # Coarse-to-fine (WaterSplatting: 2 levels every 3000 steps = 1/4, 1/2, then full
+    # resolution from 6000): downscale 2^max(levels - iteration // interval, 0).
+    training_downscale_levels: int = 0
+    training_downscale_interval: int = 3000
     cameras_without_replacement: bool = False
     reconstruction_loss: str = "mse"
     dssim_weight: float = 0.2
@@ -99,6 +193,10 @@ class OptimizationConfig:
     gaussian_scale_regularization: float = 0.0
     gaussian_min_scale: float | None = None
     gaussian_max_scale_fraction: float | None = None
+    # Cap every Gaussian scale at this fraction of the scene extent (1.1 x camera radius, as 3DGS)
+    # from iteration 0, initial scales included. Replaces gaussian_max_scale_fraction, whose
+    # reference (the point cloud, outliers included) can be half the scene. None: off.
+    gaussian_max_scale_scene_fraction: float | None = None
     medium_sites_lr: float = 1.0e-4
     medium_density_lr: float = 1.0e-2
     medium_color_lr: float = 5.0e-3
@@ -107,6 +205,56 @@ class OptimizationConfig:
     medium_color_lr_final: float | None = None
     medium_lr_decay_from: int = 0
     medium_lr_decay_until: int = 30_000
+    # OceanSplat (Kweon & Park, AAAI 2026) trinocular view consistency (training/view_consistency.py):
+    # weight lambda_tri (paper 0.1; 0 = off), active in [trinocular_from, trinocular_until), virtual
+    # baseline b_v ~ U[-b, b] in nerfstudio units (paper b = 0.4, b_h = 1.5 b_v), regularised L1
+    # with epsilon, on trinocular_rays random rays of the batch.
+    trinocular_weight: float = 0.0
+    trinocular_from: int = 4_000
+    trinocular_until: int = 24_000
+    trinocular_baseline: float = 0.4
+    trinocular_rays: int = 131_072
+    trinocular_epsilon: float = 1.0e-3
+    # Full OceanSplat (training/oceansplat.py), on images at 1/ocean_downscale: lambda_tri for
+    # L_obj-stereo + L_full-stereo + L_smooth warped by the rendered depth (0 = off), lambda_epi annealed
+    # linearly start -> end, lambda_res, all in [ocean_from, ocean_until) (paper: 4k-8k of 10k, scaled
+    # to 12k-24k of 30k). Depth-aware opacity alpha^d with weight ocean_alpha_weight decaying linearly
+    # to 0 at ocean_alpha_until (0 = off; paper t_alpha 4k of 10k -> 12k). Baseline and epsilon: the
+    # trinocular_* values above.
+    ocean_tri_weight: float = 0.0
+    # Training rays through a uniformly random point of their pixel (not its centre), so the loss
+    # matches the pixel's area average in expectation; evaluation keeps the centres.
+    ray_jitter: bool = False
+    # PPISP camera model after the water (training/camera_isp.py): per-photo exposure and colour, shared
+    # vignetting and response curve; test views with the exposure and colour of their
+    # camera_isp_neighbours nearest training photos (1 / distance weights; 0 = neutral).
+    camera_isp: bool = False
+    camera_isp_neighbours: int = 4
+    # Henyey-Greenstein phase function on the backscatter (training/water_phase.py): learned direction toward the
+    # light (started at the cameras' mean up) and anisotropy g per channel (started at 0 = the plain model).
+    water_phase: bool = False
+    water_phase_lr: float = 0.01
+    water_phase_fixed_light: bool = False  # light held at the cameras' mean up, only g learned (_wphaseup)
+    # evaluation only: water light continued beyond the training directions, fitted on the training photos' open
+    # water before each evaluation (training/water_extrapolation.py, _wext)
+    water_extrapolation: bool = False
+    ocean_epi_weight_start: float = 0.0
+    ocean_epi_weight_end: float = 0.0
+    ocean_res_weight: float = 0.0
+    # L_epi and L_res only for Gaussians not hidden behind the rendered surface: z_i <= (1 + ocean_visible) x the
+    # rendered depth at their pixel (0 = every Gaussian in the frustum, as the paper).
+    ocean_visible: float = 0.0
+    ocean_from: int = 12_000
+    ocean_until: int = 24_000
+    # The OceanSplat losses on every ocean_every-th step of the window only, weighted x ocean_every (the same
+    # expected gradient, 1/ocean_every of their cost: each needs extra renders of two virtual views).
+    ocean_every: int = 1
+    ocean_downscale: int = 4
+    ocean_smooth_gamma: float = 1.0
+    ocean_gaussian_samples: int = 65_536
+    ocean_alpha_until: int = 0
+    ocean_alpha_weight: float = 0.5
+    ocean_alpha_lr: float = 1.0e-3
     topology_update_interval: int = 25
     topology_incremental: bool = True
 
@@ -130,7 +278,7 @@ class DiagnosticsConfig:
 
 @dataclass
 class DisentanglementConfig:
-    """Normalized surface/medium priors used after the B0 baseline."""
+    """Scheduled per-Gaussian opacity binarization."""
 
     opacity_binarization_weight: float = 0.0
     opacity_binarization_start: int = 0
@@ -140,59 +288,6 @@ class DisentanglementConfig:
     opacity_binarization_end_ramp: int = 0
     opacity_binarization_end_ramp_shape: str = "linear"
     opacity_binarization_maintenance_scale: float = 1.0
-    opaque_if_used_weight: float = 0.0
-    opaque_if_used_start: int = 0
-    opaque_if_used_ramp: int = 0
-    opaque_if_used_ramp_shape: str = "linear"
-    graph_tv_weight: float = 0.0
-    graph_tv_start: int = 0
-    graph_tv_ramp: int = 0
-    graph_tv_ramp_shape: str = "linear"
-    graph_tv_mode: str = "huber"
-    graph_tv_huber_delta: float = 0.02
-    density_cap_weight: float = 0.0
-    density_cap_start: int = 0
-    density_cap_ramp: int = 0
-    density_cap_ramp_shape: str = "linear"
-    density_cap_policy: str = "fixed"
-    density_cap_fixed_value: float = 1.0
-    density_cap_quantile: float = 0.95
-    density_cap_multiplier: float = 2.0
-    density_cap_minimum: float = 0.005
-    density_cap_update_interval: int = 25
-    density_cap_ema_decay: float = 0.99
-    density_cap_warmup_until: int = 5_000
-    optical_thickness_weight: float = 0.0
-    optical_thickness_start: int = 0
-    optical_thickness_ramp: int = 0
-    optical_thickness_ramp_shape: str = "linear"
-    epsilon: float = 1.0e-8
-
-
-@dataclass
-class MediumHandoffConfig:
-    """Optional phases that give the medium a controlled optimization window."""
-
-    prefix_mode: str = "none"
-    prefix_iterations: int = 0
-    prefix_reset_medium_optimizer: bool = True
-    gaussian_freeze_start: int | None = None
-    gaussian_freeze_duration: int = 0
-    medium_sites_lr_multiplier: float = 1.0
-    medium_density_lr_multiplier: float = 1.0
-    medium_color_lr_multiplier: float = 1.0
-
-
-@dataclass
-class RadFoamPriorConfig:
-    """Optional spatial initialization from a separated RadFoam checkpoint."""
-
-    enabled: bool = False
-    checkpoint_path: str = ""
-    labels_path: str = ""
-    gaussian_count: int = 100_000
-    pca_neighbors: int = 8
-    reset_density: float = 1.0e-8
 
 
 @dataclass
@@ -207,7 +302,6 @@ class VoronoiWarmupConfig:
 class GaussianAdaptationConfig:
     enabled: bool = False
     # graphdeco: screen-gradient clone/split/prune (3DGS/current FlaRe)
-    # flare_movement: duplicate points moving during one optimizer step
     # fixed: fixed topology with optional opacity reset
     policy: str = "graphdeco"
     max_points: int | None = 200_000
@@ -217,6 +311,10 @@ class GaussianAdaptationConfig:
     gradient_threshold: float = 2.0e-4
     min_opacity: float = 0.005
     min_opacity_initial: float | None = None
+    # A second, usually lower threshold from min_opacity_late_from on (WaterSplatting:
+    # 0.5 while densifying, 0.1 from 10000). None: min_opacity throughout.
+    min_opacity_late: float | None = None
+    min_opacity_late_from: int = 10000
     opacity_prune_from: int = 500
     opacity_prune_ramp: int = 0
     opacity_prune_ramp_shape: str = "linear"
@@ -233,6 +331,35 @@ class GaussianAdaptationConfig:
     screen_pruning_enabled: bool = False
     max_screen_size: float = 20.0
     max_world_scale_fraction: float = 0.10
+    # Gaussians whose largest scale exceeds far_prune_scale and whose center is
+    # farther than far_prune_distance from every training camera (both in world
+    # units) are pruned at every opacity-prune or size-prune event; they fill
+    # open water. None disables.
+    far_prune_distance: float | None = None
+    far_prune_scale: float = 0.05
+    # Divide each Gaussian's densification gradient by the medium transmittance
+    # to the camera, T = mean_c exp(-a_c d) (a: median attenuation of the cells,
+    # d: distance), capped at gradient_compensation_max: Gaussians far behind
+    # water otherwise receive gradients attenuated by it and are never densified.
+    gradient_attenuation_compensation: bool = False
+    # gradient_threshold holds for images this wide; other widths use
+    # threshold * reference / width (larger images densify more). None: as given.
+    gradient_threshold_reference_width: int | None = None
+    gradient_compensation_max: float = 20.0
+    # AbsGS / WaterSplatting: accumulate sum over pixels of |dL/dscreen| per axis
+    # instead of |sum over pixels|, so opposite pixel gradients do not cancel.
+    # Larger than the plain statistic: raise gradient_threshold (WS: 4x).
+    absolute_gradient: bool = False
+    # Budgeted densification: the cap grows linearly from the initial count at densify_from
+    # to max_points at this iteration, so the budget is spread over the window instead of
+    # being used up in the first few thousand iterations. None: max_points from the start.
+    max_points_ramp_until: int | None = None
+    # Gaussian-DK (Ye et al. 2024): densification gradient x min((z/R)^2, 1), z = depth in the
+    # training camera, R = 1.1 x camera spread, so Gaussians near the cameras (floaters fitting
+    # brightness differences between photos) do not clone/split. near_camera_steps (t1, t2): the
+    # paper's schedule (x1 before t1, x0.5 until t2, x0 after; 4000, 7000); None: the weight alone.
+    near_camera_gradient_scaling: bool = False
+    near_camera_steps: list[int] | None = None
     opacity_reset_interval: int = 0
     opacity_reset_value: float = 0.01
     opacity_reset_at_densify_from: bool = False
@@ -244,7 +371,6 @@ class GaussianAdaptationConfig:
     preserve_clone_opacity: bool = False
     preserve_split_opacity: bool = False
     runaway_max_points: int | None = None
-    movement_threshold: float = 1.0e-3
     min_effective_scale: float = 1.0e-5
 
 
@@ -300,12 +426,6 @@ class ExperimentConfig:
     disentanglement: DisentanglementConfig = field(
         default_factory=DisentanglementConfig
     )
-    medium_handoff: MediumHandoffConfig = field(
-        default_factory=MediumHandoffConfig
-    )
-    radfoam_prior: RadFoamPriorConfig = field(
-        default_factory=RadFoamPriorConfig
-    )
     voronoi_warmup: VoronoiWarmupConfig = field(
         default_factory=VoronoiWarmupConfig
     )
@@ -320,7 +440,7 @@ class ExperimentConfig:
     @classmethod
     def load(cls, path: str | Path) -> "ExperimentConfig":
         path = Path(path)
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = drop_legacy_keys(yaml.safe_load(path.read_text()) or {})
         valid = {
             "experiment_name",
             "output_dir",
@@ -335,8 +455,6 @@ class ExperimentConfig:
             "validation",
             "diagnostics",
             "disentanglement",
-            "medium_handoff",
-            "radfoam_prior",
             "voronoi_warmup",
             "gaussian_adaptation",
             "voronoi_adaptation",
@@ -369,12 +487,6 @@ class ExperimentConfig:
             disentanglement=_construct(
                 DisentanglementConfig, raw.get("disentanglement")
             ),
-            medium_handoff=_construct(
-                MediumHandoffConfig, raw.get("medium_handoff")
-            ),
-            radfoam_prior=_construct(
-                RadFoamPriorConfig, raw.get("radfoam_prior")
-            ),
             voronoi_warmup=_construct(
                 VoronoiWarmupConfig, raw.get("voronoi_warmup")
             ),
@@ -392,12 +504,6 @@ class ExperimentConfig:
     def validate(self) -> None:
         if self.model.medium_type not in ("scalar", "rgb_backscatter"):
             raise ValueError("Unknown medium_type")
-        if self.model.medium_type == "rgb_backscatter":
-            if self.radfoam_prior.enabled:
-                raise ValueError("RGB medium does not support scalar RadFoam priors")
-            if any(getattr(self.disentanglement, n) > 0 for n in
-                   ("graph_tv_weight", "density_cap_weight", "optical_thickness_weight", "opaque_if_used_weight")):
-                raise ValueError("Scalar medium regularizers are not calibrated for RGB medium")
         if not self.dataset.source_path:
             raise ValueError("dataset.source_path is required")
         if self.representation_mode not in {"hybrid", "gaussian_only", "voronoi_only"}:
@@ -420,7 +526,9 @@ class ExperimentConfig:
                 "gaussian_only": "lego",
                 "voronoi_only": "clouds",
             }[self.representation_mode]
-            if self.dataset.train_target != expected_target:
+            # Gaussians alone may also fit the whole photo (real scenes have no layer ground truth).
+            whole_photo = self.representation_mode == "gaussian_only" and self.dataset.train_target == "both"
+            if self.dataset.train_target != expected_target and not whole_photo:
                 raise ValueError(
                     f"{self.representation_mode} requires "
                     f"dataset.train_target={expected_target}"
@@ -464,52 +572,15 @@ class ExperimentConfig:
                 raise ValueError(
                     "Voronoi warmup cannot enable Gaussian adaptation"
                 )
-            if self.radfoam_prior.enabled:
-                raise ValueError("Voronoi warmup cannot use a RadFoam prior")
-            if self.medium_handoff.prefix_mode != "none":
-                raise ValueError("Voronoi warmup cannot use a handoff prefix")
         if self.dataset.resolution < 1:
             raise ValueError("dataset.resolution must be positive")
-        prior = self.radfoam_prior
-        if prior.enabled:
-            if self.representation_mode != "hybrid":
-                raise ValueError(
-                    "RadFoam prior initialization requires hybrid mode"
-                )
-            if not prior.checkpoint_path or not prior.labels_path:
-                raise ValueError(
-                    "enabled RadFoam prior requires checkpoint_path and "
-                    "labels_path"
-                )
-            if prior.gaussian_count < 1:
-                raise ValueError(
-                    "radfoam_prior.gaussian_count must be positive"
-                )
-            if prior.gaussian_count != self.model.gaussian_initial_points:
-                raise ValueError(
-                    "radfoam_prior.gaussian_count must equal "
-                    "model.gaussian_initial_points"
-                )
-            if prior.pca_neighbors < 3:
-                raise ValueError(
-                    "radfoam_prior.pca_neighbors must be at least 3"
-                )
-            if prior.reset_density <= 0.0:
-                raise ValueError(
-                    "radfoam_prior.reset_density must be positive"
-                )
-            if self.voronoi_adaptation.enabled:
-                raise ValueError(
-                    "RadFoam prior requires "
-                    "voronoi_adaptation.enabled=false to preserve the "
-                    "imported population"
-                )
         if self.model.appearance not in {"rgb", "sh"}:
             raise ValueError("model.appearance must be rgb or sh")
         if self.model.gaussian_rgb_activation not in {"identity", "sigmoid"}:
             raise ValueError("model.gaussian_rgb_activation must be identity or sigmoid")
-        if self.model.gaussian_rgb_activation == "sigmoid" and self.model.appearance != "rgb":
-            raise ValueError("sigmoid Gaussian RGB requires model.appearance=rgb")
+        if self.model.gaussian_rgb_scale < 1.0 or (self.model.gaussian_rgb_scale != 1.0
+                                                    and self.model.gaussian_rgb_activation != "sigmoid"):
+            raise ValueError("model.gaussian_rgb_scale must be >= 1 and needs the sigmoid activation")
         if not 0 <= self.model.sh_degree <= 3:
             raise ValueError("model.sh_degree must be between 0 and 3")
         if self.model.gaussian_initial_points < 1:
@@ -528,6 +599,37 @@ class ExperimentConfig:
             raise ValueError("B0 supports either 0 or 8 guard points")
         if self.model.medium_initial_density <= 0:
             raise ValueError("medium_initial_density must be positive")
+        fraction = self.optimization.gaussian_max_scale_scene_fraction
+        if fraction is not None and not 0.0 < fraction <= 1.0:
+            raise ValueError("gaussian_max_scale_scene_fraction must be in (0, 1]")
+        if self.model.medium_initial_water_fit not in ("off", "coefficients", "all"):
+            raise ValueError("model.medium_initial_water_fit must be off, coefficients or all")
+        steps = self.gaussian_adaptation.near_camera_steps
+        if steps is not None and (len(steps) != 2 or not 0 <= steps[0] <= steps[1]):
+            raise ValueError("gaussian_adaptation.near_camera_steps must be [t1, t2] with 0 <= t1 <= t2")
+        optimization = self.optimization
+        if optimization.trinocular_weight < 0 or optimization.trinocular_baseline <= 0 \
+                or optimization.trinocular_rays <= 0 or optimization.trinocular_epsilon <= 0 \
+                or optimization.trinocular_from > optimization.trinocular_until:
+            raise ValueError("invalid trinocular settings (weight >= 0, baseline/rays/epsilon > 0, from <= until)")
+        ocean_on = (optimization.ocean_tri_weight > 0 or optimization.ocean_res_weight > 0
+                    or max(optimization.ocean_epi_weight_start, optimization.ocean_epi_weight_end) > 0)
+        if min(optimization.ocean_tri_weight, optimization.ocean_res_weight, optimization.ocean_epi_weight_start,
+               optimization.ocean_epi_weight_end, optimization.ocean_alpha_weight, optimization.ocean_visible) < 0 \
+                or optimization.ocean_downscale < 1 or optimization.ocean_gaussian_samples < 1 \
+                or optimization.ocean_from > optimization.ocean_until or optimization.ocean_alpha_until < 0 \
+                or optimization.ocean_every < 1:
+            raise ValueError("invalid ocean settings (weights >= 0, downscale/samples/every >= 1, from <= until)")
+        if optimization.water_phase_lr <= 0:
+            raise ValueError("optimization.water_phase_lr must be positive")
+        if self.model.gaussian_mip_filter < 0:
+            raise ValueError("gaussian_mip_filter is a variance in pixels^2 (>= 0)")
+        if self.optimization.camera_isp_neighbours < 0:
+            raise ValueError("camera_isp_neighbours must be >= 0 (0 = neutral test views)")
+        if ocean_on and self.model.medium_type != "rgb_backscatter":
+            raise ValueError("ocean losses need the RGB medium (object and medium parts)")
+        if optimization.trinocular_weight > 0 and self.model.medium_type != "rgb_backscatter":
+            raise ValueError("trinocular consistency needs the RGB medium (object and medium parts)")
         if len(self.model.medium_initial_color) != 3:
             raise ValueError("medium_initial_color must contain RGB")
         manual_bounds = (
@@ -591,6 +693,11 @@ class ExperimentConfig:
             raise ValueError("gaussian_sh_degree_interval must be non-negative")
         if self.optimization.gaussian_freeze_until < 0:
             raise ValueError("gaussian_freeze_until must be non-negative")
+        levels, interval = self.optimization.training_downscale_levels, self.optimization.training_downscale_interval
+        if type(levels) is not int or levels < 0 or type(interval) is not int or interval < 1:
+            raise ValueError("training_downscale_levels must be >= 0 and training_downscale_interval >= 1")
+        if levels and not self.optimization.full_image_batch:
+            raise ValueError("training_downscale_levels requires full_image_batch")
         if self.optimization.gaussian_adam_eps <= 0:
             raise ValueError("gaussian_adam_eps must be positive")
         if self.optimization.gaussian_scale_regularization < 0:
@@ -652,14 +759,7 @@ class ExperimentConfig:
                 "diagnostics.contribution_epsilon must be non-negative"
             )
         disentanglement = self.disentanglement
-        loss_names = (
-            "opacity_binarization",
-            "opaque_if_used",
-            "graph_tv",
-            "density_cap",
-            "optical_thickness",
-        )
-        for name in loss_names:
+        for name in ("opacity_binarization",):
             if getattr(disentanglement, f"{name}_weight") < 0.0:
                 raise ValueError(
                     f"disentanglement.{name}_weight must be non-negative"
@@ -709,110 +809,16 @@ class ExperimentConfig:
                     "opacity_binarization end schedule exceeds training "
                     "iterations"
                 )
-        if disentanglement.graph_tv_mode not in {"huber", "l1", "l2"}:
-            raise ValueError(
-                "disentanglement.graph_tv_mode must be huber, l1, or l2"
-            )
-        if disentanglement.graph_tv_huber_delta <= 0.0:
-            raise ValueError(
-                "disentanglement.graph_tv_huber_delta must be positive"
-            )
-        if disentanglement.density_cap_policy not in {
-            "fixed", "rolling", "ema", "warmup_freeze"
-        }:
-            raise ValueError("invalid disentanglement.density_cap_policy")
-        if disentanglement.density_cap_fixed_value <= 0.0:
-            raise ValueError("density_cap_fixed_value must be positive")
-        if not 0.0 < disentanglement.density_cap_quantile < 1.0:
-            raise ValueError("density_cap_quantile must be in (0, 1)")
-        if disentanglement.density_cap_multiplier <= 0.0:
-            raise ValueError("density_cap_multiplier must be positive")
-        if disentanglement.density_cap_minimum <= 0.0:
-            raise ValueError("density_cap_minimum must be positive")
-        if disentanglement.density_cap_update_interval < 1:
-            raise ValueError("density_cap_update_interval must be positive")
-        if not 0.0 <= disentanglement.density_cap_ema_decay < 1.0:
-            raise ValueError("density_cap_ema_decay must be in [0, 1)")
-        if disentanglement.density_cap_warmup_until < 0:
-            raise ValueError("density_cap_warmup_until must be non-negative")
-        if disentanglement.epsilon <= 0.0:
-            raise ValueError("disentanglement.epsilon must be positive")
-        gaussian_losses_enabled = (
-            disentanglement.opacity_binarization_weight > 0.0
-            or disentanglement.opaque_if_used_weight > 0.0
-        )
-        medium_losses_enabled = (
-            disentanglement.graph_tv_weight > 0.0
-            or disentanglement.density_cap_weight > 0.0
-            or disentanglement.optical_thickness_weight > 0.0
-        )
         if (
-            gaussian_losses_enabled
+            disentanglement.opacity_binarization_weight > 0.0
             and self.representation_mode == "voronoi_only"
         ):
             raise ValueError(
                 "Gaussian disentanglement losses require Gaussians"
             )
-        if (
-            medium_losses_enabled
-            and self.representation_mode == "gaussian_only"
-        ):
-            raise ValueError(
-                "medium disentanglement losses require Voronoi"
-            )
-        handoff = self.medium_handoff
-        if handoff.prefix_mode not in {"none", "medium_only", "joint"}:
-            raise ValueError(
-                "medium_handoff.prefix_mode must be none, medium_only, or joint"
-            )
-        if handoff.prefix_iterations < 0:
-            raise ValueError(
-                "medium_handoff.prefix_iterations must be non-negative"
-            )
-        if (handoff.prefix_mode == "none") != (handoff.prefix_iterations == 0):
-            raise ValueError(
-                "prefix_mode none requires zero prefix_iterations and "
-                "a nonzero prefix requires medium_only or joint"
-            )
-        if handoff.prefix_iterations and self.representation_mode != "hybrid":
-            raise ValueError("medium handoff prefix requires hybrid mode")
-        if handoff.gaussian_freeze_duration < 0:
-            raise ValueError("gaussian_freeze_duration must be non-negative")
-        if (handoff.gaussian_freeze_start is None) != (
-            handoff.gaussian_freeze_duration == 0
-        ):
-            raise ValueError(
-                "gaussian freeze start and positive duration must be set together"
-            )
-        if handoff.gaussian_freeze_start is not None:
-            if handoff.gaussian_freeze_start < 1:
-                raise ValueError("gaussian_freeze_start must be positive")
-            if (
-                handoff.gaussian_freeze_start
-                + handoff.gaussian_freeze_duration
-                > self.optimization.iterations + 1
-            ):
-                raise ValueError("Gaussian freeze window exceeds training")
-            if self.representation_mode != "hybrid":
-                raise ValueError("Gaussian handoff freeze requires hybrid mode")
-        multipliers = (
-            handoff.medium_sites_lr_multiplier,
-            handoff.medium_density_lr_multiplier,
-            handoff.medium_color_lr_multiplier,
-        )
-        if any(value <= 0.0 for value in multipliers):
-            raise ValueError("medium handoff LR multipliers must be positive")
-        if handoff.gaussian_freeze_start is None and any(
-            value != 1.0 for value in multipliers
-        ):
-            raise ValueError("medium LR boosts require a Gaussian freeze window")
-
         adaptation = self.gaussian_adaptation
-        if adaptation.policy not in {"graphdeco", "flare_movement", "fixed"}:
-            raise ValueError(
-                "gaussian_adaptation.policy must be graphdeco, "
-                "flare_movement, or fixed"
-            )
+        if adaptation.policy not in {"graphdeco", "fixed"}:
+            raise ValueError("gaussian_adaptation.policy must be graphdeco or fixed")
         if adaptation.enabled and self.representation_mode == "voronoi_only":
             raise ValueError("Gaussian adaptation cannot run in voronoi_only mode")
         if adaptation.max_points is not None and adaptation.max_points < 1:
@@ -836,6 +842,9 @@ class ExperimentConfig:
             raise ValueError(
                 "gaussian_adaptation.size_prune_from must be non-negative"
             )
+        late = adaptation.min_opacity_late
+        if late is not None and not 0.0 <= late < 1.0:
+            raise ValueError("gaussian_adaptation.min_opacity_late must be in [0, 1)")
         if adaptation.opacity_prune_from < 0:
             raise ValueError(
                 "gaussian_adaptation.opacity_prune_from must be non-negative"
@@ -919,13 +928,28 @@ class ExperimentConfig:
             "percent_dense",
             "max_screen_size",
             "max_world_scale_fraction",
-            "movement_threshold",
             "min_effective_scale",
         ):
             if getattr(adaptation, name) < 0:
                 raise ValueError(
                     f"gaussian_adaptation.{name} must be non-negative"
                 )
+        if adaptation.far_prune_distance is not None and not (
+            adaptation.far_prune_distance > 0 and adaptation.far_prune_scale > 0
+        ):
+            raise ValueError(
+                "gaussian_adaptation.far_prune_distance and far_prune_scale must be positive"
+            )
+        reference = adaptation.gradient_threshold_reference_width
+        if reference is not None and (type(reference) is not int or reference < 1):
+            raise ValueError("gaussian_adaptation.gradient_threshold_reference_width must be a positive integer")
+        if not adaptation.gradient_compensation_max >= 1.0:
+            raise ValueError("gaussian_adaptation.gradient_compensation_max must be at least 1")
+        ramp = adaptation.max_points_ramp_until
+        if ramp is not None and (adaptation.max_points is None or ramp <= adaptation.densify_from):
+            raise ValueError("gaussian_adaptation.max_points_ramp_until needs max_points and must exceed densify_from")
+        if adaptation.absolute_gradient and self.model.medium_type != "rgb_backscatter":
+            raise ValueError("gaussian_adaptation.absolute_gradient needs model.medium_type=rgb_backscatter")
         medium_adaptation = self.voronoi_adaptation
         if medium_adaptation.enabled and self.representation_mode == "gaussian_only":
             raise ValueError("Voronoi adaptation cannot run in gaussian_only mode")
@@ -961,3 +985,25 @@ class ExperimentConfig:
         Path(path).write_text(
             yaml.safe_dump(self.as_dict(), sort_keys=False)
         )
+
+
+def update_config(obj, changes: dict[str, Any]) -> None:
+    """Strict recursive overrides, with the same field names as the stage YAMLs."""
+    names = {f.name for f in fields(obj)}
+    for key, value in changes.items():
+        if key not in names:
+            raise ValueError(f"Unknown configuration field: {key}")
+        if is_dataclass(getattr(obj, key)):
+            if not isinstance(value, dict):
+                raise ValueError(f"{key} must be a mapping")
+            update_config(getattr(obj, key), value)
+        else:
+            setattr(obj, key, value)
+
+
+def atomic_json(path: str | Path, value: Any) -> None:
+    """Write JSON through a temporary file, so a crash never leaves a half-written file."""
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    os.replace(temporary, path)

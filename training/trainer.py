@@ -11,6 +11,7 @@ import torch
 from tqdm import trange
 
 from evaluation import Evaluator
+from evaluation.evaluator import _rays
 from foamsurf import NativeHybridRenderer
 from foamsurf_data import LayerGroundTruth, load_dataset
 from foamsurf_data.camera_geometry import camera_normalization
@@ -30,23 +31,20 @@ from .checkpoints import (
 )
 from .config import ExperimentConfig
 from .disentanglement import DisentanglementRegularizer
-from .handoff import (
-    apply_medium_lr_multipliers,
-    gaussian_is_frozen,
-    handoff_boundary_iterations,
-    handoff_freeze_active,
-    medium_lr_multipliers,
-)
 from .experiment_logging import ExperimentLogger
 from .losses import b0_reconstruction_loss
 from .optimizer import (
-    build_medium_optimizer,
     build_optimizers,
     gradient_norm,
     update_gaussian_learning_rates,
     update_medium_learning_rates,
 )
 from .sampler import RandomCameraRaySampler
+from .camera_isp import CameraISP, pixel_grid
+from .water_extrapolation import WaterExtrapolation
+from .water_phase import WaterPhase
+from .oceansplat import DepthAwareOpacity, adjusted_scene, downscaled_target, ocean_terms
+from .view_consistency import blended_depth, nerfstudio_scale, trinocular_loss
 
 
 def _primitive_gradient_magnitude(module) -> torch.Tensor:
@@ -73,6 +71,20 @@ def training_source(config: ExperimentConfig) -> str:
     if selected is None:
         raise ValueError(f"missing path for train target {config.dataset.train_target}")
     return selected
+
+
+def training_downscale(optimization, iteration: int) -> int:
+    """1, or 2^k while coarse-to-fine training is still below full resolution."""
+    levels = optimization.training_downscale_levels
+    return 2 ** max(levels - iteration // optimization.training_downscale_interval, 0) if levels else 1
+
+
+def gaussian_scale_cap(optimization, scene_extent: float) -> tuple[float, float] | None:
+    """(min, max) Gaussian scale under gaussian_max_scale_scene_fraction, or None when it is off."""
+    fraction = optimization.gaussian_max_scale_scene_fraction
+    if fraction is None:
+        return None
+    return (optimization.gaussian_min_scale or 1e-7, fraction * scene_extent)
 
 
 class Trainer:
@@ -114,6 +126,7 @@ class Trainer:
             resolution=config.dataset.resolution,
             device=self.device,
             llffhold=config.dataset.llffhold,
+            validation_hold=config.dataset.validation_hold,
         )
         self.layer_ground_truth = None
         if config.dataset.gaussian_ground_truth_path is not None:
@@ -136,7 +149,6 @@ class Trainer:
         )
         self.start_iteration = 1
         self.training_seconds = 0.0
-        self.prefix_training_seconds = 0.0
         self.best_psnr = -float("inf")
         payload = None
 
@@ -220,13 +232,14 @@ class Trainer:
                 payload["training_seconds"]
             )
             self.best_psnr = float(payload["best_psnr"])
-            self.prefix_training_seconds = float(
-                payload.get("prefix_training_seconds", 0.0)
-            )
             torch.set_rng_state(payload["rng"]["torch"])
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
 
+        self.model.medium.homogeneous = bool(config.model.medium_homogeneous)
         self.gaussian_point_extent = self._gaussian_point_extent()
+        self._update_mip_filter()
+        if self.resume_path is None and config.optimization.gaussian_max_scale_scene_fraction is not None:
+            self._apply_gaussian_scale_guard()  # the cap holds from iteration 0, initial scales too
         if not self.uses_gaussians:
             self.model.gaussians.requires_grad_(False)
         if not self.uses_voronoi:
@@ -237,6 +250,8 @@ class Trainer:
             self.gaussian_optimizer,
             config.gaussian_adaptation,
             self.scene_extent,
+            camera_centers=torch.stack([camera.origin for camera in self.dataset.train]),
+            image_width=self.dataset.train[0].width,
         )
         if payload is not None and payload.get("gaussian_adaptation") is not None:
             self.gaussian_adaptation.load_state_dict(
@@ -316,6 +331,7 @@ class Trainer:
             cameras_without_replacement=(
                 config.optimization.cameras_without_replacement
             ),
+            jitter=config.optimization.ray_jitter,
         )
         self.evaluator = Evaluator(
             self.renderer,
@@ -329,6 +345,40 @@ class Trainer:
         self.logger = ExperimentLogger(
             config, self.output_dir, resume=self.resume_path is not None
         )
+        self.last_trinocular = {"obj": float("nan"), "full": float("nan")}
+        self.last_ocean = dict.fromkeys(("obj", "full", "smooth", "epi", "res", "alpha_weight"), float("nan"))
+        # OceanSplat depth-aware opacity alpha^d: a small MLP with its own optimizer (checkpointed).
+        self.camera_isp = None
+        if config.optimization.camera_isp:
+            self.camera_isp = CameraISP([camera.name for camera in self.dataset.train], config.optimization.iterations,
+                                        self.device, torch.stack([camera.origin for camera in self.dataset.train]),
+                                        config.optimization.camera_isp_neighbours)
+            if payload is not None and payload.get("camera_isp") is not None:
+                self.camera_isp.load_state_dict(payload["camera_isp"])
+            self.evaluator.camera_isp = lambda image, camera: self.camera_isp.apply(
+                image, pixel_grid(camera.height, camera.width, image.device).reshape(*image.shape[:-1], 2),
+                (camera.height, camera.width), None, camera.origin)
+        self.water_phase = None
+        if config.optimization.water_phase:
+            up = -torch.stack([camera.down for camera in self.dataset.train]).mean(0)  # the cameras' mean "up"
+            self.water_phase = WaterPhase(up, self.device, config.optimization.water_phase_lr,
+                                          config.optimization.water_phase_fixed_light)
+            if payload is not None and payload.get("water_phase") is not None:
+                self.water_phase.load_state_dict(payload["water_phase"])
+        self.water_extrapolation = None  # fitted from the training photos before each evaluation (_wext)
+        if self._water_modules() or config.optimization.water_extrapolation:
+            self.evaluator.water_light = self._evaluation_water_light
+        self.alpha_mlp = self.alpha_optimizer = None
+        if config.optimization.ocean_alpha_until > 0:
+            self.alpha_mlp = DepthAwareOpacity().to(self.device)
+            self.alpha_optimizer = torch.optim.Adam(self.alpha_mlp.parameters(), lr=config.optimization.ocean_alpha_lr)
+            if payload is not None and payload.get("alpha_mlp") is not None:
+                self.alpha_mlp.load_state_dict(payload["alpha_mlp"])
+                self.alpha_optimizer.load_state_dict(payload["alpha_optimizer"])
+        # OceanSplat baseline in scene units: b (nerfstudio units) / the nerfstudio pose scale.
+        self.nerfstudio_scale = nerfstudio_scale(
+            torch.stack([camera.origin for camera in self.dataset.train + self.dataset.test]))
+        self.trinocular_baseline = config.optimization.trinocular_baseline / self.nerfstudio_scale
         self.last_hit_statistics = {
             "renderer/hit_buffer_size": config.renderer.gaussian_hit_buffer_size,
             "renderer/hit_count_mean": 0.0,
@@ -336,15 +386,14 @@ class Trainer:
             "renderer/hit_count_p99": 0.0,
             "renderer/hit_buffer_full_fraction": 0.0,
         }
-        # A prefix may consume all four RNG streams. Restore this exact
-        # post-initialization state before main iteration 1 so the main camera
-        # order and later stochastic adaptation match the no-prefix control.
-        self._main_rng_state = {
-            "python": random.getstate(),
-            "numpy": np.random.get_state(),
-            "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all(),
-        }
+
+    @torch.no_grad()
+    def _water_attenuation(self) -> torch.Tensor:
+        """Median attenuation per channel over the non-guard Voronoi cells."""
+        medium = self.model.medium
+        coefficients = medium.optical_coefficients
+        attenuation = coefficients[:, :3] if medium.is_rgb else coefficients
+        return attenuation[~medium.guard_mask].median(dim=0).values
 
     def _seed_everything(self, seed: int) -> None:
         random.seed(seed)
@@ -369,9 +418,84 @@ class Trainer:
                 self.voronoi_adaptation.state_dict(),
                 self.medium_frozen_until,
                 self.disentanglement.state_dict(),
-                self.prefix_training_seconds,
+                extras=self._checkpoint_extras(),
             ),
         )
+
+    def _checkpoint_extras(self) -> dict | None:
+        """Training state outside the model and its two optimizers (OceanSplat alpha^d, camera ISP)."""
+        extras = {}
+        if self.alpha_mlp is not None:
+            extras.update(alpha_mlp=self.alpha_mlp.state_dict(), alpha_optimizer=self.alpha_optimizer.state_dict())
+        if self.camera_isp is not None:
+            extras["camera_isp"] = self.camera_isp.state_dict()
+        if self.water_phase is not None:
+            extras["water_phase"] = self.water_phase.state_dict()
+        return extras or None
+
+    def _water_modules(self) -> list:
+        """The direction-dependent water light terms in use (the phase function)."""
+        return [m for m in (self.water_phase,) if m is not None]
+
+    def _water_light_parts(self, image: torch.Tensor, backscatter: torch.Tensor, rays: torch.Tensor) -> torch.Tensor:
+        """image + (gain - 1) backscatter with the product of the gains of every water light term."""
+        gain = 1.0
+        for module in self._water_modules():
+            gain = gain * module.gain(rays[..., 3:])
+        return image + (gain - 1.0) * backscatter
+
+    def _evaluation_water_light(self, image: torch.Tensor, backscatter: torch.Tensor, rays: torch.Tensor) -> torch.Tensor:
+        """The evaluator's image: the trained water light terms, then (with _wext) the water light continued beyond
+        the training directions, applied to the backscatter as those terms left it."""
+        modules = bool(self._water_modules())
+        out = self._water_light_parts(image, backscatter, rays) if modules else image
+        if self.water_extrapolation is not None:
+            effective = self._water_light_parts(backscatter, backscatter, rays) if modules else backscatter
+            out = self.water_extrapolation.apply(out, effective, rays[..., 3:])
+        return out
+
+    def fit_water_extrapolation(self, step: int = 4) -> WaterExtrapolation | None:
+        """Fit the water light trend on the open water of the training photos (rays where the trained Gaussians
+        cover < 2%, every `step`-th pixel), as training/water_extrapolation.py describes."""
+        background = tuple(self.config.background)
+        directions, colours, photo = [], [], []
+        with torch.no_grad():
+            for index, camera in enumerate(self.dataset.train):
+                rays = _rays(camera)[::step, ::step].reshape(-1, 6).contiguous()
+                scene = self.model.gaussians.render_scene(camera.origin)
+                self.renderer.set_gaussian_geometry(scene)
+                alpha = self.renderer.render_gaussians(rays, scene, background=background).alpha.reshape(-1)
+                target = camera.ground_truth(background).reshape(camera.height, camera.width, 3)[::step, ::step].reshape(-1, 3)
+                water = (alpha < 0.02) & (target.min(-1).values > 0.01)
+                directions.append(rays[water, 3:]); colours.append(target[water])
+                photo.append(torch.full((int(water.sum()),), index, device=rays.device, dtype=torch.long))
+        directions = torch.cat(directions)
+        if directions.shape[0] < 100:  # no open water: nothing to continue
+            self.water_extrapolation = None
+            return None
+        up = -torch.stack([camera.down for camera in self.dataset.train]).mean(0)
+        self.water_extrapolation = WaterExtrapolation.fit(up.to(directions), directions, torch.cat(colours), torch.cat(photo))
+        return self.water_extrapolation
+
+    def _water_light(self, render, rays: torch.Tensor) -> torch.Tensor:
+        """The rendered image with direction-dependent water light (unchanged without these terms)."""
+        if not self._water_modules() or render.backscatter is None:
+            return render.image
+        return self._water_light_parts(render.image, render.backscatter, rays)
+
+    def _apply_camera_isp(self, image: torch.Tensor, batch) -> torch.Tensor:
+        """The training image through the camera model of its photo (identity without camera_isp)."""
+        if self.camera_isp is None:
+            return image
+        camera = batch.camera
+        if batch.image_size is not None:  # whole image at 1/downscale (resolution schedule)
+            height, width = batch.image_size
+            coords = pixel_grid(height, width, image.device)
+        else:
+            height, width = camera.height, camera.width
+            index = batch.rays.pixel_indices
+            coords = torch.stack((index % width, torch.div(index, width, rounding_mode="floor")), -1).float() + 0.5
+        return self.camera_isp.apply(image, coords, (height, width), camera.name)
 
     def _training_row(
         self,
@@ -387,7 +511,6 @@ class Trainer:
         row = {
             "iteration": iteration,
             "training_seconds": self.training_seconds,
-            "prefix_training_seconds": self.prefix_training_seconds,
             "step_seconds": step_seconds,
             "train/loss": float(loss.total.item()),
             "train/rgb_mse": float(loss.rgb_mse.item()),
@@ -473,23 +596,7 @@ class Trainer:
             "opacity_reset/post_psnr": self.last_reset_post_psnr,
             "opacity_reset/psnr_delta": self.last_reset_psnr_delta,
             "gaussian/frozen": int(
-                gaussian_is_frozen(
-                    self.config.optimization,
-                    self.config.medium_handoff,
-                    iteration,
-                )
-            ),
-            "gaussian/handoff_frozen": int(
-                handoff_freeze_active(self.config.medium_handoff, iteration)
-            ),
-            "gaussian/handoff_freeze_start": (
-                self.config.medium_handoff.gaussian_freeze_start or -1
-            ),
-            "gaussian/handoff_freeze_end_exclusive": (
-                -1
-                if self.config.medium_handoff.gaussian_freeze_start is None
-                else self.config.medium_handoff.gaussian_freeze_start
-                + self.config.medium_handoff.gaussian_freeze_duration
+                iteration <= self.config.optimization.gaussian_freeze_until
             ),
             "gaussian/frozen_until": (
                 self.config.optimization.gaussian_freeze_until
@@ -574,6 +681,9 @@ class Trainer:
             "scene/cameras_extent": self.gaussian_adaptation.scene_extent,
             "optimization/gaussian_means_lr": self.current_gaussian_means_lr,
             "model/active_sh_degree": self.model.gaussians.active_sh_degree,
+            "train/trinocular_obj": self.last_trinocular["obj"],
+            "train/trinocular_full": self.last_trinocular["full"],
+            **{f"ocean/{name}": value for name, value in self.last_ocean.items()},
             "memory/allocated_mib": torch.cuda.memory_allocated(
                 self.device
             ) / (1024.0**2),
@@ -619,9 +729,80 @@ class Trainer:
         )
         row.update(self.last_hit_statistics)
         row.update(self.last_disentanglement.metrics())
+        if self.config.gaussian_adaptation.far_prune_distance is not None:
+            # Only when enabled: CSV columns of resumed runs must not change.
+            row["adaptation/far_prune_candidates"] = adaptation_statistics["far_prune"]
         return row
 
     @torch.no_grad()
+    def _alpha_weight(self, iteration: int) -> float:
+        """OceanSplat alpha^d weight: ocean_alpha_weight decaying linearly to 0 at ocean_alpha_until."""
+        until = self.config.optimization.ocean_alpha_until
+        if self.alpha_mlp is None or until <= 0:
+            return 0.0
+        return self.config.optimization.ocean_alpha_weight * max(0.0, 1.0 - iteration / until)
+
+    def _depth_aware(self, scene, origin, forward, iteration: int):
+        return adjusted_scene(scene, self.alpha_mlp, self._alpha_weight(iteration), origin.to(scene.means),
+                              forward.to(scene.means), self.scene_extent)
+
+    def _ocean_term(self, iteration, batch, medium_scene):
+        """Full OceanSplat losses for this training camera, or None when inactive."""
+        optimization = self.config.optimization
+        self.last_ocean = dict.fromkeys(self.last_ocean, float("nan"))
+        self.last_ocean["alpha_weight"] = self._alpha_weight(iteration)
+        if not optimization.ocean_from <= iteration < optimization.ocean_until or medium_scene is None \
+                or not self.uses_gaussians or (iteration - optimization.ocean_from) % optimization.ocean_every:
+            return None
+        span = max(optimization.ocean_until - optimization.ocean_from, 1)
+        progress = (iteration - optimization.ocean_from) / span
+        epi_weight = optimization.ocean_epi_weight_start + progress * (
+            optimization.ocean_epi_weight_end - optimization.ocean_epi_weight_start)
+        if optimization.ocean_tri_weight <= 0 and optimization.ocean_res_weight <= 0 and epi_weight <= 0:
+            return None
+        camera = batch.camera
+        terms = ocean_terms(
+            self.renderer,
+            lambda origin: self._depth_aware(self.model.gaussians.render_scene(origin), origin, camera.forward, iteration),
+            medium_scene, self.config.background, camera,
+            downscaled_target(camera, optimization.ocean_downscale, self.config.background),
+            self.trinocular_baseline, optimization.ocean_downscale, optimization.trinocular_epsilon,
+            optimization.ocean_smooth_gamma, optimization.ocean_gaussian_samples,
+            depth_unit=self.nerfstudio_scale, visible=optimization.ocean_visible,
+            camera_model=None if self.camera_isp is None else (
+                lambda image: self.camera_isp.apply(
+                    image, pixel_grid(*image.shape[:2], image.device).reshape(*image.shape[:2], 2),
+                    image.shape[:2], camera.name)))
+        for name in ("obj", "full", "smooth", "epi", "res"):
+            self.last_ocean[name] = float(terms[name].detach())
+        return optimization.ocean_every * (
+            optimization.ocean_tri_weight * (terms["obj"] + terms["full"] + terms["smooth"])
+            + epi_weight * terms["epi"] + optimization.ocean_res_weight * terms["res"])
+
+    def _trinocular_term(self, iteration, batch, rays, render, gaussian_scene, medium_scene):
+        """lambda_tri x OceanSplat L_tri on a random subset of the batch rays, or None when inactive."""
+        optimization = self.config.optimization
+        self.last_trinocular = {"obj": float("nan"), "full": float("nan")}
+        if (optimization.trinocular_weight <= 0.0 or not optimization.trinocular_from <= iteration < optimization.trinocular_until
+                or gaussian_scene is None or medium_scene is None or render.direct is None):
+            return None
+        count = rays.shape[0]
+        subset = torch.randperm(count, device=rays.device)[: optimization.trinocular_rays]
+        depth, accumulated = blended_depth(gaussian_scene, rays[subset], render.hit_depths[:, subset],
+                                           render.hit_indices[:, subset])
+        keep = accumulated > 0.5  # rays that end on a surface
+        if not bool(keep.any()):
+            return None
+        subset, depth = subset[keep], depth[keep]
+        direct = render.direct.reshape(-1, 3)[subset]
+        backscatter = render.backscatter.reshape(-1, 3)[subset]
+        term, values = trinocular_loss(
+            self.renderer, self.model.gaussians, medium_scene, tuple(self.config.background), batch.camera,
+            rays[subset], depth, direct, backscatter, batch.target.reshape(-1, 3)[subset],
+            self.trinocular_baseline, optimization.trinocular_epsilon)
+        self.last_trinocular = values
+        return optimization.trinocular_weight * term
+
     def _same_batch_psnr(self, batch, rays: torch.Tensor) -> float:
         gaussian_scene = None
         medium_scene = None
@@ -662,14 +843,20 @@ class Trainer:
             and self.model.gaussians.point_count > threshold
         )
 
+    def _update_mip_filter(self) -> None:
+        """Recompute the Mip-Splatting 3D filter from the training cameras (after every change of the
+        Gaussian population and every 100 iterations, as the paper)."""
+        if self.uses_gaussians and self.config.model.gaussian_mip_filter > 0:
+            self.model.gaussians.mip_compensate = self.config.model.gaussian_mip_compensate
+            self.model.gaussians.update_mip_filter(self.dataset.train, self.config.model.gaussian_mip_filter,
+                                                   self.config.renderer.near)
+
     def _train_step(self, iteration: int):
+        if iteration % 100 == 0:
+            self._update_mip_filter()
         gaussian_trainable = (
             self.uses_gaussians
-            and not gaussian_is_frozen(
-                self.config.optimization,
-                self.config.medium_handoff,
-                iteration,
-            )
+            and iteration > self.config.optimization.gaussian_freeze_until
         )
         if self.uses_gaussians:
             self.current_gaussian_means_lr = update_gaussian_learning_rates(
@@ -686,13 +873,6 @@ class Trainer:
             self.current_medium_lrs = update_medium_learning_rates(
                 self.medium_optimizer, self.config.optimization, iteration
             )
-            self.current_medium_lrs = apply_medium_lr_multipliers(
-                self.medium_optimizer,
-                self.current_medium_lrs,
-                medium_lr_multipliers(
-                    self.config.medium_handoff, iteration
-                ),
-            )
         else:
             self.current_medium_lrs = {
                 "medium_sites": 0.0,
@@ -702,6 +882,7 @@ class Trainer:
 
         torch.cuda.synchronize()
         started = time.perf_counter()
+        self.sampler.downscale = training_downscale(self.config.optimization, iteration)
         batch = self.sampler.next()
         collect_gaussian = (
             gaussian_trainable
@@ -711,10 +892,7 @@ class Trainer:
             self.uses_voronoi
             and self.voronoi_adaptation.should_collect(iteration)
         )
-        collect_regularizer = (
-            self.disentanglement.requires_contribution_diagnostics(iteration)
-        )
-        collect_any = collect_gaussian or collect_voronoi or collect_regularizer
+        collect_any = collect_gaussian or collect_voronoi
 
         gaussian_scene = None
         screen_points = None
@@ -723,9 +901,18 @@ class Trainer:
                 gaussian_scene, screen_points = self.model.gaussians.training_scene(batch.camera)
             else:
                 gaussian_scene = self.model.gaussians.render_scene(batch.camera_origin)
+            gaussian_scene = self._depth_aware(gaussian_scene, batch.camera.origin, batch.camera.forward, iteration)
             self.renderer.set_gaussian_geometry(gaussian_scene)
         medium_scene = self.model.medium.render_scene() if self.uses_voronoi else None
         rays = torch.cat((batch.rays.origins, batch.rays.directions), dim=-1).contiguous()
+
+        screen_absolute = None
+        if collect_gaussian and self.config.gaussian_adaptation.absolute_gradient:
+            camera = batch.camera
+            screen_absolute = (
+                torch.stack((camera.right, camera.down)).to(rays),
+                rays.new_zeros((self.model.gaussians.point_count, 2)),
+            )
 
         self.gaussian_optimizer.zero_grad(set_to_none=True)
         self.medium_optimizer.zero_grad(set_to_none=True)
@@ -734,6 +921,7 @@ class Trainer:
             background=tuple(self.config.background),
             collect_diagnostics=collect_any,
             diagnostic_target=batch.target if collect_any else None,
+            screen_absolute=screen_absolute,
         )
         if (
             render.hit_indices.numel()
@@ -764,10 +952,10 @@ class Trainer:
                     ),
                 }
         loss = b0_reconstruction_loss(
-            render.image, batch.target,
+            self._apply_camera_isp(self._water_light(render, rays), batch), batch.target,
             mode=self.config.optimization.reconstruction_loss,
             dssim_weight=self.config.optimization.dssim_weight,
-            image_size=(batch.camera.height, batch.camera.width),
+            image_size=batch.image_size or (batch.camera.height, batch.camera.width),
         )
         scale_weight = self.config.optimization.gaussian_scale_regularization
         if self.uses_gaussians and scale_weight > 0.0:
@@ -784,36 +972,44 @@ class Trainer:
                 gaussian_scale_regularization=scale_regularization,
             )
 
-        medium_transmittance = None
-        if self.disentanglement.requires_medium_transmittance(iteration):
-            if medium_scene is None:
-                raise RuntimeError(
-                    "optical-thickness regularization requires Voronoi"
-                )
-            medium_only = self.renderer.render(
-                rays,
-                voronoi=medium_scene,
-                background=tuple(self.config.background),
-                collect_diagnostics=False,
-            )
-            medium_transmittance = medium_only.transmittance
         self.last_disentanglement = self.disentanglement.compute(
-            iteration,
-            self.model,
-            self.topology,
-            diagnostics=render.diagnostics,
-            medium_transmittance=medium_transmittance,
+            iteration, self.model, self.topology
         )
         loss = replace(
             loss,
             total=loss.total + self.last_disentanglement.total,
         )
+        trinocular = self._trinocular_term(iteration, batch, rays, render, gaussian_scene, medium_scene)
+        if trinocular is not None:
+            loss = replace(loss, total=loss.total + trinocular)
+        ocean = self._ocean_term(iteration, batch, medium_scene)
+        if ocean is not None:
+            loss = replace(loss, total=loss.total + ocean)
+        if self.camera_isp is not None:
+            loss = replace(loss, total=loss.total + self.camera_isp.regularization())
+            self.camera_isp.zero_grad()
+        for module in self._water_modules():
+            module.zero_grad()
+        if self.alpha_optimizer is not None:
+            self.alpha_optimizer.zero_grad(set_to_none=True)
         loss.total.backward()
+        if self.alpha_optimizer is not None and self._alpha_weight(iteration) > 0.0:
+            self.alpha_optimizer.step()
+        if self.camera_isp is not None:
+            self.camera_isp.step()
+        for module in self._water_modules():
+            module.step()
         if collect_any and render.diagnostics is None:
             raise RuntimeError("adaptation statistics were not returned")
         if collect_gaussian:
+            if self.config.gaussian_adaptation.gradient_attenuation_compensation:
+                self.gaussian_adaptation.medium_attenuation = self._water_attenuation()
+            screen_gradient = screen_points.grad
+            if screen_absolute is not None:
+                # Same chain rule as screen_points: d offset / d screen = scale * axis.
+                screen_gradient = screen_absolute[1] * self.model.gaussians.world_per_viewport(batch.camera).abs()
             self.gaussian_adaptation.collect_statistics(
-                screen_points.grad, render.diagnostics.gaussian, batch.camera
+                screen_gradient, render.diagnostics.gaussian, batch.camera, iteration
             )
         if collect_voronoi:
             self.voronoi_adaptation.collect_statistics(render.diagnostics.medium)
@@ -834,15 +1030,6 @@ class Trainer:
         self.last_reset_post_psnr = float("nan")
         self.last_reset_psnr_delta = float("nan")
 
-        movement_snapshot = None
-        if (
-            gaussian_trainable
-            and self.config.gaussian_adaptation.policy == "flare_movement"
-            and self.gaussian_adaptation.should_adapt(iteration)
-        ):
-            movement_snapshot = self.gaussian_adaptation.snapshot_movement()
-            self.last_adaptation_pre_psnr = float(loss.psnr.item())
-
         if self.uses_gaussians and self._independent_medium_freeze_event(iteration):
             self._schedule_medium_freeze(iteration, self.config.gaussian_adaptation.medium_freeze_steps)
         if (
@@ -855,6 +1042,7 @@ class Trainer:
             )
             self.last_adaptation_pre_psnr = float(loss.psnr.item())
             self.last_adaptation = self.gaussian_adaptation.apply_plan(plan)
+            self._update_mip_filter()
             self.population_runaway = self._population_exceeds_safety_threshold()
             if not self.population_runaway:
                 self.last_adaptation_post_psnr = self._same_batch_psnr(batch, rays)
@@ -867,6 +1055,7 @@ class Trainer:
                 f"clone={self.last_adaptation['clone']} "
                 f"split={self.last_adaptation['split']} "
                 f"prune={self.last_adaptation['prune']} "
+                f"far_prune={statistics['far_prune']} "
                 f"budget_skip={self.last_adaptation['budget_skip']} "
                 f"count={self.model.gaussians.point_count} "
                 f"grad_p95={statistics['gradient_p95']:.3e} "
@@ -936,28 +1125,6 @@ class Trainer:
         if not self.population_runaway:
             if gaussian_trainable:
                 self.gaussian_optimizer.step()
-                if movement_snapshot is not None:
-                    self.last_adaptation = (
-                        self.gaussian_adaptation.apply_movement(
-                            movement_snapshot
-                        )
-                    )
-                    self.last_adaptation_post_psnr = self._same_batch_psnr(
-                        batch, rays
-                    )
-                    self.last_adaptation_psnr_delta = (
-                        self.last_adaptation_post_psnr
-                        - self.last_adaptation_pre_psnr
-                    )
-                    statistics = self.gaussian_adaptation.last_plan_statistics
-                    print(
-                        f"iteration={iteration} flare movement adaptation "
-                        f"split={self.last_adaptation['split']} "
-                        f"prune={self.last_adaptation['prune']} "
-                        f"count={self.model.gaussians.point_count} "
-                        f"movement_p95={statistics['gradient_p95']:.3e}",
-                        flush=True,
-                    )
                 self._apply_gaussian_scale_guard()
             if self.uses_voronoi and iteration >= self.medium_frozen_until and not voronoi_changed:
                 self.medium_optimizer.step()
@@ -988,6 +1155,10 @@ class Trainer:
     @torch.no_grad()
     def _apply_gaussian_scale_guard(self) -> None:
         optimization = self.config.optimization
+        cap = gaussian_scale_cap(optimization, self.scene_extent)
+        if cap is not None:
+            self.model.gaussians.clamp_scales_(*cap)
+            return
         if (
             optimization.gaussian_min_scale is None
             or optimization.gaussian_max_scale_fraction is None
@@ -1003,6 +1174,10 @@ class Trainer:
         self.gaussian_point_extent = self._gaussian_point_extent()
 
     def _evaluate_and_checkpoint(self, iteration: int) -> None:
+        if self.config.optimization.water_extrapolation:
+            fitted = self.fit_water_extrapolation()
+            if fitted is not None:
+                (self.output_dir / "water_extrapolation.json").write_text(json.dumps(fitted.state_dict()))
         summary, images, histograms = self.evaluator.evaluate(
             iteration
         )
@@ -1010,10 +1185,6 @@ class Trainer:
         current_psnr = float(summary["eval/primary_psnr"])
         if current_psnr > self.best_psnr:
             self.best_psnr = current_psnr
-            self._checkpoint(
-                self.output_dir / "checkpoints" / "best.pt",
-                iteration,
-            )
         self._checkpoint(
             self.output_dir / "checkpoints" / "last.pt",
             iteration,
@@ -1052,7 +1223,6 @@ class Trainer:
             "final_iteration": iteration,
             "requested_iterations": self.config.optimization.iterations,
             "training_seconds": self.training_seconds,
-            "prefix_training_seconds": self.prefix_training_seconds,
             "best_psnr": self.best_psnr,
             "gaussian_count": self.model.gaussians.point_count,
             "voronoi_count": self.model.medium.point_count,
@@ -1063,8 +1233,6 @@ class Trainer:
             "total_voronoi_failed_events": (
                 self.voronoi_adaptation.total_failed_events
             ),
-            "prefix_mode": self.config.medium_handoff.prefix_mode,
-            "prefix_iterations": self.config.medium_handoff.prefix_iterations,
             "adaptation_revision": self.gaussian_adaptation.revision,
             "total_cloned": self.gaussian_adaptation.total_cloned,
             "total_split": self.gaussian_adaptation.total_split,
@@ -1094,189 +1262,7 @@ class Trainer:
             cameras_without_replacement=(
                 self.config.optimization.cameras_without_replacement
             ),
-        )
-
-    def _prefix_step(self, iteration: int, mode: str):
-        if mode not in {"medium_only", "joint"}:
-            raise ValueError(f"invalid prefix mode: {mode}")
-        joint = mode == "joint"
-        if joint:
-            self.current_gaussian_means_lr = update_gaussian_learning_rates(
-                self.gaussian_optimizer,
-                self.config.optimization,
-                self.scene_extent,
-                iteration,
-            )
-        self.current_medium_lrs = update_medium_learning_rates(
-            self.medium_optimizer, self.config.optimization, iteration
-        )
-
-        torch.cuda.synchronize()
-        started = time.perf_counter()
-        batch = self.sampler.next()
-        rays = torch.cat(
-            (batch.rays.origins, batch.rays.directions), dim=-1
-        ).contiguous()
-        gaussian_scene = None
-        if joint:
-            gaussian_scene = self.model.gaussians.render_scene(
-                batch.camera_origin
-            )
-            self.renderer.set_gaussian_geometry(gaussian_scene)
-        medium_scene = self.model.medium.render_scene()
-
-        self.gaussian_optimizer.zero_grad(set_to_none=True)
-        self.medium_optimizer.zero_grad(set_to_none=True)
-        render = self.renderer.render(
-            rays,
-            gaussians=gaussian_scene,
-            voronoi=medium_scene,
-            background=tuple(self.config.background),
-            collect_diagnostics=False,
-        )
-        loss = b0_reconstruction_loss(
-            render.image,
-            batch.target,
-            mode=self.config.optimization.reconstruction_loss,
-            dssim_weight=self.config.optimization.dssim_weight,
-            image_size=(batch.camera.height, batch.camera.width),
-        )
-        scale_weight = self.config.optimization.gaussian_scale_regularization
-        if joint and scale_weight > 0.0:
-            scale_regularization = (
-                scale_weight
-                / self.model.gaussians.point_count
-                * torch.linalg.vector_norm(
-                    self.model.gaussians.scales, dim=1
-                ).sum()
-            )
-            loss = replace(
-                loss,
-                total=loss.total + scale_regularization,
-                gaussian_scale_regularization=scale_regularization,
-            )
-        loss.total.backward()
-        gaussian_gradient_norm = (
-            gradient_norm(self.model.gaussians.parameters()) if joint else 0.0
-        )
-        medium_gradient_norm = gradient_norm(self.model.medium.parameters())
-        if joint:
-            self.gaussian_optimizer.step()
-            self._apply_gaussian_scale_guard()
-        self.medium_optimizer.step()
-
-        if iteration % self.config.optimization.topology_update_interval == 0:
-            self.topology.update(
-                self.model.medium,
-                self.medium_optimizer,
-                incremental=self.config.optimization.topology_incremental,
-            )
-            self.topology.synchronize_renderer(
-                self.renderer, self.model.medium
-            )
-        torch.cuda.synchronize()
-        elapsed = time.perf_counter() - started
-        self.training_seconds += elapsed
-        self.prefix_training_seconds += elapsed
-        return loss, gaussian_gradient_norm, medium_gradient_norm, elapsed
-
-    def _reset_after_prefix(self) -> None:
-        handoff = self.config.medium_handoff
-        if handoff.prefix_mode == "joint":
-            new_gaussian, new_medium = build_optimizers(
-                self.model, self.config.optimization, self.scene_extent
-            )
-            self.gaussian_optimizer = new_gaussian
-            if handoff.prefix_reset_medium_optimizer:
-                self.medium_optimizer = new_medium
-        elif handoff.prefix_reset_medium_optimizer:
-            self.medium_optimizer = build_medium_optimizer(
-                self.model, self.config.optimization
-            )
-
-        # Rebuild all controllers so their statistics and revision counters
-        # start at main iteration zero. The learned medium parameters remain.
-        self.topology = VoronoiTopologyController(
-            self.model.medium, self.medium_optimizer
-        )
-        self.gaussian_adaptation = GaussianAdaptationController(
-            self.model.gaussians,
-            self.gaussian_optimizer,
-            self.config.gaussian_adaptation,
-            self.scene_extent,
-        )
-        self.voronoi_adaptation = VoronoiAdaptationController(
-            self.model.medium,
-            self.medium_optimizer,
-            self.topology,
-            self.config.voronoi_adaptation,
-        )
-        self.disentanglement = DisentanglementRegularizer(
-            self.config.disentanglement
-        )
-        self.evaluator.topology = self.topology
-        random.setstate(self._main_rng_state["python"])
-        np.random.set_state(self._main_rng_state["numpy"])
-        torch.set_rng_state(self._main_rng_state["torch"])
-        torch.cuda.set_rng_state_all(self._main_rng_state["cuda"])
-        self.sampler = self._new_sampler()
-        self.topology.synchronize_renderer(self.renderer, self.model.medium)
-
-    def _run_prefix(self) -> None:
-        handoff = self.config.medium_handoff
-        if handoff.prefix_iterations == 0:
-            return
-        progress = trange(
-            1,
-            handoff.prefix_iterations + 1,
-            desc=f"{handoff.prefix_mode} prefix",
-        )
-        for iteration in progress:
-            loss, gaussian_norm, medium_norm, elapsed = self._prefix_step(
-                iteration, handoff.prefix_mode
-            )
-            progress.set_postfix(psnr=f"{loss.psnr.item():.3f}")
-            if (
-                iteration == 1
-                or iteration % self.config.validation.log_interval == 0
-                or iteration == handoff.prefix_iterations
-            ):
-                self.logger.log_warmup(
-                    {
-                        "prefix_iteration": iteration,
-                        "prefix_mode": handoff.prefix_mode,
-                        "training_seconds": self.prefix_training_seconds,
-                        "step_seconds": elapsed,
-                        "train/loss": float(loss.total.item()),
-                        "train/psnr": float(loss.psnr.item()),
-                        "gradient/gaussian_norm": gaussian_norm,
-                        "gradient/medium_norm": medium_norm,
-                        "medium/density_mean": float(
-                            self.model.medium.densities.mean().item()
-                        ),
-                        "medium/density_p95": float(
-                            torch.quantile(
-                                self.model.medium.densities.flatten(), 0.95
-                            ).item()
-                        ),
-                        "model/gaussian_count": (
-                            self.model.gaussians.point_count
-                        ),
-                        "model/voronoi_count": self.model.medium.point_count,
-                    }
-                )
-        self._reset_after_prefix()
-        summary, images, histograms = self.evaluator.evaluate(0)
-        self.logger.log_eval(summary, images, histograms)
-        self._checkpoint(
-            self.output_dir / "checkpoints" / "prefix.pt", 0
-        )
-        print(
-            f"prefix completed mode={handoff.prefix_mode} "
-            f"iterations={handoff.prefix_iterations} "
-            f"hybrid_psnr={summary['eval/primary_psnr']:.4f} "
-            f"voronoi_psnr={summary['eval/voronoi_only_psnr']:.4f}",
-            flush=True,
+            jitter=self.config.optimization.ray_jitter,
         )
 
     def fit(self) -> dict[str, float | int]:
@@ -1287,8 +1273,6 @@ class Trainer:
             )
         last_eval_iteration = 0
         try:
-            if self.resume_path is None:
-                self._run_prefix()
             progress = trange(
                 self.start_iteration, final_iteration + 1
             )
@@ -1306,9 +1290,6 @@ class Trainer:
                 should_evaluate = (
                     iteration % self.config.validation.eval_interval == 0
                     or iteration == final_iteration
-                    or iteration in handoff_boundary_iterations(
-                        self.config.medium_handoff
-                    )
                 )
                 should_log = (
                     iteration == self.start_iteration

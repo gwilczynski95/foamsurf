@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from training.config import ExperimentConfig
-from training.end_to_end import atomic_json
+from training.config import atomic_json
 from training.warmup_profile import WarmupProfile
 
 def transfer_medium(payload,device,color_activation='dc'):
@@ -84,7 +84,25 @@ def run_stage(output,stage):
             medium=transfer_medium(payload,config.device,
                 manifest.get('medium_color_activation','dc'))
             dataset=load_dataset(config.dataset.source_path,resolution=config.dataset.resolution,
-                                 device=config.device,llffhold=config.dataset.llffhold)
+                                 device=config.device,llffhold=config.dataset.llffhold,
+                                 validation_hold=config.dataset.validation_hold)
+            if config.model.medium_initial_color_from_data:
+                mean=torch.stack([c.foreground.reshape(-1,3).mean(0) for c in dataset.train]).mean(0)
+                medium.set_uniform_color_(mean)
+            if config.model.medium_initial_water_fit!='off':
+                from training.water_fit import fit_water_from_dataset
+                # Coefficients only: the cells keep their colour, so fit beta_B for that colour.
+                kept=None if config.model.medium_initial_water_fit=='all' else medium.colors[0].detach().cpu().numpy()
+                fit=fit_water_from_dataset(dataset,config.dataset.source_path,b_inf=kept)
+                medium.set_uniform_coefficients_(torch.tensor(fit['beta_d']),torch.tensor(fit['beta_b']))
+                if config.model.medium_initial_water_fit=='all':
+                    medium.set_uniform_color_(torch.tensor(fit['b_inf']))
+                atomic_json(output/'water_fit.json',fit)
+            else:
+                # No fit (Blender scenes have no COLMAP tracks): a nearly clear medium, every cell at
+                # medium_initial_density, instead of the warmup's random placeholder density.
+                density=torch.full((3,),float(config.model.medium_initial_density))
+                medium.set_uniform_coefficients_(density,density)
             points,colors=dataset.initial_point_cloud()
             gaussians=SurfaceGaussianModel(points,colors,config.model,config.device)
             config.model.gaussian_initial_points=len(points)

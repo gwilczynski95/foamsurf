@@ -5,43 +5,26 @@ Only run-stage implementation imports the GPU trainer. Configuration and
 orchestration are usable on CPU; no external RadFoam checkpoint is involved.
 """
 from copy import deepcopy
-from dataclasses import fields, is_dataclass
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 
 import yaml
-from training.config import ExperimentConfig
+from training.config import ExperimentConfig, atomic_json, drop_legacy_keys, update_config
 from training.warmup_profile import WarmupProfile
 from evaluation.surface_partition import variants
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def update_config(obj, changes):
-    """Strict recursive overrides, with the same field names as stage YAMLs."""
-    names = {f.name for f in fields(obj)}
-    for key, value in changes.items():
-        if key not in names:
-            raise ValueError(f'Unknown configuration field: {key}')
-        if is_dataclass(getattr(obj, key)):
-            if not isinstance(value, dict):
-                raise ValueError(f'{key} must be a mapping')
-            update_config(getattr(obj, key), value)
-        else:
-            setattr(obj, key, value)
-
-
-def atomic_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + '\n')
-    os.replace(temporary, path)
+# Sections of a SeaThru-style manifest that configure the joint-stage priors (training/colmap_joint_trainer.py).
+PRIOR_SECTIONS = ('medium_fix', 'rgb_surface', 'rgb_smoothing', 'capacity_loss')
 
 
 class EndToEndConfig:
+    priors = None  # None: the plain joint stage (training/trainer.py); else the PRIOR_SECTIONS for MediumFixTrainer
+
     def __init__(self, warmup, profile, joint, partition, handoff, output_dir):
         self.warmup, self.profile, self.joint = warmup, profile, joint
         self.partition, self.handoff = partition, handoff
@@ -49,10 +32,69 @@ class EndToEndConfig:
         self.validate()
 
     @classmethod
-    def load(cls, path, output_dir=None):
+    def load(cls, path, output_dir=None, overrides=()):
+        """overrides: ``section.key.path=yaml_value`` items, section one of warmup, joint (stage fields), both
+        (the same field in warmup and joint), profile, partition, handoff; the field must exist."""
         path = Path(path).resolve()
         raw = yaml.safe_load(path.read_text())
-        if set(raw) - {'output_dir', 'common', 'warmup', 'joint', 'partition', 'handoff'}:
+        loaded = cls._from_raw(raw, path, output_dir)
+        for item in overrides or ():
+            loaded._override(item)
+        loaded.validate()
+        return loaded
+
+    def _override(self, item):
+        key, separator, text = item.partition('=')
+        section, _, rest = key.partition('.')
+        if not separator or not rest:
+            raise ValueError(f'Override must look like section.key.path=value: {item!r}')
+        value = yaml.safe_load(text)
+        targets = {'warmup': [self.warmup], 'joint': [self.joint], 'both': [self.warmup, self.joint],
+                   'profile': [self.profile]}.get(section)
+        if targets is not None:
+            for target in targets:
+                node, keys = target, rest.split('.')
+                for name in keys[:-1]:
+                    node = getattr(node, name)
+                if not hasattr(node, keys[-1]):
+                    raise KeyError(f'Unknown override path: {key}')
+                setattr(node, keys[-1], value)
+        elif section in ('partition', 'handoff') and rest in getattr(self, section):
+            getattr(self, section)[rest] = value
+        elif self.priors is not None and section in self.priors and rest in self.priors[section]:
+            self.priors[section][rest] = value
+        else:
+            raise KeyError(f'Unknown override path: {key}')
+
+    @classmethod
+    def _from_raw(cls, raw, path, output_dir):
+        if 'priors' in raw:
+            return cls._from_raw_with_priors(raw, path, output_dir)
+        return cls._from_raw_plain(raw, path, output_dir)
+
+    @classmethod
+    def _from_raw_with_priors(cls, raw, path, output_dir):
+        """The joint stage and its priors from a SeaThru-style configuration (``priors.config``, e.g. seathru.yaml,
+        resolved with ``priors.overrides``); the scene, background and seed are the warmup's."""
+        import tempfile
+        from train import resolve_iui3
+        section = raw['priors']
+        if set(section) - {'config', 'overrides'} or 'joint' in raw:
+            raise ValueError('priors takes config and overrides, and replaces the joint section')
+        with tempfile.TemporaryDirectory() as scratch:
+            resolved = resolve_iui3(path.parent / section['config'], Path(scratch) / 'run',
+                                    overrides=list(section.get('overrides') or []))
+        joint = ExperimentConfig()
+        update_config(joint, drop_legacy_keys({k: v for k, v in resolved['joint'].items() if k != 'output_dir'}))
+        plain = dict(raw)
+        plain['joint'] = {'inline': {}}
+        loaded = cls._from_raw_plain(plain, path, output_dir, joint=joint)
+        loaded.priors = {name: resolved[name] for name in PRIOR_SECTIONS}
+        return loaded
+
+    @classmethod
+    def _from_raw_plain(cls, raw, path, output_dir, joint=None):
+        if set(raw) - {'output_dir', 'common', 'warmup', 'joint', 'partition', 'handoff', 'priors'}:
             raise ValueError('Unknown end-to-end configuration field')
         stages = []
         for name in ['warmup', 'joint']:
@@ -62,7 +104,9 @@ class EndToEndConfig:
                 raise ValueError(f'Unknown {name} field')
             if ('config' in section) == ('inline' in section):
                 raise ValueError(f'{name} needs exactly one of config or inline')
-            if 'inline' in section:
+            if name == 'joint' and joint is not None:
+                config = joint
+            elif 'inline' in section:
                 config = ExperimentConfig()
                 update_config(config, section['inline'])
             else:
@@ -70,6 +114,10 @@ class EndToEndConfig:
             update_config(config, raw.get('common', {}))
             update_config(config, section.get('overrides', {}))
             stages.append(config)
+        if joint is not None:  # the joint stage trains on the warmup's scene, background and seed
+            joint.dataset = deepcopy(stages[0].dataset)
+            joint.background = list(stages[0].background)
+            joint.seed = stages[0].seed
         profile = WarmupProfile.from_dict(raw['warmup']['profile'])
         partition = dict(method='weighted_valley_w1_s2', batch_size=8192, image_views=4)
         partition.update(raw.get('partition', {}))
@@ -87,10 +135,8 @@ class EndToEndConfig:
             raise ValueError('Joint stage must be hybrid')
         if self.joint.voronoi_adaptation.enabled:
             raise ValueError('End-to-end baseline preserves all retained Voronoi cells; disable joint population adaptation')
-        if self.joint.voronoi_warmup.enabled or self.joint.medium_handoff.prefix_mode != 'none':
-            raise ValueError('Joint stage cannot have a second warmup/prefix')
-        if self.warmup.radfoam_prior.enabled or self.joint.radfoam_prior.enabled:
-            raise ValueError('Native end-to-end training cannot import a RadFoam prior')
+        if self.joint.voronoi_warmup.enabled:
+            raise ValueError('Joint stage cannot have a second warmup')
         if self.warmup.dataset != self.joint.dataset or self.warmup.background != self.joint.background:
             raise ValueError('Warmup and joint dataset/background must match')
         if self.warmup.seed != self.joint.seed:
@@ -115,9 +161,12 @@ class EndToEndConfig:
             raise ValueError('Warmup must reach base resolution before partitioning')
 
     def manifest(self):
-        return dict(warmup=self.warmup.as_dict(), profile=self.profile.as_dict(),
-                    joint=self.joint.as_dict(), partition=self.partition,
-                    handoff=self.handoff, output_dir=self.output_dir)
+        manifest = dict(warmup=self.warmup.as_dict(), profile=self.profile.as_dict(),
+                        joint=self.joint.as_dict(), partition=self.partition,
+                        handoff=self.handoff, output_dir=self.output_dir)
+        if self.priors is not None:
+            manifest['priors'] = self.priors
+        return manifest
 
 
 class EndToEndTrainer:
@@ -133,7 +182,10 @@ class EndToEndTrainer:
         if root.exists() and any(root.iterdir()):
             if not resume:
                 raise FileExistsError(f'Nonempty output: {root}; use --resume to continue')
-            if json.loads((root/'pipeline_config.json').read_text()) != manifest:
+            saved = json.loads((root/'pipeline_config.json').read_text())
+            for name in ('warmup', 'joint'):
+                saved[name] = drop_legacy_keys(saved[name])
+            if saved != manifest:
                 raise ValueError('Resume requires the same resolved end-to-end configuration')
         else:
             root.mkdir(parents=True, exist_ok=True)
@@ -190,6 +242,12 @@ def run_stage(root, stage):
         from training.native_handoff import initialize_native_hybrid
         config = ExperimentConfig.load(root/'joint.yaml')
         last = root/'joint/checkpoints/last.pt'
+        priors = manifest.get('priors')
+        if priors is not None:  # the current joint stage: RGB medium and the surface-medium priors
+            from training.colmap_joint_trainer import MediumFixTrainer
+            kwargs = dict(medium_fix=priors['medium_fix'], capacity=priors['capacity_loss'],
+                          surface=priors['rgb_surface'], smoothing=priors['rgb_smoothing'])
+            Trainer = lambda config, **more: MediumFixTrainer(config, **more, **kwargs)  # noqa: E731
         if last.exists():
             trainer = Trainer(config, resume=last)
         else:

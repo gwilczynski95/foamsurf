@@ -266,3 +266,240 @@ def masked_direct_consistency(gaussian_image, direct_image, gaussian_alpha, thre
     difference = F.smooth_l1_loss(gaussian_image, direct_image.detach(), reduction="none")
     loss = (difference * selected).sum() / (3 * selected.sum().clamp_min(1))
     return loss, selected.mean().detach()
+
+
+# Removed medium_fix options and their inactive values, still present in
+# manifests and resume sidecars written before the cleanup.
+_LEGACY_MEDIUM_FIX = {
+    "color_mode": "per_cell", "coverage_weight": 0.0, "proximity_multiplier": 1.0,
+    "surface_coverage_context": None, "water_clear_context": None, "hole_fill_at": None,
+}
+_LEGACY_MEDIUM_FIX_PREFIXES = ("coverage_", "proximity_")
+
+
+def drop_legacy_medium_fix(values):
+    """Return medium_fix settings without inactive removed options."""
+
+    values = dict(values)
+    # Ancillary settings have no effect while their removed mechanism is disabled.
+    for key in ("surface_coverage_context", "water_clear_context", "hole_fill_at"):
+        if values.get(key) is not None:
+            raise ValueError(f"medium_fix.{key}={values[key]!r} is no longer supported")
+    for key in list(values):
+        if key.startswith("hole_fill_") or key in {"context_from", "context_window"}:
+            del values[key]
+            continue
+        if key in _LEGACY_MEDIUM_FIX or key.startswith(_LEGACY_MEDIUM_FIX_PREFIXES):
+            if key in _LEGACY_MEDIUM_FIX and values[key] != _LEGACY_MEDIUM_FIX[key]:
+                raise ValueError(f"medium_fix.{key}={values[key]!r} is no longer supported")
+            del values[key]
+    return values
+
+
+@dataclass(frozen=True)
+class MediumFixConfig:
+    """Seabed/backscatter priors of the IUI3 joint stage, all off by default.
+
+    Every prior uses the same random subset of ``prior_rays`` training rays and
+    one Gaussian-only render of it.
+    """
+    prior_rays: int = 131072
+    # Backscatter chroma prior: on rays where Gaussians are opaque, backscatter
+    # should have the water's color (any brightness); see backscatter_chroma_loss.
+    chroma_weight: float = 0.0
+    chroma_start: int = 1000
+    chroma_ramp: int = 1000
+    chroma_margin_degrees: float = 5.0
+    chroma_alpha_threshold: float = 0.5
+    chroma_water_alpha: float = 0.01
+    chroma_ema: float = 0.99
+    # One-sided coverage: on rays already covered more than surface_coverage_threshold
+    # by Gaussians, penalize the uncovered rest (1 - alpha). Open-water rays are untouched.
+    surface_coverage_weight: float = 0.0
+    surface_coverage_start: int = 1000
+    surface_coverage_ramp: int = 1000
+    surface_coverage_threshold: float = 0.5
+    # Iteration from which the coverage loss is off again (None: never).
+    surface_coverage_end: int | None = None
+    # Water clearing, the mirror of the coverage loss: on rays whose Gaussian-only
+    # alpha is still below water_clear_threshold, penalize that alpha (push it to 0).
+    # Starts after the opacity-pruning ramp has removed the initial Gaussians from the water.
+    water_clear_weight: float = 0.0
+    water_clear_start: int = 4000
+    water_clear_ramp: int = 2000
+    water_clear_threshold: float = 0.3
+    # Medium under the seabed: render the medium alone from just behind the depth
+    # where Gaussians become opaque and penalize any backscatter produced there.
+    under_surface_weight: float = 0.0
+    under_surface_start: int = 1000
+    under_surface_ramp: int = 1000
+    under_surface_threshold: float = 0.5
+    under_surface_offset: float = 0.01
+    # Homogeneous water at the cameras: medium cells in free water (nearest Gaussian farther than
+    # camera_water_free x the median spacing of the training cameras) within camera_water_radius x that
+    # spacing of a training camera are pulled to the median free water far from the cameras (log
+    # coefficients and raw colour). Without it each camera's cell turns into a per-photo brightness knob
+    # (JG: 0.06-2.6x the water's attenuation, up to 7x its backscatter) that leaks into nearby test views.
+    camera_water_weight: float = 0.0
+    camera_water_start: int = 1000
+    camera_water_ramp: int = 1000
+    camera_water_radius: float = 2.0
+    camera_water_free: float = 1.0
+    camera_water_refresh: int = 250
+    # Water attenuation anchored to the fit on the COLMAP tracks (training/water_fit.py, needs
+    # joint.model.medium_initial_water_fit): the mean log attenuation of the free water far from the cameras
+    # pulled to the fitted beta_D. The same point seen from several distances fixes beta_D; during training
+    # the medium otherwise drifts to about half of it and the Gaussian colours take the rest (foggy Garden:
+    # fit 0.75 / 1.28, truth 0.60 / 1.10, trained medium 0.27 / 0.53).
+    water_anchor_weight: float = 0.0
+    water_anchor_start: int = 0
+    water_anchor_ramp: int = 0
+
+    def __post_init__(self):
+        if type(self.prior_rays) is not int or self.prior_rays < 1:
+            raise ValueError('Invalid medium_fix.prior_rays')
+        for prefix in ('chroma', 'surface_coverage', 'under_surface', 'water_clear', 'camera_water', 'water_anchor'):
+            weight = getattr(self, f'{prefix}_weight')
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError(f'Invalid medium_fix.{prefix}_weight')
+            for name in (f'{prefix}_start', f'{prefix}_ramp'):
+                if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                    raise ValueError(f'Invalid medium_fix.{name}')
+        if not 0 <= self.chroma_margin_degrees < 90:
+            raise ValueError('medium_fix.chroma_margin_degrees must be in [0, 90)')
+        if not 0 < self.chroma_water_alpha < self.chroma_alpha_threshold < 1:
+            raise ValueError('medium_fix needs 0 < chroma_water_alpha < chroma_alpha_threshold < 1')
+        if not 0 <= self.chroma_ema < 1:
+            raise ValueError('medium_fix.chroma_ema must be in [0, 1)')
+        for prefix in ('surface_coverage', 'under_surface', 'water_clear'):
+            if not 0 < getattr(self, f'{prefix}_threshold') < 1:
+                raise ValueError(f'medium_fix.{prefix}_threshold must be in (0, 1)')
+        end = self.surface_coverage_end
+        if end is not None and (type(end) is not int or end <= self.surface_coverage_start):
+            raise ValueError('medium_fix.surface_coverage_end must be an iteration after surface_coverage_start')
+        if (self.water_clear_weight > 0 and self.surface_coverage_weight > 0
+                and self.water_clear_threshold >= self.surface_coverage_threshold):
+            # Both losses would pull the same rays in opposite directions.
+            raise ValueError('medium_fix.water_clear_threshold must be below surface_coverage_threshold')
+        if not math.isfinite(self.under_surface_offset) or self.under_surface_offset < 0:
+            raise ValueError('medium_fix.under_surface_offset must be non-negative')
+        if not (self.camera_water_radius > 0 and self.camera_water_free >= 0
+                and type(self.camera_water_refresh) is int and self.camera_water_refresh >= 1):
+            raise ValueError('medium_fix needs camera_water_radius > 0, camera_water_free >= 0, refresh >= 1')
+
+    def as_dict(self):
+        return asdict(self)
+
+    def chroma_weight_at(self, iteration):
+        return ramp_weight(self.chroma_weight, iteration, self.chroma_start, self.chroma_ramp)
+
+    def surface_coverage_weight_at(self, iteration):
+        if self.surface_coverage_end is not None and iteration >= self.surface_coverage_end:
+            return 0.0
+        return ramp_weight(self.surface_coverage_weight, iteration, self.surface_coverage_start,
+                           self.surface_coverage_ramp)
+
+    def water_clear_weight_at(self, iteration):
+        return ramp_weight(self.water_clear_weight, iteration, self.water_clear_start, self.water_clear_ramp)
+
+    def under_surface_weight_at(self, iteration):
+        return ramp_weight(self.under_surface_weight, iteration, self.under_surface_start,
+                           self.under_surface_ramp)
+
+    def camera_water_weight_at(self, iteration):
+        return ramp_weight(self.camera_water_weight, iteration, self.camera_water_start, self.camera_water_ramp)
+
+    def water_anchor_weight_at(self, iteration):
+        return ramp_weight(self.water_anchor_weight, iteration, self.water_anchor_start, self.water_anchor_ramp)
+
+
+def water_anchor_loss(coefficients, reference, attenuation):
+    """Squared distance (summed over RGB) of the mean log attenuation of the cells in ``reference`` to
+    log ``attenuation`` [3]; only the level of the water moves, the cells keep their differences.
+    None when ``reference`` is empty."""
+    if not bool(reference.any()):
+        return None
+    level = torch.log(coefficients[reference, :3].clamp_min(1e-8)).mean(0)
+    return ((level - torch.log(attenuation.to(level).clamp_min(1e-8))) ** 2).sum()
+
+
+def camera_water_loss(coefficients, raw_color, near, reference):
+    """Mean squared distance of the cells in ``near`` to the median of the cells in ``reference`` (detached):
+    log optical coefficients [N, 6] and raw colours [N, 3]. None when either set is empty."""
+    if not bool(near.any()) or not bool(reference.any()):
+        return None
+    log = torch.log(coefficients.clamp_min(1e-8))
+    with torch.no_grad():
+        target_log = log[reference].median(0).values
+        target_color = raw_color[reference].median(0).values
+    return ((log[near] - target_log) ** 2).mean() + ((raw_color[near] - target_color) ** 2).mean()
+
+
+def water_direction(backscatter, gaussian_alpha, water_alpha):
+    """Unit RGB direction of backscatter summed over open-water rays, or None."""
+    water = gaussian_alpha.reshape(-1) < water_alpha
+    if not bool(water.any()):
+        return None
+    total = backscatter.reshape(-1, 3)[water].detach().sum(0)
+    norm = total.norm()
+    return None if float(norm) <= 1e-8 else total / norm
+
+
+def backscatter_chroma_loss(backscatter, gaussian_alpha, water, alpha_threshold=0.5, margin_degrees=5.0):
+    """Hue mismatch between backscatter and water on rays that hit opaque Gaussians.
+
+    Per ray: sin^2 of the angle between the RGB backscatter vector and the
+    water direction, minus the margin, clamped at 0. It is invariant to the
+    backscatter's brightness, so darkening the haze cannot lower it; rays are
+    weighted by their detached brightness so near-black, ill-defined hues do
+    not dominate. Returns (loss, mean angle in degrees over selected rays).
+    """
+    backscatter = backscatter.reshape(-1, 3)
+    selected = gaussian_alpha.reshape(-1).detach() > alpha_threshold
+    zero = backscatter.sum() * 0
+    if water is None or not bool(selected.any()):
+        return zero, float('nan')
+    values = backscatter[selected]
+    norm = values.norm(dim=-1).clamp_min(1e-8)
+    cosine = ((values @ water.to(values)) / norm).clamp(-1, 1)
+    sine2 = (1 - cosine * cosine).clamp_min(0)
+    excess = (sine2 - math.sin(math.radians(margin_degrees)) ** 2).clamp_min(0)
+    weight = norm.detach()
+    weight = weight / weight.mean().clamp_min(1e-8)
+    angle = float(torch.rad2deg(torch.acos(cosine.detach())).mul(weight).mean())
+    return (weight * excess).mean(), angle
+
+
+def surface_coverage_loss(alpha, threshold=0.5):
+    """Mean (1 - A) over rays whose Gaussian-only alpha A already exceeds ``threshold``.
+
+    Pushes partly covered seabed rays to full coverage; rays below the
+    threshold (open water, silhouettes) get no gradient. Returns (loss, fraction).
+    """
+    alpha = alpha.reshape(-1)
+    selected = alpha.detach() > threshold
+    if not bool(selected.any()):
+        return alpha.sum() * 0, 0.0
+    return (1 - alpha[selected]).mean(), float(selected.float().mean())
+
+
+def water_clear_loss(alpha, threshold=0.3):
+    """Mean A over rays whose Gaussian-only alpha A is still below ``threshold``.
+
+    Mirror of surface_coverage_loss: pushes Gaussians off open-water rays;
+    rays at or above the threshold (seabed, its silhouette) get no gradient.
+    Returns (loss, fraction of rays selected).
+    """
+    alpha = alpha.reshape(-1)
+    selected = alpha.detach() < threshold
+    if not bool(selected.any()):
+        return alpha.sum() * 0, 0.0
+    return alpha[selected].mean(), float(selected.float().mean())
+
+
+def under_surface_loss(backscatter):
+    """Mean backscatter intensity produced behind the opaque Gaussian surface."""
+    backscatter = backscatter.reshape(-1, 3)
+    if backscatter.shape[0] == 0:
+        return backscatter.sum() * 0
+    return backscatter.mean()

@@ -89,4 +89,78 @@ void hybrid_backward_cuda(
     float *raw_kappa_grad,
     const void *stream);
 
+void surface_hit_cuda(uint32_t num_rays,
+                      uint32_t hit_buffer_size,
+                      float near_plane,
+                      float far_plane,
+                      const float *hit_depths,
+                      const int32_t *hit_indices,
+                      float *surface_depth,
+                      int32_t *surface_index,
+                      const void *stream);
+
+// RGB medium: per-channel attenuation and backscatter [V,3] in one traversal.
+struct RgbSceneTensors {
+    const float *points;
+    const float *attenuation;
+    const float *backscatter;
+    const float *medium_colors;
+    const uint32_t *adjacency;
+    const uint32_t *offsets;
+    const float *rays;
+    const uint32_t *start_points;
+    const float *hit_depths;
+    const int32_t *hit_indices;
+    const float *means;
+    const float *log_scales;
+    const float *quaternions;
+    const float *gaussian_colors;
+    const float *opacity_logits;
+    const float *raw_kappa;
+    // Optional (nullptr = off), forward only: per-ray far plane [R], clamped
+    // to settings.far_plane. Used by the visualization tracer to stop a ray
+    // at an inserted object.
+    const float *ray_far = nullptr;
+};
+
+struct RgbGradientTensors {
+    float *points;
+    float *attenuation;
+    float *backscatter;
+    float *medium_colors;
+    float *means;
+    float *log_scales;
+    float *quaternions;
+    float *gaussian_colors;
+    float *opacity_logits;
+    float *raw_kappa;
+    // Optional (nullptr = off): camera right/down [2,3] and the per-Gaussian
+    // sum over rays of |dL/dmean . right|, |dL/dmean . down| [N,2].
+    const float *screen_axes = nullptr;
+    float *means_screen_abs = nullptr;
+};
+
+void rgb_forward_cuda(
+    const HybridLaunchSettings &settings,
+    const RgbSceneTensors &scene,
+    const float *background,
+    float *direct_output,
+    float *backscatter_output,
+    float *transmission_output,
+    uint32_t *output_num_intersections,
+    const void *stream,
+    const float *water_intervals = nullptr);
+
+void rgb_backward_cuda(
+    const HybridLaunchSettings &settings,
+    const RgbSceneTensors &scene,
+    const float *direct_output,
+    const float *backscatter_output,
+    const float *transmission_output,
+    const float *direct_output_grad,
+    const float *backscatter_output_grad,
+    const float *transmission_output_grad,
+    const RgbGradientTensors &gradients,
+    const void *stream);
+
 } // namespace foamsurf

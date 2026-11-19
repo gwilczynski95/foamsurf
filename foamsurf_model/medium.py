@@ -168,13 +168,38 @@ class VoronoiMediumModel(nn.Module):
 
     @property
     def optical_coefficients(self) -> torch.Tensor:
-        return F.softplus(self.raw_density)
+        return self._homogenized(F.softplus(self.raw_density))
 
     @property
     def colors(self) -> torch.Tensor:
         if getattr(self, "color_activation", "sigmoid") == "dc":
-            return (0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0)
-        return torch.sigmoid(self.raw_color)
+            return self._homogenized((0.5 + 0.28209479177387814 * self.raw_color).clamp_min(0))
+        return self._homogenized(torch.sigmoid(self.raw_color))
+
+    def _homogenized(self, values: torch.Tensor) -> torch.Tensor:
+        """With ``homogeneous`` (model.medium_homogeneous, an ablation): every cell gets the mean over all cells."""
+        if not getattr(self, "homogeneous", False):
+            return values
+        return values.mean(0, keepdim=True).expand_as(values)
+
+    @torch.no_grad()
+    def set_uniform_color_(self, color: torch.Tensor) -> None:
+        """Every cell gets this RGB colour (in [0, 1]) through the colour activation."""
+        color = color.to(self.raw_color).clamp(1e-4, 1 - 1e-4)
+        if getattr(self, "color_activation", "sigmoid") == "dc":
+            raw = (color - 0.5) / 0.28209479177387814
+        else:
+            raw = torch.logit(color)
+        self.raw_color.copy_(raw.expand_as(self.raw_color))
+
+    @torch.no_grad()
+    def set_uniform_coefficients_(self, attenuation: torch.Tensor, backscatter: torch.Tensor) -> None:
+        """Every cell gets these RGB attenuation and backscatter coefficients (through softplus)."""
+        if not self.is_rgb:
+            raise ValueError("uniform RGB coefficients need the rgb_backscatter medium")
+        values = torch.cat((attenuation, backscatter)).to(self.raw_density).clamp_min(1e-6)
+        raw = values + torch.log(-torch.expm1(-values))  # inverse softplus
+        self.raw_density.copy_(raw.expand_as(self.raw_density))
 
     def render_scene(self) -> VoronoiScene:
         if self.is_rgb:

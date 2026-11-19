@@ -30,7 +30,9 @@ def generate_camera_rays(
     fov_x: float,
     fov_y: float,
     intrinsics=None,
+    pixel_offsets: torch.Tensor | None = None,
 ) -> RayBundle:
+    """Rays through the pixel centres, or through centre + pixel_offsets [H, W, 2] (x, y in pixels)."""
     device = origin.device
     dtype = origin.dtype
     y, x = torch.meshgrid(
@@ -38,6 +40,9 @@ def generate_camera_rays(
         torch.arange(width, device=device, dtype=dtype),
         indexing="ij",
     )
+    if pixel_offsets is not None:
+        x = x + pixel_offsets[..., 0].to(dtype)
+        y = y + pixel_offsets[..., 1].to(dtype)
     dx = (-0.5 + (x + 0.5) / width) * (2.0 * torch.tan(
         torch.tensor(0.5 * fov_x, device=device, dtype=dtype)
     ))
@@ -69,7 +74,9 @@ def generate_indexed_rays(
     width: int,
     height: int,
     intrinsics=None,
+    pixel_offsets: torch.Tensor | None = None,
 ) -> RayBundle:
+    """Rays through the pixel centres, or through centre + pixel_offsets [R, 2] (x, y in pixels)."""
     flat_indices = flat_indices.to(torch.int64)
     pixels_per_camera = width * height
     camera_indices = torch.div(
@@ -82,6 +89,9 @@ def generate_indexed_rays(
     dtype = origins.dtype
     x = x.to(dtype)
     y = y.to(dtype)
+    if pixel_offsets is not None:
+        x = x + pixel_offsets[:, 0].to(dtype)
+        y = y + pixel_offsets[:, 1].to(dtype)
     tan_x = torch.tan(0.5 * fov_x[camera_indices])
     tan_y = torch.tan(0.5 * fov_y[camera_indices])
     dx = (-0.5 + (x + 0.5) / width) * (2.0 * tan_x)

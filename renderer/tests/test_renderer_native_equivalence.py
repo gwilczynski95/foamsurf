@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 def _load_flare_native():
     renderer_dir = (
-        Path(__file__).resolve().parents[1] / "foamsurf" / "_optix"
+        Path(__file__).resolve().parents[1] / "foamsurf" / "_optix_k64"
     )
     module = renderer_dir / "PYOPTIXFLARERENDERER.so"
     if not module.is_file():

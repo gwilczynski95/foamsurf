@@ -113,6 +113,25 @@ class Evaluator:
         self.config = config
         self.layer_ground_truth = layer_ground_truth
         self.output_dir = output_dir
+        # Optional camera model applied to the hybrid image: callable(image [H, W, 3], camera) -> image.
+        self.camera_isp = None
+        self.water_light = None  # callable(image, backscatter, rays) -> image: the trained water light terms
+
+    def finish_image(self, result, camera, rays):
+        """The same water-light and camera response for training evaluation and public rendering."""
+        raw = (result.image if self.water_light is None or result.backscatter is None
+               else self.water_light(result.image, result.backscatter, rays))
+        image = raw if self.camera_isp is None else self.camera_isp(raw, camera)
+        return raw, image.clamp(0.0, 1.0)
+
+    def render_frame(self, camera, rays, gaussians, medium, *, fast=False):
+        """Render a frame with geometry already set; fast omits surface diagnostics and input checks."""
+        medium = None if self.config.representation_mode == "gaussian_only" else medium
+        result = self.renderer.render(rays, gaussians=gaussians, voronoi=medium,
+                                      background=tuple(self.config.background),
+                                      surface=not fast, check_inputs=not fast)
+        raw, image = self.finish_image(result, camera, rays)
+        return result, raw, image
 
     @torch.no_grad()
     def _timed(self, operation):
@@ -131,6 +150,8 @@ class Evaluator:
         dict[str, np.ndarray],
         dict[str, torch.Tensor],
     ]:
+        # The OptiX geometry is built outside PyTorch's allocator: give its cached blocks back first.
+        torch.cuda.empty_cache()
         original_threshold = self.renderer.transmittance_threshold
         self.renderer.transmittance_threshold = (
             self.config.renderer.validation_transmittance_threshold
@@ -143,6 +164,8 @@ class Evaluator:
         directory.mkdir(parents=True, exist_ok=True)
 
         medium_scene = self.model.medium.render_scene()
+        # gaussian_only never trains the medium: the main ("hybrid") image is the Gaussians alone.
+        hybrid_medium = None if self.config.representation_mode == "gaussian_only" else medium_scene
         self.topology.synchronize_renderer(
             self.renderer, self.model.medium
         )
@@ -176,7 +199,7 @@ class Evaluator:
                     lambda: self.renderer.render(
                         rays,
                         gaussians=gaussian_scene,
-                        voronoi=medium_scene,
+                        voronoi=hybrid_medium,
                         background=tuple(self.config.background),
                     )
                 )
@@ -187,7 +210,7 @@ class Evaluator:
                         lambda: self.renderer.render(
                             rays,
                             gaussians=gaussian_scene,
-                            voronoi=medium_scene,
+                            voronoi=hybrid_medium,
                             background=tuple(self.config.background),
                             collect_diagnostics=True,
                             diagnostic_target=target,
@@ -209,7 +232,7 @@ class Evaluator:
                     )
                 )
 
-                hybrid_image = hybrid.image.clamp(0.0, 1.0)
+                hybrid_raw, hybrid_image = self.finish_image(hybrid, camera, rays)
                 gaussian_image = gaussian.image.clamp(0.0, 1.0)
                 medium_image = medium.image.clamp(0.0, 1.0)
                 error = (hybrid_image - target).abs()
@@ -325,11 +348,12 @@ class Evaluator:
                         gaussian_statistics[:, 3],
                         diagnostics.gaussian[:, 3],
                     )
-                    medium_statistics[:, :4] += diagnostics.medium[:, :4]
-                    medium_statistics[:, 4] = torch.maximum(
-                        medium_statistics[:, 4],
-                        diagnostics.medium[:, 4],
-                    )
+                    if hybrid_medium is not None:  # gaussian_only renders no cells
+                        medium_statistics[:, :4] += diagnostics.medium[:, :4]
+                        medium_statistics[:, 4] = torch.maximum(
+                            medium_statistics[:, 4],
+                            diagnostics.medium[:, 4],
+                        )
                     gaussian_weight = diagnostics.gaussian_weight
                     medium_weight = diagnostics.medium_weight
                     total_weight = gaussian_weight + medium_weight

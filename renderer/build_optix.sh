@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
 
-# Local CUDA/OptiX build for the standalone FoamSurf renderer:
-#   - /shared/results/gmwilczn/conda/envs/foamsurf
-#   - CUDA 12.4
-#   - NVIDIA OptiX SDK 8.0.0
-#   - RTX 4090 (compute capability 8.9)
-
 set -Eeuo pipefail
 
 trap 'echo "Build failed at line ${LINENO}." >&2' ERR
 
 PROJECT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RENDERER_DIRECTORY="$PROJECT_DIRECTORY/third_party/flare_renderer"
-HIT_BUFFER_SIZE="${HIT_BUFFER_SIZE:-16}"
-OUTPUT_DIRECTORY="${OPTIX_OUTPUT_DIRECTORY:-$PROJECT_DIRECTORY/foamsurf/_optix}"
+HIT_BUFFER_SIZE="${HIT_BUFFER_SIZE:-64}"
+OUTPUT_DIRECTORY="${OPTIX_OUTPUT_DIRECTORY:-$PROJECT_DIRECTORY/foamsurf/_optix_k$HIT_BUFFER_SIZE}"
 
 case "$HIT_BUFFER_SIZE" in
     16|32|64|128|256) ;;
@@ -23,27 +17,13 @@ case "$HIT_BUFFER_SIZE" in
         ;;
 esac
 
-CONDA_ENV_PATH="${CONDA_ENV_PATH:-/shared/results/gmwilczn/conda/envs/foamsurf}"
-OPTIX_DIRECTORY="${OPTIX_DIRECTORY:-${FOAMSURF_OPTIX_DIRECTORY:-/shared/results/gmwilczn/drivers/NVIDIA-OptiX-SDK-8.0.0-linux64-x86_64}}"
-DRIVER_LIBRARY_DIRECTORY="${FOAMSURF_DRIVER_LIBRARY_DIRECTORY:-/usr/lib/x86_64-linux-gnu}"
-CUDA_ARCH="${CUDA_ARCH:-89}"
+source "$PROJECT_DIRECTORY/../scripts/build_env.sh"
+DRIVER_LIBRARY_DIRECTORY="$FOAMSURF_DRIVER_LIBRARY_DIRECTORY"
 CXX="${CXX:-g++}"
-
-if [[ ! -d "$CONDA_ENV_PATH" ]]; then
-    echo "Error: conda environment does not exist: $CONDA_ENV_PATH" >&2
-    echo "Set CONDA_ENV_PATH to the foamsurf environment and retry." >&2
-    exit 1
-fi
-
-CONDA_ENV_PATH="$(cd -- "$CONDA_ENV_PATH" && pwd)"
-PYTHON="${PYTHON:-$CONDA_ENV_PATH/bin/python}"
-CUDA_DIRECTORY="${CUDA_DIRECTORY:-${CUDA_HOME:-$CONDA_ENV_PATH}}"
+CUDA_DIRECTORY="${CUDA_DIRECTORY:-$CUDA_HOME}"
 NVCC="$CUDA_DIRECTORY/bin/nvcc"
-
-export PATH="$CONDA_ENV_PATH/bin:$PATH"
 export CUDA_HOME="$CUDA_DIRECTORY"
 export CUDA_PATH="$CUDA_DIRECTORY"
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.9}"
 
 if [[ ! -x "$PYTHON" ]]; then
     echo "Error: Python was not found in the conda environment: $PYTHON" >&2
