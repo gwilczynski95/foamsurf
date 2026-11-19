@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def commands(package, scene, out, width=960, view=None, preview=False, breaking=False, impact_strength=3., end_hold=0., dynamics=False, final_wave_scale=1., final_rise=0., rise_seconds=5., post_rise_hold=0.):
@@ -14,7 +14,7 @@ def commands(package, scene, out, width=960, view=None, preview=False, breaking=
     data = package / 'data' / scene
     if not (run / 'joint/checkpoints/last.pt').is_file() or not data.is_dir():
         raise ValueError(f'Missing checkpoint or dataset for {scene} in {package}')
-    common = [sys.executable, '-m', 'examples.edit', 'drain', '--run', str(run),
+    common = [sys.executable, '-m', 'examples.editing.edit', 'drain', '--run', str(run),
               '--scene', str(data), '--width', str(width)]
     if view:
         common += ['--view', view]

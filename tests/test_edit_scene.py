@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 
-from examples import edit as E
+from examples.editing import edit as E
 from foamsurf_model.gaussian_adaptation import _quaternion_rotation
 
 

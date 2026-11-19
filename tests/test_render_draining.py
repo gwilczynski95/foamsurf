@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 import sys
 import pytest
-from examples.render_draining import commands
+from examples.draining.render_draining import commands
 
 
 def package(tmp_path):
@@ -29,7 +29,7 @@ def test_pipeline_dependencies_and_preview(tmp_path):
 
 def test_all_dry_run_works_outside_repository(tmp_path):
     root=package(tmp_path/'package')
-    script=Path(__file__).resolve().parents[1]/'examples/render_draining.py'
+    script=Path(__file__).resolve().parents[1]/'examples/draining/render_draining.py'
     out=tmp_path/'renders'
     result=subprocess.run([sys.executable,str(script),'--package',str(root),'--all','--out',str(out),'--dry-run'],cwd=tmp_path,text=True,capture_output=True,check=True)
     assert result.stdout.count('stage ')==6

@@ -1,7 +1,7 @@
 """Image/text-guided style transfer of a trained FoamSurf run, separately for the Gaussians or the Voronoi medium.
 
-    python -m examples.stylize --run RUN --scene DATA --target gaussians --style-image fire.jpg --out OUT
-    python -m examples.stylize --run RUN --scene DATA --target voronoi --style-image starry_night.jpg --out OUT
+    python -m examples.style.stylize --run RUN --scene DATA --target gaussians --style-image fire.jpg --out OUT
+    python -m examples.style.stylize --run RUN --scene DATA --target voronoi --style-image starry_night.jpg --out OUT
     python -m examples.style.compose_style --gaussians OUT_G --medium OUT_V --out OUT_BOTH      # both stylized in one scene
     python render.py --run OUT_BOTH --scene DATA --views all --modes full,gaussians,voronoi
 

@@ -1,6 +1,6 @@
 """A clip of a trained FoamSurf scene with ray-traced objects, the camera gliding along the diver's path.
 
-    python -m examples.insert --run RUN --scene DATA --shot examples/shots/demo/underwater_objects.json --out renders/clips/NAME
+    python -m examples.insertion.insert --run RUN --scene DATA --shot examples/insertion/shots/demo/underwater_objects.json --out renders/clips/NAME
 
 Shot file (JSON):
   {"anchor_view": "MTN_1296",                 # test view used to place the objects
@@ -52,10 +52,10 @@ import torch.nn.functional as F
 from PIL import Image
 
 import render  # noqa: E402
-from examples.raytrace.mesh import Mesh, load_manifest, mirror_panel
-from examples.raytrace.placement import (place_mesh_on_seabed, tilt_local, place_on_seabed, anchor_point, build_school, near_point, place_mesh_in_water, place_mesh_near, seabed_point, spot_axis)
-from examples.raytrace.tracer import SceneTracer, render_camera
-from examples.raytrace.shading import Sphere, TraceSettings, TraceStats
+from examples.insertion.mesh import Mesh, load_manifest, mirror_panel
+from examples.insertion.placement import (place_mesh_on_seabed, tilt_local, place_on_seabed, anchor_point, build_school, near_point, place_mesh_in_water, place_mesh_near, seabed_point, spot_axis)
+from examples.insertion.tracer import SceneTracer, render_camera
+from examples.insertion.shading import Sphere, TraceSettings, TraceStats
 
 
 def catmull_rom(points: torch.Tensor, samples: int) -> torch.Tensor:
@@ -301,9 +301,9 @@ def _raise_ray_buffer(rays: int):
 
 
 def build_sun(tracer, anchor, spec: dict):
-    """examples.raytrace.sun.Sun from the shot's "sun" entry; azimuth_from_view_deg is measured from the anchor's viewing direction;
+    """examples.insertion.sun.Sun from the shot's "sun" entry; azimuth_from_view_deg is measured from the anchor's viewing direction;
     surface_above_camera: the water surface that far above the anchor camera (along up) instead of "surface"."""
-    from examples.raytrace.sun import Sun
+    from examples.insertion.sun import Sun
     spec = {k: tuple(v) if isinstance(v, list) else v for k, v in spec.items()}
     relative = spec.pop("azimuth_from_view_deg", None)
     above = spec.pop("surface_above_camera", None)

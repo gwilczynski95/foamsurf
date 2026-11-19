@@ -2,7 +2,7 @@
 medium), without retraining. Each edit starts from the loaded model, is rendered from one camera and, with --save,
 written as a run directory that render.py loads like any trained run.
 
-    python -m examples.edit --run RUN --scene DATA --view CAM --edits bulge,relief,clear,haze --out DIR [--save MODELS]
+    python -m examples.editing.edit --run RUN --scene DATA --view CAM --edits bulge,relief,clear,haze --out DIR [--save MODELS]
 
 Frame. Edits are defined in a frame fitted to the reef visible from --view (reef_frame): c = mean of the visible
 surface points (the 10% farthest from their median dropped), n = normal of their least-squares plane (towards the

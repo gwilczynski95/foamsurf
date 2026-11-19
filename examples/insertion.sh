@@ -3,4 +3,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export PYTHONPATH="$PWD/renderer:$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
-python -m examples.insert --run "$1" --scene "$2" --assets assets --shot examples/shots/demo/underwater_objects.json --out "${3:-renders/insertion}" --still
+python -m examples.insertion.insert --run "$1" --scene "$2" --assets assets --shot examples/insertion/shots/demo/underwater_objects.json --out "${3:-renders/insertion}" --still

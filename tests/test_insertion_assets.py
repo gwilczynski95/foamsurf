@@ -6,13 +6,13 @@ import pytest
 
 pytest.importorskip("warp", reason="insertion requires the optional --with-apps dependencies")
 
-from examples.insert import resolve_assets
+from examples.insertion.insert import resolve_assets
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_paper_shots_only_reference_relative_assets():
-    shots = ROOT / 'examples/shots'
+    shots = ROOT / 'examples/insertion/shots'
     found = []
     for path in shots.rglob('*.json'):
         shot = json.loads(path.read_text())

@@ -249,9 +249,9 @@ Training); `RUN` is its run directory and `DATA` its dataset. Each example is on
 | `examples/style.sh RUN DATA STYLE_IMAGE` | Stylizes the water and the surface after your own image, combines and renders them |
 | `examples/draining.sh PACKAGE VIEW` | Lowers the water level with an animated water surface; see [docs/DRAINING.md](docs/DRAINING.md) |
 
-The scripts call `python -m examples.insert`, `examples.edit`, `examples.stylize` and `examples.render_draining`;
-run any of them with `--help` for all options. Insertion shots are JSON files in `examples/shots/`, described at the
-top of `examples/insert.py`. No style images are provided.
+The scripts call `python -m examples.insertion.insert`, `examples.editing.edit`, `examples.style.stylize` and `examples.draining.render_draining`;
+run any of them with `--help` for all options. Insertion shots are JSON files in `examples/insertion/shots/`, described at the
+top of `examples/insertion/insert.py`. No style images are provided.
 
 ## Code from other projects
 

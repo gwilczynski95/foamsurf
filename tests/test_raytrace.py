@@ -23,8 +23,8 @@ def test_tracer_matches_renderer(scene):
 def check(run):
     import torch
     from render import load_run, render_view
-    from examples.raytrace.tracer import SceneTracer, render_camera
-    from examples.raytrace.shading import Sphere, TraceSettings
+    from examples.insertion.tracer import SceneTracer, render_camera
+    from examples.insertion.shading import Sphere, TraceSettings
     trainer = load_run(Path(run))
     camera = trainer.dataset.test[0]
     tracer = SceneTracer(trainer, camera.origin)
