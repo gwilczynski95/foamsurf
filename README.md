@@ -1,4 +1,31 @@
-# FoamSurf
+<h1 align="center">FoamSurf: A Voronoi-Surfel Representation for Differentiable Rendering</h1>
+
+<p align="center">
+  <a href="https://github.com/gwilczynski95">Grzegorz Wilczyński<sup>1,3</sup></a>,
+  <a href="https://scholar.google.com/citations?user=drMAA2UAAAAJ">Julia Farganus<sup>4</sup></a>,
+  <a href="https://scholar.google.com/citations?user=ef2YKtsAAAAJ&hl=pl&oi=sra">Krzysztof Byrski<sup>1</sup></a>,
+  <a href="https://scholar.google.com/citations?user=DGiaI64AAAAJ">Rafał Tobiasz<sup>1,3</sup></a>,
+  <a href="https://github.com/MikolajZielinski">Mikołaj Zieliński<sup>2</sup></a>,
+  <a href="https://scholar.google.com/citations?user=3XvUbbMAAAAJ&hl=en">Dominik Belter<sup>2</sup></a>,
+  <a href="https://scholar.google.com/citations?user=0kp0MbgAAAAJ&hl=en">Przemysław Spurek<sup>1,3</sup></a>
+</p>
+
+<p align="center">
+  <a href="https://en.uj.edu.pl/en"><sup>1</sup>Jagiellonian University</a>,
+  <a href="https://put.poznan.pl/en"><sup>2</sup>Poznań University of Technology</a>,
+  <a href="https://www.ideas.edu.pl/en/"><sup>3</sup>IDEAS Research Institute</a>,
+  <a href="https://pwr.edu.pl/en/"><sup>4</sup>Wrocław University of Science and Technology</a>
+</p>
+
+<p align="center">
+  <img src="images/teaser.jpg" width="100%"/>
+</p>
+
+# Abstract
+
+Scenes inside a scattering medium contain solid surfaces, such as the seabed or rocks, and a semi-transparent medium, such as water, fog, or smoke. Recent Gaussian-based methods produce realistic images of scenes in scattering media, but traces of the medium can remain visible in surface-only renders. Neural fields separate surfaces and medium more accurately, but they are slow to train and difficult to edit. Both approaches evaluate the medium only along camera rays, so its effects along reflected and refracted rays are not modeled. These limitations prevent reliable surface recovery, independent editing of surfaces and the medium, and consistent rendering of inserted objects. We present FoamSurf, a hybrid representation that models surfaces with planar Gaussian surfels and the medium with space-filling Voronoi cells. A single differentiable ray tracer composites both along arbitrary rays, while training priors keep them separate without segmentation masks. Across real underwater scenes, synthetic scenes, and dense fog, FoamSurf achieves image quality on par with the state of the art and the most accurate surface–medium separation among the compared methods. The recovered components can be removed, edited, or stylized independently, and the same reconstruction supports inserted mesh objects with attenuation and scattering along both direct and reflected or refracted rays. Together, these capabilities enable scene restoration, editing, and composition within a single reconstructed model.
+
+# Overview
 
 FoamSurf represents underwater scenes with two components rendered by a shared CUDA/OptiX ray tracer:
 
@@ -81,7 +108,7 @@ camera reconstruction and image set as the paper runs; rerunning SfM can change 
 
 ### Synthetic scenes
 
-> **TODO (link):** download the synthetic dataset from <LINK> and unpack it into data/synthetic/.
+Download the [synthetic dataset](https://ujchmura-my.sharepoint.com/:u:/g/personal/grzegorz_wilczynski_doctoral_uj_edu_pl/IQAtjL9iYCyTTISUT1mvB2w-ARoV3fFxI-FsHFM1w20TBXo?e=BPXwDG) (`foamsurf_synthetic.zip`) and unpack it into `data/`.
 
 Set `FS_SYNTHETIC` if it is stored elsewhere. The required layout is:
 
@@ -98,7 +125,7 @@ across layers. Do not rename `ficus_object` to `ficus_ficus`.
 
 ### Foggy Garden
 
-> **TODO (link):** download the foggy Garden dataset from <LINK> and unpack it into data/foggy_garden/.
+Download the [foggy Garden dataset](https://ujchmura-my.sharepoint.com/:u:/g/personal/grzegorz_wilczynski_doctoral_uj_edu_pl/IQDx61nYPEZPSr4U8uPUro4pAbeop-ENhuMqXo2V845GL64?e=1WfR2Y) (`foamsurf_foggy_garden.zip`) and unpack it into `data/`.
 
 It contains `garden_easy/` and `garden_hard/`. `scripts/make_foggy_garden.py --help` documents how the fog
 is generated from clear Garden images, camera depths and a COLMAP model. Set `FS_FOGGY` if it is stored elsewhere.
@@ -106,13 +133,13 @@ is generated from clear Garden images, camera depths and a COLMAP model. Set `FS
 ### Masks for the separation metric
 
 The separation score uses one `<scene>.npz` water/seabed mask per SeaThru scene under `assets/masks/`
-(or `FS_MASKS`). Masks are used only for evaluation, never in training. Generate them with
+(or `FS_MASKS`). Masks are used only for evaluation, never in training. They are in the demo asset package; to regenerate them, use
 `scripts/sam_water_mask.py` (Segment Anything).
 
 ### Demo assets
 
-> **TODO (link):** download the demo asset package (meshes and textures for the insertion demo) from <LINK>
-> and unpack it into assets/.
+Download the [demo asset package](https://ujchmura-my.sharepoint.com/:u:/g/personal/grzegorz_wilczynski_doctoral_uj_edu_pl/IQCFLgzr73kpR5sXhkMzFo7wAaemyvhPZKJCYImMoTinwsU?e=WQC0Su) (`foamsurf_demo_assets.zip`: insertion meshes and the
+SeaThru separation masks) and unpack it into the repository root, which creates `assets/`.
 
 ## Training
 
@@ -256,3 +283,15 @@ top of `examples/insertion/insert.py`. No style images are provided.
 ## Code from other projects
 
 See [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) and [docs/METHOD.md](docs/METHOD.md) for the implementation.
+
+## Citation
+
+```bibtex
+@article{foamsurf,
+  title   = {FoamSurf: A Voronoi-Surfel Representation for Differentiable Rendering},
+  author  = {Wilczy{\'n}ski, Grzegorz and Farganus, Julia and Byrski, Krzysztof and Tobiasz, Rafa{\l} and
+             Zieli{\'n}ski, Miko{\l}aj and Belter, Dominik and Spurek, Przemys{\l}aw},
+  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  year    = {2026}
+}
+```
