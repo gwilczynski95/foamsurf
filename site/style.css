@@ -777,3 +777,6 @@ footer>span,footer>a:last-child{
 .results-table thead th{font-weight:600;}
 .results-table tr.ours td{background:rgba(40,140,220,.12);}
 .results-table tr.ours td:first-child{font-weight:600;}
+
+/* method video slot (YouTube embed goes here) */
+.method-video .video-slot,.method-video iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:18px;display:flex;align-items:center;justify-content:center;background:#02121d;color:rgba(255,255,255,.7);}
