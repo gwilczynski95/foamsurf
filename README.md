@@ -5,7 +5,7 @@
   <a href="https://scholar.google.com/citations?user=drMAA2UAAAAJ">Julia Farganus<sup>4</sup></a>,
   <a href="https://scholar.google.com/citations?user=ef2YKtsAAAAJ&hl=pl&oi=sra">Krzysztof Byrski<sup>1</sup></a>,
   <a href="https://scholar.google.com/citations?user=DGiaI64AAAAJ">Rafał Tobiasz<sup>1,3</sup></a>,
-  <a href="https://github.com/MikolajZielinski">Mikołaj Zieliński<sup>2</sup></a>,
+  <a href="https://github.com/MikolajZielinski">Mikołaj Zieliński<sup>2,5</sup></a>,
   <a href="https://scholar.google.com/citations?user=3XvUbbMAAAAJ&hl=en">Dominik Belter<sup>2</sup></a>,
   <a href="https://scholar.google.com/citations?user=0kp0MbgAAAAJ&hl=en">Przemysław Spurek<sup>1,3</sup></a>
 </p>
@@ -14,7 +14,8 @@
   <a href="https://en.uj.edu.pl/en"><sup>1</sup>Jagiellonian University</a>,
   <a href="https://put.poznan.pl/en"><sup>2</sup>Poznań University of Technology</a>,
   <a href="https://www.ideas.edu.pl/en/"><sup>3</sup>IDEAS Research Institute</a>,
-  <a href="https://pwr.edu.pl/en/"><sup>4</sup>Wrocław University of Science and Technology</a>
+  <a href="https://pwr.edu.pl/en/"><sup>4</sup>Wrocław University of Science and Technology</a>,
+  <a href="https://ai.uj.edu.pl/en/start_en"><sup>5</sup>Jagiellonian Center for Artificial Intelligence</a>
 </p>
 
 <p align="center">
