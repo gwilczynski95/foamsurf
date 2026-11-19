@@ -18,6 +18,11 @@
 </p>
 
 <p align="center">
+  <a href="#"><img src="https://img.shields.io/badge/arXiv-coming%20soon-b31b1b.svg" alt="arXiv"></a>
+  <a href="#"><img src="https://img.shields.io/badge/🌐-Project%20Page-blue" alt="Project Page"></a>
+</p>
+
+<p align="center">
   <img src="images/teaser.jpg" width="100%"/>
 </p>
 
