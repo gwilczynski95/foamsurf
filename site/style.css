@@ -782,3 +782,4 @@ footer>span,footer>a:last-child{
 .method-video .video-slot,.method-video iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:18px;display:flex;align-items:center;justify-content:center;background:#02121d;color:rgba(255,255,255,.7);}
 .film-caption{margin:3rem 0 -1rem;}
 .film-caption h3{margin:.3rem 0;}
+.result-figure video{width:100%;display:block;border-radius:12px;}
