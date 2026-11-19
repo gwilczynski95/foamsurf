@@ -1,4 +1,4 @@
-from apps.draining.reef_interaction import late_wave_strength
+from examples.draining.reef_interaction import late_wave_strength
 
 
 def test_late_waves_grow_smoothly_without_changing_early_animation():
@@ -13,7 +13,7 @@ def test_late_waves_grow_smoothly_without_changing_early_animation():
 def test_contact_foam_persists_then_decays_and_emits_finite_spray():
     from types import SimpleNamespace
     import torch
-    from apps.draining.reef_interaction import ReefInteraction
+    from examples.draining.reef_interaction import ReefInteraction
     y,x=torch.meshgrid(torch.linspace(-.1,.1,48),torch.linspace(-.1,.1,48),indexing='ij')
     origins=torch.stack((x.flatten(),y.flatten(),1+.7*x.flatten()),-1)
     directions=torch.tensor([0.,0.,-1.]).expand_as(origins)

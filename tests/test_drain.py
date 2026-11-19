@@ -1,5 +1,5 @@
 import torch
-from apps.draining.drain import water_intervals
+from examples.draining.drain import water_intervals
 
 
 def test_water_intervals_enter_exit_parallel_and_outside():
@@ -11,7 +11,7 @@ def test_water_intervals_enter_exit_parallel_and_outside():
 
 
 def test_final_level_rise_changes_only_last_five_seconds():
-    from apps.draining.drain import final_level_rise
+    from examples.draining.drain import final_level_rise
     values=[final_level_rise(i,574,24,.4,5) for i in range(574)]
     assert all(v==0 for v in values[:455])
     assert values[455]>0
@@ -22,7 +22,7 @@ def test_final_level_rise_changes_only_last_five_seconds():
 
 
 def test_post_rise_tail_keeps_original_timing_and_holds_level():
-    from apps.draining.drain import final_level_rise
+    from examples.draining.drain import final_level_rise
     original=[final_level_rise(i,574,24,.4,5) for i in range(574)]
     extended=[final_level_rise(i,574,24,.4,5) for i in range(814)]
     assert extended[:574]==original

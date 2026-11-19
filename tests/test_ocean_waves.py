@@ -1,5 +1,5 @@
 import torch
-from apps.draining.ocean_waves import OceanWaves
+from examples.draining.ocean_waves import OceanWaves
 
 
 def test_ocean_is_periodic_deterministic_and_continuous():

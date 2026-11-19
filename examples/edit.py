@@ -2,7 +2,7 @@
 medium), without retraining. Each edit starts from the loaded model, is rendered from one camera and, with --save,
 written as a run directory that render.py loads like any trained run.
 
-    python edit.py --run RUN --scene DATA --view CAM --edits bulge,relief,clear,haze --out DIR [--save MODELS]
+    python -m examples.edit --run RUN --scene DATA --view CAM --edits bulge,relief,clear,haze --out DIR [--save MODELS]
 
 Frame. Edits are defined in a frame fitted to the reef visible from --view (reef_frame): c = mean of the visible
 surface points (the 10% farthest from their median dropped), n = normal of their least-squares plane (towards the
@@ -428,7 +428,7 @@ def apply_edit(trainer, camera, f, edit: str, args) -> list[str]:
             raise SystemExit("transplant needs --transplant-from RUN")
         transplant(m, args.transplant_from)
     elif edit == "haze":
-        from apps.editing.medium import subdivide_medium
+        from examples.editing.medium import subdivide_medium
         subdivide_medium(trainer, args.medium_split, 0.25, 0)
         colour = args.haze_colour if args.haze_colour == "patches3d" else tuple(float(x) for x in args.haze_colour.split(","))
         haze(trainer.model.medium, f, strength=args.haze_strength, rise=args.haze_rise, colour=colour,
@@ -519,7 +519,7 @@ def main(argv=None) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "drain":
-        from apps.draining.drain import main as drain_main
+        from examples.draining.drain import main as drain_main
         del sys.argv[1]
         drain_main()
     else:

@@ -154,16 +154,16 @@ def main():
         schedule_levels = np.array([x["level"] for x in schedule])
     water = None
     if a.water_surface:
-        from apps.draining.water_surface import WaterSurface
+        from examples.draining.water_surface import WaterSurface
         water = WaterSurface(t,g,m,rays,up,max(float(reef_high-reef_low),.1),surface.surface_depth)
     if water is not None and a.breaking_waves:
-        from apps.draining.reef_interaction import ReefInteraction
+        from examples.draining.reef_interaction import ReefInteraction
         water.duration=a.frames/a.fps
         water.final_wave_scale=a.final_wave_scale
         water.impact_strength=a.impact_strength
         water.breaking=ReefInteraction(water,camera)
         if a.surface_dynamics:
-            from apps.draining.surface_dynamics import ShallowWater
+            from examples.draining.surface_dynamics import ShallowWater
             proxy=water.breaking
             water.dynamics=ShallowWater(proxy.terrain,proxy.reliable,proxy.lower,proxy.extent,water.scale)
     reference_levels = None

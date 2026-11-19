@@ -80,10 +80,10 @@ are visualizations. Separation uses provided masks only at evaluation time. Synt
 layer and transmittance evaluations use the separate ground-truth layers. FPS uses the
 paper's K=32 renderer; training uses K=64.
 
-[Insertion](../apps/raytrace/) traces objects through a frozen reconstruction.
+[Insertion](../examples/raytrace/) traces objects through a frozen reconstruction.
 [Editing](../edit.py) changes surfel geometry or medium parameters without retraining.
 [Style transfer](../stylize.py) optimizes a selected component with CLIP losses, then
-[composition](../apps/style/compose_style.py) combines surface and water styles from the
+[composition](../examples/style/compose_style.py) combines surface and water styles from the
 same base model. The application runner contains the available paper presets. Bounded
 medium removal/draining still requires integration. Reproduction of the paper demo is
 outside the release scope; the existing insertion shot remains an optional demo.

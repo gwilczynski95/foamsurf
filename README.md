@@ -203,7 +203,7 @@ in `tests/data/`. Update those reference files only when deliberately changing t
 | `training/water_*.py`, `camera_isp.py`, `oceansplat.py` | Water light, camera response and OceanSplat losses |
 | `evaluation/` | Shared rendering and evaluation metrics |
 | `train.py`, `render.py`, `evaluate.py` | Training, rendering and evaluation entry points |
-| `insert.py`, `edit.py`, `stylize.py`, `apps/` | Insertion, scene editing and style transfer |
+| `examples/` | Insertion, editing, draining and style transfer examples |
 
 ## Reproducing the result tables
 
@@ -236,22 +236,22 @@ and `--out DIR` selects the output root. `scripts/summarize.py TARGET --root DIR
 this repository. Fresh training varies slightly with the seed and GPU: on an RTX 4090, IUI3 seed 42 gave
 31.78 dB (31.80 in the original run), Lego hybrid black seed 42 34.21 dB (34.22) and Garden easy fog 34.07 dB (34.08).
 
-## Demos
+## Examples
 
-These scripts show how to use a trained FoamSurf model beyond novel-view synthesis. Train a model first
-(see Training), then:
+`examples/` shows what a trained FoamSurf model can do beyond novel-view synthesis. Train a model first (see
+Training); `RUN` is its run directory and `DATA` its dataset. Each example is one script:
 
-- **Object insertion and secondary rays:** `insert.py --run RUN --shot apps/raytrace/shots/demo/underwater_objects.json
-  --assets assets --out renders/demo` places meshes, mirrors, glass and lamps in the reconstructed water and
-  ray-traces reflections, refractions, shadows and scattering. Needs the demo asset package and `warp-lang`
-  (`scripts/install.sh --with-apps`). Shot files are JSON; the format is described at the top of `insert.py`.
-- **Scene editing:** `edit.py --run RUN --view VIEW --edits bulge,bend,clear,murky,haze --out renders/edits`
-  deforms the surface or edits the water. Add `--save DIR` to keep the edited models.
-- **Draining:** `edit.py drain --help` lowers the water level at render time; see [docs/DRAINING.md](docs/DRAINING.md).
-- **Style transfer:** `stylize.py --run RUN --scene DATA --target voronoi --style-image YOUR_IMAGE.jpg --out OUT`
-  stylizes the water (`--target gaussians` the surface) after your own style image or a `--style-prompt`; combine a
-  surface and a water result with `python -m apps.style.compose_style --gaussians A --medium B --out C`.
-  No style images are provided.
+| Script | What it does |
+|---|---|
+| `examples/insertion.sh RUN DATA` | Inserts meshes, mirrors, glass and lamps into the water and ray-traces reflections, refractions, shadows and scattering. Needs the demo assets in `assets/` and `scripts/install.sh --with-apps` |
+| `examples/edits.sh RUN DATA VIEW` | Deforms the surface (bulge, bend) and edits the water (clear, murky, seabed haze) |
+| `examples/haze.sh RUN DATA VIEW` | Rainbow haze patches over the seabed |
+| `examples/style.sh RUN DATA STYLE_IMAGE` | Stylizes the water and the surface after your own image, combines and renders them |
+| `examples/draining.sh PACKAGE VIEW` | Lowers the water level with an animated water surface; see [docs/DRAINING.md](docs/DRAINING.md) |
+
+The scripts call `python -m examples.insert`, `examples.edit`, `examples.stylize` and `examples.render_draining`;
+run any of them with `--help` for all options. Insertion shots are JSON files in `examples/shots/`, described at the
+top of `examples/insert.py`. No style images are provided.
 
 ## Code from other projects
 

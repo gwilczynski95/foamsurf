@@ -1,6 +1,6 @@
 import math
 import torch
-from apps.draining.surface_dynamics import ShallowWater
+from examples.draining.surface_dynamics import ShallowWater
 
 
 def make_solver(wall=False):

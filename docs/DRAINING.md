@@ -17,7 +17,7 @@ PACKAGE/
 From the repository root:
 
 ```bash
-python scripts/render_draining.py \
+python -m examples.render_draining \
   --package PACKAGE --scene IUI3-RedSea-Undistorted --view MTN_5911 --width 960 \
   --surface-dynamics --breaking-waves --impact-strength 3 \
   --end-hold 11.916666666666666 --final-wave-scale 2 \
@@ -29,4 +29,4 @@ Any other view works, e.g. `--view MTN_5903 --out outputs/draining-5903`. Add `-
 
 The pipeline runs two 240-frame calibration passes and then a final 814-frame animation at 24 fps. Results are written under `OUT/IUI3-RedSea-Undistorted/{calibration,smooth,animation}/`. The final directory contains frames, `draining.mp4`, `settings.json` and `frame_stats.json`. Surface dynamics requires consecutive frames and cannot use `--preview`.
 
-For a single stage, use `python edit.py drain --help`. The application modules live in `apps/draining/`; the native renderer accepts optional per-ray water intervals only for inference with fused RGB.
+For a single stage, use `python -m examples.edit drain --help`. The application modules live in `examples/draining/`; the native renderer accepts optional per-ray water intervals only for inference with fused RGB.

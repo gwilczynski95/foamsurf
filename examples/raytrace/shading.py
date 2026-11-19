@@ -13,7 +13,7 @@ into a Fresnel-weighted reflection and a refraction through the (water-free) sol
 continues through the water from the object's surface. The camera model (PPISP) is applied once to the final
 image, as in render.py. With no objects the result equals render.py's `raw` mode.
 
-Objects are analytic spheres (`Sphere`) and triangle meshes (`apps.raytrace.mesh.Mesh`, NVIDIA Warp BVH). Matte parts
+Objects are analytic spheres (`Sphere`) and triangle meshes (`examples.raytrace.mesh.Mesh`, NVIDIA Warp BVH). Matte parts
 (diffuse, the diffuse share of metal and ceramic) are lit by the scene itself: the radiance arriving at the
 object's centre from a few hundred directions (traced through the trained scene without the objects), times an
 ambient occlusion of the inserted objects.

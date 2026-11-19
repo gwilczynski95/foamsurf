@@ -93,7 +93,7 @@ def check_inputs(commands):
         for index, arg in enumerate(cmd):
             if arg == '--set' and 'ground_truth_path=' in cmd[index + 1]:
                 dataset(cmd[index + 1].split('=', 1)[1], splits=('test',))
-        if entry in ('train.py', 'stylize.py') or 'apps.style.compose_style' in cmd:
+        if entry in ('train.py', 'stylize.py') or 'examples.style.compose_style' in cmd:
             produced.add(Path(option('--out')))
     if errors:
         raise ValueError('Input preflight failed:\n' + '\n'.join(sorted(errors)))

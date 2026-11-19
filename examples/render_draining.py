@@ -14,7 +14,7 @@ def commands(package, scene, out, width=960, view=None, preview=False, breaking=
     data = package / 'data' / scene
     if not (run / 'joint/checkpoints/last.pt').is_file() or not data.is_dir():
         raise ValueError(f'Missing checkpoint or dataset for {scene} in {package}')
-    common = [sys.executable, str(ROOT / 'edit.py'), 'drain', '--run', str(run),
+    common = [sys.executable, '-m', 'examples.edit', 'drain', '--run', str(run),
               '--scene', str(data), '--width', str(width)]
     if view:
         common += ['--view', view]

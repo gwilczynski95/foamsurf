@@ -1,5 +1,5 @@
 import torch
-from apps.draining.water_surface import dielectric
+from examples.draining.water_surface import dielectric
 
 
 def test_normal_incidence_fresnel_and_direction():
@@ -30,7 +30,7 @@ def test_snell_law_oblique_air_to_water():
 
 def test_heightfield_intersection_flat_and_parallel():
     from types import SimpleNamespace
-    from apps.draining.water_surface import WaterSurface
+    from examples.draining.water_surface import WaterSurface
     water=WaterSurface.__new__(WaterSurface)
     water.up=torch.tensor([0.,0.,1.])
     water.scale=1.
@@ -44,7 +44,7 @@ def test_heightfield_intersection_flat_and_parallel():
 
 
 def test_final_wave_multiplier_doubles_only_the_ending():
-    from apps.draining.water_surface import final_wave_multiplier
+    from examples.draining.water_surface import final_wave_multiplier
     assert final_wave_multiplier(0,12,2)==1
     assert final_wave_multiplier(8.4,12,2)==1
     assert final_wave_multiplier(12,12,2)==2
@@ -56,7 +56,7 @@ def test_final_wave_multiplier_doubles_only_the_ending():
 
 def test_height_and_slopes_use_same_final_multiplier():
     from types import SimpleNamespace
-    from apps.draining.water_surface import WaterSurface
+    from examples.draining.water_surface import WaterSurface
     water=WaterSurface.__new__(WaterSurface)
     water.u=torch.tensor([1.,0.,0.]);water.v=torch.tensor([0.,1.,0.]);water.up=torch.tensor([0.,0.,1.]);water.time=0.
     water.ocean=SimpleNamespace(update=lambda time:None,sample=lambda x,y:(torch.ones_like(x)*.1,torch.ones_like(x)*.2,torch.ones_like(x)*.3))

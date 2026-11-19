@@ -6,7 +6,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from apps.style.style_transfer import DIRECTION_DELTA, batched_perspective_patches, crop_positions, directional_loss
+from examples.style.style_transfer import DIRECTION_DELTA, batched_perspective_patches, crop_positions, directional_loss
 
 
 def test_directional_loss_is_finite_at_the_base_render_and_flare_like_far_from_it():

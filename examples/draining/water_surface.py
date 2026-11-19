@@ -38,7 +38,7 @@ class WaterSurface:
         self.depth = depth.reshape(-1)
         self.tree = cKDTree(medium.sites.detach().cpu().numpy())
         self.time = 0.
-        from apps.draining.ocean_waves import OceanWaves
+        from examples.draining.ocean_waves import OceanWaves
         self.ocean = OceanWaves(scale,up.device)
 
     def waves(self, points):
@@ -124,7 +124,7 @@ class WaterSurface:
         self.time = time
         self.wave_multiplier=final_wave_multiplier(time,getattr(self,"duration",12.),getattr(self,"final_wave_scale",1.))
         if getattr(self,"breaking",None) is not None:
-            from apps.draining.reef_interaction import late_wave_strength
+            from examples.draining.reef_interaction import late_wave_strength
             self.ocean.strength=1+(late_wave_strength(time,self.duration)-1)*getattr(self,"impact_strength",1.)
             if getattr(self,"dynamics",None) is not None:
                 self.dynamics.update(level,time,self.ocean)

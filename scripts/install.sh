@@ -35,7 +35,7 @@ export CUDA_HOME="$PREFIX"
 export TORCH_EXTENSIONS_DIR="$ROOT/.torch_extensions"
 export PYTHONPATH="$ROOT/renderer:$ROOT/src:$ROOT:$ROOT/tests"
 if "$WITH_APPS"; then
-    "$FOAMSURF_PYTHON" -m pip install -r requirements-apps.txt
+    "$FOAMSURF_PYTHON" -m pip install -r requirements-examples.txt
 fi
 source "$ROOT/scripts/build_env.sh"
 ./build.sh

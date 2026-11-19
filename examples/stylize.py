@@ -1,8 +1,8 @@
 """Image/text-guided style transfer of a trained FoamSurf run, separately for the Gaussians or the Voronoi medium.
 
-    python stylize.py --run RUN --scene DATA --target gaussians --style-image fire.jpg --out OUT
-    python stylize.py --run RUN --scene DATA --target voronoi --style-image starry_night.jpg --out OUT
-    python -m apps.style.compose_style --gaussians OUT_G --medium OUT_V --out OUT_BOTH      # both stylized in one scene
+    python -m examples.stylize --run RUN --scene DATA --target gaussians --style-image fire.jpg --out OUT
+    python -m examples.stylize --run RUN --scene DATA --target voronoi --style-image starry_night.jpg --out OUT
+    python -m examples.style.compose_style --gaussians OUT_G --medium OUT_V --out OUT_BOTH      # both stylized in one scene
     python render.py --run OUT_BOTH --scene DATA --views all --modes full,gaussians,voronoi
 
 The objective is the CLIPGaussian loss as used by FlaRe (style_transfer.py): directional + patch CLIP terms against
@@ -40,8 +40,8 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 
-from apps.editing.medium import subdivide_medium
-from apps.style.style_transfer import StyleLoss, StyleLossConfig
+from examples.editing.medium import subdivide_medium
+from examples.style.style_transfer import StyleLoss, StyleLossConfig
 
 C0 = 0.28209479177387814
 

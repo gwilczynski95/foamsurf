@@ -1,4 +1,4 @@
-"""Paint an uncoloured STL by its connected parts and export it for insert.py (apps.raytrace.mesh.load_manifest).
+"""Paint an uncoloured STL by its connected parts and export it for insert.py (examples.raytrace.mesh.load_manifest).
 
     python scripts/export_stl.py MODEL.stl OUT_DIR [--paint paint.json]
 

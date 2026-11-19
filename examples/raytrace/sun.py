@@ -1,4 +1,4 @@
-"""Sunlight through a wavy water surface for apps/raytrace/tracer.py: caustics on the scene and light shafts in the water.
+"""Sunlight through a wavy water surface for examples/raytrace/tracer.py: caustics on the scene and light shafts in the water.
 
 The trained scene holds no sunlight (the photos were lit evenly), so the sun is an *inserted* light, like the lamps:
 
