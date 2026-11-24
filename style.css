@@ -74,9 +74,10 @@ a:focus-visible,button:focus-visible{
   font-size:22px
 }
 .brand-symbol{
-  width:32px;
-  height:32px;
-  display:block
+  width:26px;
+  height:26px;
+  display:block;
+  flex:none
 }
 .navigation nav{
   display:flex;
@@ -182,11 +183,13 @@ h1{
   max-width:760px
 }
 .authors p{
-  display:flex;
-  flex-wrap:wrap;
-  justify-content:center;
-  gap:4px 16px;
+  text-align:center;
+  line-height:1.7;
   margin:0
+}
+.authors a{
+  display:inline-block;
+  margin:0 7px
 }
 .author-list{
   font-size:15px;
@@ -778,8 +781,8 @@ footer>span,footer>a:last-child{
     gap:5px
   }
   .navigation .brand-symbol{
-    width:24px;
-    height:24px
+    width:20px;
+    height:20px
   }
   .navigation nav{
     font-size:10px;
