@@ -26,10 +26,14 @@
     <h1 id="project-title"><span class="wordmark-fallback" aria-hidden="true">FoamSurf</span><canvas id="wordmark" aria-hidden="true"></canvas><span class="sr-only">FoamSurf</span></h1>
     <p class="full-title">A Voronoi-Surfel Representation<br>for Differentiable Rendering</p>
     <p class="hero-description">One scene. Two representations.<br>Surfaces and the medium, reconstructed together.<br class="mobile-break"> Reimagined independently.</p>
-    <p class="authors-placeholder">Author list & affiliations coming soon</p>
+    <div class="authors">
+      <p class="author-list"><a href="https://grzegorzwilczynski.com">Grzegorz Wilczyński<sup>1,3</sup></a> <a href="https://scholar.google.com/citations?user=drMAA2UAAAAJ">Julia Farganus<sup>4</sup></a> <a href="https://scholar.google.com/citations?user=ef2YKtsAAAAJ&amp;hl=pl&amp;oi=sra">Krzysztof Byrski<sup>1</sup></a> <a href="https://scholar.google.com/citations?user=DGiaI64AAAAJ">Rafał Tobiasz<sup>1,3</sup></a> <a href="https://github.com/MikolajZielinski">Mikołaj Zieliński<sup>1,2,5</sup></a> <a href="https://scholar.google.com/citations?user=3XvUbbMAAAAJ&amp;hl=en">Dominik Belter<sup>2</sup></a> <a href="https://scholar.google.com/citations?user=0kp0MbgAAAAJ&amp;hl=en">Przemysław Spurek<sup>1,3</sup></a></p>
+      <p class="affiliations"><a href="https://en.uj.edu.pl/en"><sup>1</sup>Jagiellonian University</a> <a href="https://put.poznan.pl/en"><sup>2</sup>Poznań University of Technology</a> <a href="https://www.ideas.edu.pl/en/"><sup>3</sup>IDEAS Research Institute</a> <a href="https://pwr.edu.pl/en/"><sup>4</sup>Wrocław University of Science and Technology</a> <a href="https://ai.uj.edu.pl/en/start_en"><sup>5</sup>Jagiellonian Center for Artificial Intelligence</a></p>
+    </div>
     <div class="resource-pills" aria-label="Publication availability">
       <span class="pill unavailable" aria-disabled="true">Paper <span>Coming soon ↗</span></span>
-      <span class="pill unavailable" aria-disabled="true">Code <span>Release in preparation ↗</span></span>
+      <a class="pill" href="https://github.com/gwilczynski95/foamsurf">Code <span>GitHub ↗</span></a>
+      <a class="pill" href="https://www.youtube.com/watch?v=QFoWXgKC2Co">Video <span>YouTube ↗</span></a>
       <a class="pill active" href="#method">Explore the method <span aria-hidden="true">↓</span></a>
     </div>
   </div>
@@ -39,9 +43,7 @@
   <div class="section-label"><span>01 / Overview</span><span>Beyond the surface</span></div>
   <div class="intro-grid"><h2 id="overview-title">A scene is more<br>than its surfaces.</h2><div class="intro-copy"><p>Underwater, light travels through the scene before it reaches the camera. Water attenuates the surface and scatters light back toward us. Reconstructing only what is solid tells just part of the story.</p><p><strong>FoamSurf gives the surface and the medium their own representations.</strong> Planar Gaussian surfels capture the geometry and appearance of surfaces. Space-filling Voronoi cells describe the water or fog between them. A single differentiable ray tracer brings both together.</p></div></div>
   <figure class="film method-video" id="method-video">
-    <!-- Method video: replace this placeholder with the YouTube embed, e.g.
-         <iframe src="https://www.youtube-nocookie.com/embed/VIDEO_ID" title="FoamSurf method video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe> -->
-    <div class="video-slot"><span>Method video coming soon</span></div>
+    <iframe src="https://www.youtube-nocookie.com/embed/QFoWXgKC2Co" title="FoamSurf video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
   </figure>
   <div class="film-caption"><span class="eyebrow">Behind the teaser</span><h3>See how our teaser scene is composed.</h3><p>A reconstructed underwater scene, with objects, lights and reflections added directly into the learned water.</p></div>
   <figure class="film">
@@ -90,7 +92,7 @@
   </div>
 </section>
 <section class="section abstract" aria-labelledby="abstract-title"><div class="section-label"><span>05 / Abstract</span><span>The research</span></div><div class="intro-grid"><h2 id="abstract-title">Recovering a<br>world in between.</h2><div class="intro-copy"><p>Scenes inside a scattering medium contain solid surfaces, such as the seabed or rocks, and a semi-transparent medium, such as water, fog, or smoke. Recent Gaussian-based methods produce realistic images of scenes in scattering media, but traces of the medium can remain visible in surface-only renders. Neural fields separate surfaces and medium more accurately, but they are slow to train and difficult to edit.</p><p>FoamSurf models surfaces with planar Gaussian surfels and the medium with space-filling Voronoi cells. A single differentiable ray tracer composites both along arbitrary rays, while training priors keep them separate without segmentation masks. Across real underwater scenes, synthetic scenes, and dense fog, FoamSurf achieves image quality on par with the state of the art and the most accurate surface–medium separation among the compared methods in our experiments.</p><p>The recovered components can be removed, edited, or stylized independently. The same reconstruction supports inserted mesh objects with attenuation and scattering along both direct and reflected or refracted rays.</p></div></div></section>
-<section class="section resources" id="resources" aria-labelledby="resources-title"><div class="section-label"><span>06 / Resources</span><span>Coming into view</span></div><div class="section-heading"><h2 id="resources-title">More to come.</h2><p>The preprint, code release, and videos are in preparation. Links will appear here as they become available.</p></div><div class="resource-list"><div><span>Paper & citation</span><span>Preprint forthcoming</span><span aria-hidden="true">↗</span></div><div><span>Code & datasets</span><span>Release in preparation</span><span aria-hidden="true">↗</span></div><div><span>Method & application films</span><span>Coming soon</span><span aria-hidden="true">↗</span></div></div></section>
+<section class="section resources" id="resources" aria-labelledby="resources-title"><div class="section-label"><span>06 / Resources</span><span>Coming into view</span></div><div class="section-heading"><h2 id="resources-title">More to come.</h2><p>The code and the video are out. The preprint is on its way; its link will appear here.</p></div><div class="resource-list"><div><span>Paper & citation</span><span>Preprint forthcoming</span><span aria-hidden="true">↗</span></div><a href="https://github.com/gwilczynski95/foamsurf"><span>Code & datasets</span><span>GitHub</span><span aria-hidden="true">↗</span></a><a href="https://www.youtube.com/watch?v=QFoWXgKC2Co"><span>Video</span><span>YouTube</span><span aria-hidden="true">↗</span></a></div></section>
 </main>
 <footer><a class="brand" href="#top"><span class="brand-symbol" aria-hidden="true">✳</span> FoamSurf</a><span>Surfaces and the space between them.</span><a href="#top">Back to the surface ↑</a></footer>
 </body>

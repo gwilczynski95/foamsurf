@@ -177,10 +177,46 @@ h1{
 .mobile-break{
   display:none
 }
-.authors-placeholder{
+.authors{
+  margin:25px auto 27px;
+  max-width:760px
+}
+.authors p{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:4px 16px;
+  margin:0
+}
+.author-list{
+  font-size:15px;
+  color:var(--deep)
+}
+.affiliations{
   font-size:12px;
   color:var(--muted);
-  margin:25px 0 27px
+  margin-top:10px!important
+}
+.authors a{
+  color:inherit;
+  text-decoration:none;
+  border-bottom:1px solid transparent;
+  transition:border-color .2s
+}
+.authors a:hover{
+  border-bottom-color:currentColor
+}
+.authors sup{
+  font-size:.65em;
+  margin-left:1px
+}
+a.pill{
+  color:inherit;
+  text-decoration:none;
+  transition:background .2s
+}
+a.pill:not(.active):hover{
+  background:#e8f0f6
 }
 .resource-pills{
   display:flex;
@@ -518,20 +554,20 @@ h3{
 .resources{
   padding-bottom:90px
 }
-.resource-list>div{
+.resource-list>*{
   display:grid;
   grid-template-columns:1fr 1fr 30px;
   border-top:1px solid var(--line);
   padding:23px 0;
   align-items:center
 }
-.resource-list>div:last-child{
+.resource-list>*:last-child{
   border-bottom:1px solid var(--line)
 }
-.resource-list>div span:first-child{
+.resource-list>* span:first-child{
   font-size:17px
 }
-.resource-list>div span:nth-child(2){
+.resource-list>* span:nth-child(2){
   font-size:12px;
   color:var(--muted)
 }
@@ -695,14 +731,14 @@ footer>span,footer>a:last-child{
   footer>span{
     display:none
   }
-  .resource-list>div{
+  .resource-list>*{
     grid-template-columns:1fr 1fr 16px;
     gap:15px
   }
-  .resource-list>div span:first-child{
+  .resource-list>* span:first-child{
     font-size:14px
   }
-  .resource-list>div span:nth-child(2){
+  .resource-list>* span:nth-child(2){
     font-size:11px
   }
   .resources{
