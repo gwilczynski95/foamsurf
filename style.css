@@ -74,9 +74,9 @@ a:focus-visible,button:focus-visible{
   font-size:22px
 }
 .brand-symbol{
-  color:var(--red);
-  font-size:32px;
-  line-height:1
+  width:32px;
+  height:32px;
+  display:block
 }
 .navigation nav{
   display:flex;
@@ -778,7 +778,8 @@ footer>span,footer>a:last-child{
     gap:5px
   }
   .navigation .brand-symbol{
-    font-size:24px
+    width:24px;
+    height:24px
   }
   .navigation nav{
     font-size:10px;
