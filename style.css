@@ -823,3 +823,9 @@ footer>span,footer>a:last-child{
 .film-caption{margin:3rem 0 -1rem;}
 .film-caption h3{margin:.3rem 0;}
 .result-figure video{width:100%;display:block;border-radius:12px;}
+
+/* citation */
+.bibtex{position:relative;margin-top:2rem}
+.bibtex pre{margin:0;padding:24px 26px;background:#12384d;color:#e4edf3;border-radius:18px;overflow-x:auto;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.copy-bibtex{position:absolute;top:14px;right:14px;border:1px solid #93b1c5;background:#e4edf3;color:#12384d;border-radius:100px;padding:6px 14px;font-size:12px;cursor:pointer}
+.copy-bibtex:hover{background:#fff}

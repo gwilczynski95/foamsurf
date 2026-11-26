@@ -31,7 +31,7 @@
       <p class="affiliations"><a href="https://en.uj.edu.pl/en"><sup>1</sup>Jagiellonian University</a> <a href="https://put.poznan.pl/en"><sup>2</sup>Poznań University of Technology</a> <a href="https://www.ideas.edu.pl/en/"><sup>3</sup>IDEAS Research Institute</a><br><a href="https://pwr.edu.pl/en/"><sup>4</sup>Wrocław University of Science and Technology</a> <a href="https://ai.uj.edu.pl/en/start_en"><sup>5</sup>Jagiellonian Center for Artificial Intelligence</a></p>
     </div>
     <div class="resource-pills" aria-label="Publication availability">
-      <span class="pill unavailable" aria-disabled="true">Paper <span>Coming soon ↗</span></span>
+      <a class="pill" href="https://arxiv.org/abs/2611.33462">Paper <span>arXiv ↗</span></a>
       <a class="pill" href="https://github.com/gwilczynski95/foamsurf">Code <span>GitHub ↗</span></a>
       <a class="pill" href="https://www.youtube.com/watch?v=QFoWXgKC2Co">Video <span>YouTube ↗</span></a>
       <a class="pill active" href="#method">Explore the method <span aria-hidden="true">↓</span></a>
@@ -93,6 +93,19 @@
 </section>
 <section class="section abstract" aria-labelledby="abstract-title"><div class="section-label"><span>05 / Abstract</span><span>The research</span></div><div class="intro-grid"><h2 id="abstract-title">Recovering a<br>world in between.</h2><div class="intro-copy"><p>Scenes inside a scattering medium contain solid surfaces, such as the seabed or rocks, and a semi-transparent medium, such as water, fog, or smoke. Recent Gaussian-based methods produce realistic images of scenes in scattering media, but traces of the medium can remain visible in surface-only renders. Neural fields separate surfaces and medium more accurately, but they are slow to train and difficult to edit.</p><p>FoamSurf models surfaces with planar Gaussian surfels and the medium with space-filling Voronoi cells. A single differentiable ray tracer composites both along arbitrary rays, while training priors keep them separate without segmentation masks. Across real underwater scenes, synthetic scenes, and dense fog, FoamSurf achieves image quality on par with the state of the art and the most accurate surface–medium separation among the compared methods in our experiments.</p><p>The recovered components can be removed, edited, or stylized independently. The same reconstruction supports inserted mesh objects with attenuation and scattering along both direct and reflected or refracted rays.</p></div></div></section>
 </main>
+<section class="section citation" id="citation" aria-labelledby="citation-title"><div class="section-label"><span>06 / Citation</span><span>If you build on it</span></div><div class="section-heading"><h2 id="citation-title">BibTeX</h2></div><div class="bibtex"><button type="button" class="copy-bibtex">Copy</button><pre><code id="bibtex-code">@article{foamsurf,
+  title   = {FoamSurf: A Voronoi-Surfel Representation for Differentiable Rendering},
+  author  = {Wilczy{\'n}ski, Grzegorz and Farganus, Julia and Byrski, Krzysztof and Tobiasz, Rafa{\l} and
+             Zieli{\'n}ski, Miko{\l}aj and Belter, Dominik and Spurek, Przemys{\l}aw},
+  journal = {arXiv preprint arXiv:2611.33462},
+  year    = {2026}
+}</code></pre></div></section>
+<script>
+  document.querySelector('.copy-bibtex').addEventListener('click', e => {
+    navigator.clipboard?.writeText(document.getElementById('bibtex-code').textContent)
+      .then(() => { e.target.textContent = 'Copied'; setTimeout(() => e.target.textContent = 'Copy', 1500); });
+  });
+</script>
 <footer><a class="brand" href="#top"><svg class="brand-symbol" viewBox="0 0 64 64" aria-hidden="true"><defs><radialGradient id="g-b" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#e3585c"/><stop offset=".55" stop-color="#e3585c" stop-opacity=".75"/><stop offset="1" stop-color="#e3585c" stop-opacity="0"/></radialGradient></defs><path d="M10 20 31 6 53 19 57 44 32 58 8 43Z" fill="#6498b7" fill-opacity=".14" stroke="#6498b7" stroke-width="2.5" stroke-linejoin="round"/><ellipse cx="32" cy="32" rx="10.5" ry="22" transform="rotate(35 32 32)" fill="url(#g-b)"/></svg> FoamSurf</a><span>Surfaces and the space between them.</span><a href="#top">Back to the surface ↑</a></footer>
 </body>
 </html>
