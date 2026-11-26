@@ -19,8 +19,8 @@
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/arXiv-coming%20soon-b31b1b.svg" alt="arXiv"></a>
-  <a href="#"><img src="https://img.shields.io/badge/🌐-Project%20Page-blue" alt="Project Page"></a>
+  <a href="https://arxiv.org/abs/2611.33462"><img src="https://img.shields.io/badge/arXiv-2611.33462-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://grzegorzwilczynski.com/foamsurf/"><img src="https://img.shields.io/badge/🌐-Project%20Page-blue" alt="Project Page"></a>
 </p>
 
 <p align="center">
@@ -286,7 +286,7 @@ See [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) and [docs/METHOD.md](docs/METHOD.
   title   = {FoamSurf: A Voronoi-Surfel Representation for Differentiable Rendering},
   author  = {Wilczy{\'n}ski, Grzegorz and Farganus, Julia and Byrski, Krzysztof and Tobiasz, Rafa{\l} and
              Zieli{\'n}ski, Miko{\l}aj and Belter, Dominik and Spurek, Przemys{\l}aw},
-  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  journal = {arXiv preprint arXiv:2611.33462},
   year    = {2026}
 }
 ```
